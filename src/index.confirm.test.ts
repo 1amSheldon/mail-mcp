@@ -26,7 +26,15 @@ vi.mock('./utils/templates.js', () => ({
 // Self-contained mock to avoid TDZ issues with vi.mock hoisting.
 // Outer-scope references inside vi.mock factory cause TDZ errors.
 vi.mock('./services/mail.js', () => {
-  const mockSend = vi.fn().mockResolvedValue(undefined);
+  const mockSend = vi.fn().mockResolvedValue({
+    status: 'sent_and_saved',
+    smtpAccepted: true,
+    accepted: ['alice@example.com'],
+    rejected: [],
+    sentFolderSaved: true,
+    retrySafe: false,
+    nextAction: 'Do not resend this message.',
+  });
   const mockDel = vi.fn().mockResolvedValue(undefined);
   const mockMove = vi.fn().mockResolvedValue(undefined);
   const mockModify = vi.fn().mockResolvedValue(undefined);
@@ -74,6 +82,7 @@ const READ_TOOL_NAMES = [
   'list_accounts',
   'list_emails',
   'search_emails',
+  'verify_sent_message',
   'read_email',
   'list_folders',
   'get_thread',
@@ -272,6 +281,63 @@ describe('CONF-05: second write call with valid confirmationId executes', () => 
     // Consumed token is invalid — should return error, NOT confirmationRequired
     expect(thirdResult.isError).toBe(true);
     expect(thirdResult.content[0].text).toContain('invalid or expired');
+  });
+
+  it('executes the exact arguments that were confirmed, not replacement arguments', async () => {
+    const sendEmail = vi.fn().mockResolvedValue({
+      status: 'sent_and_saved',
+      smtpAccepted: true,
+      accepted: ['alice@example.com'],
+      rejected: [],
+      sentFolderSaved: true,
+      retrySafe: false,
+      nextAction: 'Do not resend this message.',
+    });
+    vi.spyOn(server as any, 'getService').mockResolvedValue({ sendEmail });
+    const first = await (server as any).dispatchTool('send_email', false, {
+      accountId: 'acc1',
+      to: 'alice@example.com',
+      subject: 'Approved subject',
+      body: 'Approved body',
+    });
+    const { confirmationId } = JSON.parse(first.content[0].text);
+
+    await (server as any).dispatchTool('send_email', false, {
+      accountId: 'acc1',
+      to: 'attacker@example.com',
+      subject: 'Changed subject',
+      body: 'Changed body',
+      confirmationId,
+    });
+
+    expect(sendEmail).toHaveBeenCalledWith(
+      'alice@example.com',
+      'Approved subject',
+      'Approved body',
+      undefined,
+      undefined,
+      undefined,
+      true
+    );
+  });
+
+  it('rejects a confirmation token issued for a different tool', async () => {
+    const first = await (server as any).dispatchTool('create_draft', false, {
+      accountId: 'acc1',
+      to: 'alice@example.com',
+      subject: 'Draft',
+      body: 'Body',
+    });
+    const { confirmationId } = JSON.parse(first.content[0].text);
+    const result = await (server as any).dispatchTool('send_email', false, {
+      accountId: 'acc1',
+      to: 'alice@example.com',
+      subject: 'Draft',
+      body: 'Body',
+      confirmationId,
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("issued for 'create_draft'");
   });
 });
 

@@ -1,20 +1,30 @@
-import { describe, it, expect, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmtpClient } from './smtp.js';
 import { EmailAccount } from '../types/index.js';
 
-vi.mock('../security/keychain.js', () => ({
-  loadCredentials: vi.fn(() => Promise.resolve('test-password'))
+const mocks = vi.hoisted(() => ({
+  compose: vi.fn(),
+  send: vi.fn(),
+  verify: vi.fn(),
+  close: vi.fn(),
 }));
 
-const mockSendMail = vi.fn().mockResolvedValue({ messageId: '<test@example.com>' });
-const mockVerify = vi.fn().mockResolvedValue(true);
+vi.mock('../security/keychain.js', () => ({
+  loadCredentials: vi.fn(() => Promise.resolve('test-password')),
+}));
 
 vi.mock('nodemailer', () => ({
   default: {
-    createTransport: vi.fn(() => ({
-      verify: mockVerify,
-      sendMail: mockSendMail,
-    })),
+    createTransport: vi.fn((options: Record<string, unknown>) => {
+      if (options.streamTransport) {
+        return { sendMail: mocks.compose };
+      }
+      return {
+        verify: mocks.verify,
+        sendMail: mocks.send,
+        close: mocks.close,
+      };
+    }),
   },
 }));
 
@@ -22,7 +32,7 @@ describe('SmtpClient', () => {
   const account: EmailAccount = {
     id: 'test-account',
     name: 'Test',
-    host: 'smtp.test.com',
+    host: 'imap.test.com',
     port: 993,
     smtpHost: 'smtp.test.com',
     smtpPort: 587,
@@ -31,93 +41,99 @@ describe('SmtpClient', () => {
     useTLS: true,
   };
 
-  it('should connect to the SMTP server', async () => {
-    const client = new SmtpClient(account);
-    await client.connect();
-    expect(mockVerify).toHaveBeenCalledTimes(1);
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.verify.mockResolvedValue(true);
+    mocks.compose.mockResolvedValue({
+      envelope: { from: 'test@test.com', to: ['recipient@example.com'] },
+      messageId: '<test@example.com>',
+      message: Buffer.from('Message-ID: <test@example.com>\r\n\r\nBody'),
+    });
+    mocks.send.mockResolvedValue({
+      accepted: ['recipient@example.com'],
+      rejected: [],
+      response: '250 queued',
+    });
   });
 
-  it('should send email without CC/BCC', async () => {
+  it('single-flights concurrent connect calls', async () => {
+    let release!: () => void;
+    mocks.verify.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
     const client = new SmtpClient(account);
-    await client.connect();
-    mockSendMail.mockClear();
-    await client.send('recipient@example.com', 'Test Subject', 'Test body');
-    expect(mockSendMail).toHaveBeenCalledTimes(1);
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.to).toBe('recipient@example.com');
-    expect(callArgs.subject).toBe('Test Subject');
-    expect(callArgs.cc).toBeUndefined();
-    expect(callArgs.bcc).toBeUndefined();
+
+    const first = client.connect();
+    const second = client.connect();
+    await Promise.resolve();
+    expect(mocks.verify).toHaveBeenCalledTimes(1);
+    release();
+    await Promise.all([first, second]);
   });
 
-  it('should include CC in mail options when provided', async () => {
+  it('sends the exact MIME buffer produced for the Sent append', async () => {
     const client = new SmtpClient(account);
     await client.connect();
-    mockSendMail.mockClear();
-    await client.send('to@example.com', 'Subject', 'Body', false, 'cc@example.com');
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.cc).toBe('cc@example.com');
-    expect(callArgs.bcc).toBeUndefined();
+    const result = await client.send('recipient@example.com', 'Subject', 'Body');
+
+    expect(mocks.compose).toHaveBeenCalledWith(expect.objectContaining({
+      to: 'recipient@example.com',
+      subject: 'Subject',
+      text: 'Body',
+    }));
+    expect(mocks.send).toHaveBeenCalledWith({
+      raw: result.rawMessage,
+      envelope: { from: 'test@test.com', to: ['recipient@example.com'] },
+    });
+    expect(result.messageId).toBe('<test@example.com>');
+    expect(result.accepted).toEqual(['recipient@example.com']);
   });
 
-  it('should include BCC in mail options when provided', async () => {
+  it('passes cc, bcc, html, and threading headers to the MIME composer', async () => {
     const client = new SmtpClient(account);
     await client.connect();
-    mockSendMail.mockClear();
-    await client.send('to@example.com', 'Subject', 'Body', false, undefined, 'bcc@example.com');
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.bcc).toBe('bcc@example.com');
-    expect(callArgs.cc).toBeUndefined();
+    const headers = { 'In-Reply-To': '<original@example.com>' };
+    await client.send(
+      'to@example.com',
+      'Subject',
+      '<b>Body</b>',
+      true,
+      'cc@example.com',
+      'bcc@example.com',
+      headers
+    );
+    expect(mocks.compose).toHaveBeenCalledWith(expect.objectContaining({
+      html: '<b>Body</b>',
+      cc: 'cc@example.com',
+      bcc: 'bcc@example.com',
+      headers,
+    }));
   });
 
-  it('should include both CC and BCC when both provided', async () => {
+  it('returns partial SMTP acceptance without hiding rejected recipients', async () => {
+    mocks.send.mockResolvedValueOnce({
+      accepted: ['ok@example.com'],
+      rejected: ['bad@example.com'],
+    });
     const client = new SmtpClient(account);
     await client.connect();
-    mockSendMail.mockClear();
-    await client.send('to@example.com', 'Subject', 'Body', false, 'cc@example.com', 'bcc@example.com');
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.cc).toBe('cc@example.com');
-    expect(callArgs.bcc).toBe('bcc@example.com');
+    const result = await client.send('ok@example.com,bad@example.com', 'Subject', 'Body');
+    expect(result.accepted).toEqual(['ok@example.com']);
+    expect(result.rejected).toEqual(['bad@example.com']);
   });
 
-  it('should send HTML body when isHtml=true', async () => {
+  it('marks send failures as outcome-unknown and resets the transport without retrying', async () => {
+    mocks.send.mockRejectedValueOnce(new Error('connection closed after DATA'));
     const client = new SmtpClient(account);
     await client.connect();
-    mockSendMail.mockClear();
-    await client.send('to@example.com', 'Subject', '<b>HTML body</b>', true);
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.html).toBe('<b>HTML body</b>');
-    expect(callArgs.text).toBeUndefined();
-  });
 
-  it('passes extraHeaders to sendMail when provided', async () => {
-    const client = new SmtpClient(account);
-    await client.connect();
-    mockSendMail.mockClear();
-    const extraHeaders = {
-      'In-Reply-To': '<original-msg-id@example.com>',
-      'References': '<original-msg-id@example.com>',
-    };
-    await client.send('to@example.com', 'Subject', 'Body', false, undefined, undefined, extraHeaders);
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.headers).toEqual(extraHeaders);
-  });
+    await expect(client.send('recipient@example.com', 'Subject', 'Body'))
+      .rejects.toMatchObject({
+        name: 'SmtpSendError',
+        messageId: '<test@example.com>',
+      });
+    expect(mocks.send).toHaveBeenCalledTimes(1);
+    expect(mocks.close).toHaveBeenCalledTimes(1);
 
-  it('does not set headers field when extraHeaders is not provided', async () => {
-    const client = new SmtpClient(account);
     await client.connect();
-    mockSendMail.mockClear();
-    await client.send('to@example.com', 'Subject', 'Body');
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.headers).toBeUndefined();
-  });
-
-  it('does not set headers field when extraHeaders is empty object', async () => {
-    const client = new SmtpClient(account);
-    await client.connect();
-    mockSendMail.mockClear();
-    await client.send('to@example.com', 'Subject', 'Body', false, undefined, undefined, {});
-    const callArgs = mockSendMail.mock.calls[0][0];
-    expect(callArgs.headers).toBeUndefined();
+    expect(mocks.verify).toHaveBeenCalledTimes(2);
   });
 });

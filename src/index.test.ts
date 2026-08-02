@@ -25,7 +25,15 @@ vi.mock('./utils/templates.js', () => ({
 const mockSearchEmails = vi.fn().mockResolvedValue([
   { id: '42', uid: 42, subject: 'Found Email', from: 'sender@example.com' }
 ]);
-const mockSendEmail = vi.fn().mockResolvedValue(undefined);
+const mockSendEmail = vi.fn().mockResolvedValue({
+  status: 'sent_and_saved',
+  smtpAccepted: true,
+  accepted: ['recipient@example.com'],
+  rejected: [],
+  sentFolderSaved: true,
+  retrySafe: false,
+  nextAction: 'Do not resend this message.',
+});
 const mockListFolders = vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts', 'Trash']);
 const mockMoveMessage = vi.fn().mockResolvedValue(undefined);
 const mockModifyLabels = vi.fn().mockResolvedValue(undefined);
@@ -34,23 +42,33 @@ const mockDisconnect = vi.fn().mockResolvedValue(undefined);
 vi.mock('./services/mail.js', () => {
   // Self-contained: no outer-scope references to avoid TDZ issues with vi.mock hoisting.
   const disconnect = vi.fn().mockResolvedValue(undefined);
-  const MockMailService = vi.fn().mockImplementation(() => ({
-    connect: vi.fn().mockResolvedValue(undefined),
-    disconnect,
-    listEmails: vi.fn().mockResolvedValue([]),
-    searchEmails: vi.fn().mockResolvedValue([
-      { id: '42', uid: 42, subject: 'Found Email', from: 'sender@example.com' },
-    ]),
-    sendEmail: vi.fn().mockResolvedValue(undefined),
-    listFolders: vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts', 'Trash']),
-    moveMessage: vi.fn().mockResolvedValue(undefined),
-    modifyLabels: vi.fn().mockResolvedValue(undefined),
-    extractContacts: vi.fn().mockResolvedValue([
-      { name: 'Alice', email: 'alice@example.com', count: 5, lastSeen: '2024-01-15T10:00:00.000Z' },
-      { name: 'Bob', email: 'bob@example.com', count: 2, lastSeen: '2024-01-10T10:00:00.000Z' },
-    ]),
-    imap: { onClose: null },
-  }));
+  const MockMailService = vi.fn().mockImplementation(function () {
+    return {
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      listEmails: vi.fn().mockResolvedValue([]),
+      searchEmails: vi.fn().mockResolvedValue([
+        { id: '42', uid: 42, subject: 'Found Email', from: 'sender@example.com' },
+      ]),
+      sendEmail: vi.fn().mockResolvedValue({
+        status: 'sent_and_saved',
+        smtpAccepted: true,
+        accepted: ['recipient@example.com'],
+        rejected: [],
+        sentFolderSaved: true,
+        retrySafe: false,
+        nextAction: 'Do not resend this message.',
+      }),
+      listFolders: vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts', 'Trash']),
+      moveMessage: vi.fn().mockResolvedValue(undefined),
+      modifyLabels: vi.fn().mockResolvedValue(undefined),
+      extractContacts: vi.fn().mockResolvedValue([
+        { name: 'Alice', email: 'alice@example.com', count: 5, lastSeen: '2024-01-15T10:00:00.000Z' },
+        { name: 'Bob', email: 'bob@example.com', count: 2, lastSeen: '2024-01-10T10:00:00.000Z' },
+      ]),
+      imap: { onClose: null },
+    };
+  });
   return { MailService: MockMailService };
 });
 
@@ -61,6 +79,19 @@ import { MailMCPServer } from './index.js';
 import { MailService } from './services/mail.js';
 import { getAccounts } from './config.js';
 import { AuditLogger } from './utils/audit-logger.js';
+
+const successfulDelivery = () => ({
+  status: 'sent_and_saved' as const,
+  smtpAccepted: true,
+  accepted: ['recipient@example.com'],
+  rejected: [],
+  messageId: '<test@example.com>',
+  sentFolder: 'Sent',
+  sentFolderSaved: true,
+  sentFolderUid: 42,
+  retrySafe: false,
+  nextAction: 'Do not resend this message.',
+});
 
 const WRITE_TOOL_NAMES = [
   'send_email',
@@ -84,6 +115,7 @@ const READ_TOOL_NAMES = [
   'list_accounts',
   'list_emails',
   'search_emails',
+  'verify_sent_message',
   'read_email',
   'list_folders',
   'get_thread',
@@ -110,16 +142,16 @@ describe('ROM-01: readOnly constructor field', () => {
 });
 
 describe('ROM-05: list-time filtering', () => {
-  it('Test C: getTools(false) returns array of length 29', () => {
+  it('Test C: getTools(false) returns array of length 30', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
-    expect(tools).toHaveLength(29);
+    expect(tools).toHaveLength(30);
   });
 
-  it('Test D: getTools(true) returns array of length 14', () => {
+  it('Test D: getTools(true) returns array of length 15', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
   });
 
   it('Test E: getTools(true) does NOT include send_email', () => {
@@ -169,11 +201,56 @@ describe('ROM-03: read tools unaffected in read-only mode', () => {
   });
 });
 
+describe('MCP runtime dispatch', () => {
+  it('the production tools/call handler delegates to the single dispatchTool path', async () => {
+    const server = new MailMCPServer(false);
+    const dispatch = vi.spyOn(server, 'dispatchTool').mockResolvedValue({
+      content: [{ type: 'text', text: 'delegated' }],
+    });
+    const handler = (server as any).server._requestHandlers.get('tools/call');
+    const result = await handler({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'tools/call',
+      params: { name: 'list_accounts', arguments: {} },
+    }, {});
+
+    expect(result.content[0].text).toBe('delegated');
+    expect(dispatch).toHaveBeenCalledWith('list_accounts', false, {});
+  });
+
+  it('marks an unknown SMTP outcome as a tool error with no success claim', async () => {
+    const server = new MailMCPServer(false);
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      sendEmail: vi.fn().mockResolvedValue({
+        status: 'smtp_outcome_unknown',
+        smtpAccepted: null,
+        accepted: [],
+        rejected: [],
+        messageId: '<unknown@example.com>',
+        sentFolderSaved: false,
+        retrySafe: false,
+        nextAction: 'Do not retry automatically.',
+      }),
+    });
+    const result = await server.dispatchTool('send_email', false, {
+      accountId: 'test',
+      to: 'recipient@example.com',
+      subject: 'Subject',
+      body: 'Body',
+    });
+    expect(result.isError).toBe(true);
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('smtp_outcome_unknown');
+    expect(payload.nextAction).toContain('Do not retry');
+  });
+});
+
 describe('ROM-06: tool annotations', () => {
-  it('Test J: all 29 tools have annotations.readOnlyHint defined', () => {
+  it('Test J: all 30 tools have annotations.readOnlyHint defined', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
-    expect(tools).toHaveLength(29);
+    expect(tools).toHaveLength(30);
     for (const tool of tools) {
       expect(tool.annotations?.readOnlyHint).toBeDefined();
     }
@@ -202,7 +279,7 @@ describe('ROM-06: tool annotations', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
     const readTools = tools.filter((t: any) => READ_TOOL_NAMES.includes(t.name));
-    expect(readTools).toHaveLength(14);
+    expect(readTools).toHaveLength(15);
     for (const tool of readTools) {
       expect(tool.annotations.readOnlyHint).toBe(true);
       expect(tool.annotations.destructiveHint).toBe(false);
@@ -278,6 +355,9 @@ describe('IMAP-03: search_emails tool', () => {
     expect(searchTool).toBeDefined();
     const props = searchTool.inputSchema.properties;
     expect(props.from).toBeDefined();
+    expect(props.to).toBeDefined();
+    expect(props.cc).toBeDefined();
+    expect(props.messageId).toBeDefined();
     expect(props.subject).toBeDefined();
     expect(props.since).toBeDefined();
     expect(props.before).toBeDefined();
@@ -290,6 +370,53 @@ describe('IMAP-03: search_emails tool', () => {
     const searchTool = tools.find((t: any) => t.name === 'search_emails');
     expect(searchTool.annotations.readOnlyHint).toBe(true);
     expect(searchTool.annotations.destructiveHint).toBe(false);
+  });
+});
+
+describe('DELIVERY-VERIFY: verify_sent_message tool', () => {
+  it('is read-only and requires accountId plus messageId', () => {
+    const server = new MailMCPServer(false);
+    const tool = (server as any).getTools(false).find((item: any) => item.name === 'verify_sent_message');
+    expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+    expect(tool.inputSchema.required).toEqual(['accountId', 'messageId']);
+  });
+
+  it('searches the resolved Sent folder by exact Message-ID', async () => {
+    const server = new MailMCPServer(false);
+    const searchEmails = vi.fn().mockResolvedValue([{ uid: 77, subject: 'Found' }]);
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      resolveSentFolder: vi.fn().mockResolvedValue('Sent Items'),
+      searchEmails,
+    });
+
+    const result = await server.dispatchTool('verify_sent_message', false, {
+      accountId: 'test',
+      messageId: '<delivery@example.com>',
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('found_in_sent');
+    expect(payload.sentFolder).toBe('Sent Items');
+    expect(searchEmails).toHaveBeenCalledWith(
+      { messageId: '<delivery@example.com>' },
+      'Sent Items',
+      10,
+      0
+    );
+  });
+
+  it('does not describe a missing Sent copy as proof of SMTP failure', async () => {
+    const server = new MailMCPServer(false);
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      resolveSentFolder: vi.fn().mockResolvedValue('Sent'),
+      searchEmails: vi.fn().mockResolvedValue([]),
+    });
+    const result = await server.dispatchTool('verify_sent_message', false, {
+      accountId: 'test',
+      messageId: '<missing@example.com>',
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload.status).toBe('not_found_in_sent');
+    expect(payload.caution).toContain('does not prove');
   });
 });
 
@@ -491,7 +618,7 @@ describe('VAL-02: email validation at dispatch layer', () => {
 
   it('send_email with valid to proceeds (does not return ValidationError)', async () => {
     const server = new MailMCPServer(false);
-    const sendEmailMock = vi.fn().mockResolvedValue(undefined);
+    const sendEmailMock = vi.fn().mockResolvedValue(successfulDelivery());
     vi.spyOn(server as any, 'getService').mockResolvedValue({ sendEmail: sendEmailMock });
     const result = await (server as any).dispatchTool('send_email', false, {
       accountId: 'test',
@@ -512,7 +639,7 @@ describe('SAFE-03: rate limiting at dispatch layer', () => {
     // Replace the internal rate limiter with a low-write-limit one
     (server as any).rateLimiter = new TieredRateLimiter({ readPoints: 100, writePoints: 1, duration: 60 });
 
-    const sendEmailMock = vi.fn().mockResolvedValue(undefined);
+    const sendEmailMock = vi.fn().mockResolvedValue(successfulDelivery());
     vi.spyOn(server as any, 'getService').mockResolvedValue({ sendEmail: sendEmailMock });
 
     // First call should succeed (valid email, 1 write point consumed)
@@ -705,6 +832,30 @@ describe('CONN-02: IMAP reconnect via close-event + getService retry', () => {
 
     const result = await (server as any).getService('acc1');
     expect(result).toBe(newService);
+  });
+
+  it('single-flights concurrent service creation for the same account', async () => {
+    const server = new MailMCPServer(false);
+    let release!: (service: unknown) => void;
+    const service = { imap: { onClose: null }, disconnect: vi.fn() };
+    const creation = vi.spyOn(server as any, '_createAndCacheService')
+      .mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+
+    const first = (server as any).getService('acc1');
+    const second = (server as any).getService('acc1');
+    expect(creation).toHaveBeenCalledTimes(1);
+    release(service);
+    await expect(Promise.all([first, second])).resolves.toEqual([service, service]);
+  });
+
+  it('a stale close callback cannot evict a newer cached service', async () => {
+    const server = new MailMCPServer(false);
+    const first = await (server as any)._createAndCacheService('acc1');
+    const staleClose = first.imap.onClose;
+    const second = await (server as any)._createAndCacheService('acc1');
+
+    staleClose();
+    expect((server as any).services.get('acc1')).toBe(second);
   });
 
   it('two consecutive connect failures throw NetworkError with "after reconnect attempt"', async () => {
@@ -957,13 +1108,13 @@ describe('MARK-01: mark_read/unread/star/unstar tool registration', () => {
   it('getTools(false) now returns 25 tools (was 25, +4 mark/star tools)', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
-    expect(tools).toHaveLength(29);
+    expect(tools).toHaveLength(30);
   });
 
   it('getTools(true) now returns 16 tools (now 14, write tools hidden)', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
   });
 
   it('each mark/star tool requires accountId and uid', () => {
@@ -1161,7 +1312,7 @@ describe('THREAD-04: forward_email tool schema', () => {
 describe('THREAD-05: reply_email and forward_email handler dispatch', () => {
   it('reply_email handler calls service.replyEmail and returns success text', async () => {
     const server = new MailMCPServer(false);
-    const replyEmailMock = vi.fn().mockResolvedValue(undefined);
+    const replyEmailMock = vi.fn().mockResolvedValue(successfulDelivery());
     vi.spyOn(server as any, 'getService').mockResolvedValue({ replyEmail: replyEmailMock });
     const result = await (server as any).dispatchTool('reply_email', false, {
       accountId: 'test',
@@ -1171,12 +1322,12 @@ describe('THREAD-05: reply_email and forward_email handler dispatch', () => {
     });
     expect(replyEmailMock).toHaveBeenCalledOnce();
     expect(result.isError).not.toBe(true);
-    expect(result.content[0].text.toLowerCase()).toContain('reply');
+    expect(JSON.parse(result.content[0].text).status).toBe('sent_and_saved');
   });
 
   it('forward_email handler calls service.forwardEmail and returns success text', async () => {
     const server = new MailMCPServer(false);
-    const forwardEmailMock = vi.fn().mockResolvedValue(undefined);
+    const forwardEmailMock = vi.fn().mockResolvedValue(successfulDelivery());
     vi.spyOn(server as any, 'getService').mockResolvedValue({ forwardEmail: forwardEmailMock });
     const result = await (server as any).dispatchTool('forward_email', false, {
       accountId: 'test',
@@ -1187,7 +1338,7 @@ describe('THREAD-05: reply_email and forward_email handler dispatch', () => {
     });
     expect(forwardEmailMock).toHaveBeenCalledOnce();
     expect(result.isError).not.toBe(true);
-    expect(result.content[0].text).toContain('forward');
+    expect(JSON.parse(result.content[0].text).status).toBe('sent_and_saved');
   });
 
   it('forward_email with invalid to returns [ValidationError]', async () => {

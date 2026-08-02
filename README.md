@@ -124,6 +124,7 @@ security add-generic-password \
 | `user` | string | yes | Login username / email address |
 | `authType` | string | yes | `login` or `oauth2` |
 | `useTLS` | boolean | yes | `true` for implicit TLS on IMAP; `false` for STARTTLS |
+| `sentFolder` | string | no | Explicit Sent folder path; otherwise IMAP special-use discovery falls back to `Sent` |
 
 **OAuth2** — after starting the server, call the `register_oauth2_account` MCP tool:
 
@@ -177,7 +178,8 @@ Use `"command": "mail-mcp"` if installed globally, or `"command": "npx", "args":
 |------|-------------|
 | `list_accounts` | List all configured email accounts |
 | `list_emails` | List recent emails from a folder with metadata and snippets |
-| `search_emails` | Search emails by sender, subject, date range, or keywords |
+| `search_emails` | Search emails by sender, recipient, Message-ID, subject, date range, or keywords |
+| `verify_sent_message` | Read-only lookup of an exact Message-ID in the resolved Sent folder; never retries SMTP |
 | `read_email` | Fetch the full content of an email as Markdown |
 | `send_email` | Send a new email via SMTP |
 | `create_draft` | Save a draft to the Drafts folder without sending |
@@ -189,6 +191,14 @@ Use `"command": "mail-mcp"` if installed globally, or `"command": "npx", "args":
 | `extract_attachment_text` | Extract plain text from PDF and document attachments |
 | `register_oauth2_account` | Store OAuth2 tokens in Keychain for an account |
 | `batch_operations` | Apply move, delete, or label actions to multiple emails at once |
+
+## Reliable delivery
+
+`send_email`, `reply_email`, and `forward_email` return structured SMTP and Sent-folder evidence. A successful SMTP submission is reported separately from IMAP persistence. The server never retries SMTP after an uncertain result.
+
+Use `verify_sent_message` with the returned `messageId` when delivery is uncertain. A match confirms the Sent copy exists. No match is not proof that SMTP did not deliver, so an agent must not resend without a separate user decision.
+
+See [Architecture and delivery contract](docs/ARCHITECTURE.md) for the status model and [Operations, diagnostics, and rollback](docs/OPERATIONS.md) for safe validation and restart checks.
 
 ## Read-Only Mode
 

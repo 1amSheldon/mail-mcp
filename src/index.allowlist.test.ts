@@ -97,7 +97,7 @@ describe('AL-01: getTools() with allowedTools=["send_email"] returns read tools 
   it('returns exactly 15 tools (14 read + 1 write)', () => {
     const server = new MailMCPServer(false, new Set(['send_email']));
     const tools = (server as any).getTools(false, new Set(['send_email']));
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(16);
   });
 });
 
@@ -105,7 +105,7 @@ describe('AL-02: getTools() with allowedTools=["send_email", "create_draft"] ret
   it('returns exactly 16 tools (14 read + 2 write)', () => {
     const server = new MailMCPServer(false, new Set(['send_email', 'create_draft']));
     const tools = (server as any).getTools(false, new Set(['send_email', 'create_draft']));
-    expect(tools).toHaveLength(16);
+    expect(tools).toHaveLength(17);
   });
 
   it('includes send_email and create_draft', () => {
@@ -129,7 +129,7 @@ describe('AL-03: getTools() with empty allowedTools set returns only read tools'
   it('returns exactly 14 tools', () => {
     const server = new MailMCPServer(false, new Set<string>());
     const tools = (server as any).getTools(false, new Set<string>());
-    expect(tools).toHaveLength(14);
+    expect(tools).toHaveLength(15);
   });
 
   it('contains no write tools', () => {
@@ -206,7 +206,7 @@ describe('AL-08: Backward compatibility — no allowedTools returns all 29 tools
   it('getTools() without allowedTools (undefined) and readOnly=false returns 29 tools', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false, undefined);
-    expect(tools).toHaveLength(29);
+    expect(tools).toHaveLength(30);
   });
 
   it('getTools() without allowedTools returns all write tools', () => {
