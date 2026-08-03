@@ -2,8 +2,12 @@
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import readline from 'node:readline';
+
+const require = createRequire(import.meta.url);
+const packageVersion = require('../package.json').version;
 
 const entrypoint = path.resolve(process.argv[2] || 'dist/index.js');
 const serverArgs = process.argv.slice(3);
@@ -78,6 +82,9 @@ try {
   const duplicates = names.filter((name, index) => names.indexOf(name) !== index);
 
   if (!initialize.serverInfo?.name) throw new Error('initialize response has no serverInfo.name');
+  if (initialize.serverInfo.version !== packageVersion) {
+    throw new Error(`serverInfo.version=${initialize.serverInfo.version} does not match package version=${packageVersion}`);
+  }
   if (!names.includes('send_email')) throw new Error('send_email is missing from tools/list');
   if (!names.includes('verify_sent_message')) throw new Error('verify_sent_message is missing from tools/list');
   if (duplicates.length > 0) throw new Error(`Duplicate tool names: ${duplicates.join(', ')}`);
@@ -94,6 +101,7 @@ try {
   console.log(JSON.stringify({
     status: 'ok',
     server: initialize.serverInfo.name,
+    serverVersion: initialize.serverInfo.version,
     protocolVersion: initialize.protocolVersion,
     toolCount: names.length,
     entrypoint,

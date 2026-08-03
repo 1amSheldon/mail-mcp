@@ -1,5 +1,5 @@
 {
-  "name": "@honest-magic/mail-mcp",
+  "name": "@1amsheldon/mail-mcp",
   "version": "1.4.0",
   "description": "MCP server for AI-powered email access via IMAP and SMTP",
   "keywords": [
@@ -11,7 +11,8 @@
     "llm",
     "model-context-protocol"
   ],
-  "author": "honest-magic",
+  "author": "1amSheldon",
+  "private": true,
   "license": "MIT",
   "homepage": "https://github.com/1amSheldon/mail-mcp#readme",
   "repository": {
@@ -22,7 +23,7 @@
     "url": "https://github.com/1amSheldon/mail-mcp/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
   "type": "module",
   "bin": {
@@ -33,38 +34,36 @@
     "README.md",
     "LICENSE"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "smoke:stdio": "node scripts/smoke-stdio.mjs"
+    "smoke:stdio": "node scripts/smoke-stdio.mjs",
+    "smoke:import": "node -e \"import('./dist/index.js')\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cross-keychain": "^1.1.0",
-    "dotenv": "^17.3.1",
+    "dotenv": "^17.4.2",
     "imapflow": "^1.6.5",
     "mailparser": "^3.9.14",
     "nodemailer": "^9.0.3",
     "pdf-parse": "^2.4.5",
     "rate-limiter-flexible": "^10.0.1",
-    "turndown": "^7.2.2",
-    "zod": "^4.3.6"
+    "turndown": "^7.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/mailparser": "^3.4.6",
-    "@types/node": "^25.5.0",
+    "@types/node": "^20.19.43",
     "@types/nodemailer": "^8.0.1",
     "@types/pdf-parse": "^1.1.5",
-    "@types/smtp-server": "^3.5.12",
+    "@types/smtp-server": "^3.5.13",
     "@types/turndown": "^5.0.6",
     "smtp-server": "^3.18.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.10"
   }
 }

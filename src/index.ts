@@ -8,6 +8,8 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parseArgs } from 'node:util';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { getAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
 import { installClaude } from './cli/install-claude.js';
@@ -23,6 +25,9 @@ import { SieveClient } from './protocol/sieve.js';
 import { AuditLogger } from './utils/audit-logger.js';
 import { ConfirmationStore } from './utils/confirmation-store.js';
 import { AUDIT_LOG_PATH } from './config.js';
+
+const require = createRequire(import.meta.url);
+const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
 
 const WRITE_TOOLS = new Set<string>([
   'send_email',
@@ -145,7 +150,7 @@ export class MailMCPServer {
     this.server = new Server(
       {
         name: 'mail-mcp-server',
-        version: '1.4.0',
+        version: PACKAGE_VERSION,
       },
       {
         capabilities: {
@@ -1275,18 +1280,12 @@ async function main() {
   });
 
   if (values['version']) {
-    const { createRequire } = await import('node:module');
-    const require = createRequire(import.meta.url);
-    const pkg = require('../package.json');
-    console.log(pkg.version);
+    console.log(PACKAGE_VERSION);
     process.exit(0);
   }
 
   if (values['help']) {
-    const { createRequire } = await import('node:module');
-    const require = createRequire(import.meta.url);
-    const pkg = require('../package.json');
-    console.log(`mail-mcp v${pkg.version} — MCP server for IMAP/SMTP email access
+    console.log(`mail-mcp v${PACKAGE_VERSION} - MCP server for IMAP/SMTP email access
 
 Usage: mail-mcp [options] [command]
 
@@ -1298,7 +1297,7 @@ Commands:
 Options:
   --read-only                 Start in read-only mode (no send/move/label tools)
   --allow-tools t1,t2,...     Allow only specific write tools (comma-separated). Mutually exclusive with --read-only.
-  --confirm                   Enable confirmation mode — write tools require a two-step call (first returns confirmationId, second executes)
+  --confirm                   Enable confirmation mode; write tools require a two-step call (first returns confirmationId, second executes)
   --audit-log                 Append a JSONL entry for every tool call to ~/.config/mail-mcp/audit.log
   --redact                    Mask credit card numbers, SSNs, passwords, and API keys in email content before returning to AI
   --validate-accounts         Probe IMAP/SMTP connections and exit
@@ -1321,7 +1320,8 @@ Options:
     // Detect binary path: try `which mail-mcp`, fall back to current script
     let binaryPath: string;
     try {
-      binaryPath = execSync('which mail-mcp', { encoding: 'utf8' }).trim();
+      const lookupCommand = process.platform === 'win32' ? 'where.exe mail-mcp' : 'command -v mail-mcp';
+      binaryPath = execSync(lookupCommand, { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
     } catch {
       binaryPath = process.argv[1];
     }
@@ -1380,8 +1380,8 @@ Options:
   await server.run();
 }
 
-// Only auto-run when executed directly (not when imported by tests)
-const isDirectRun = !process.env.VITEST && !process.env.NODE_TEST;
+// Importing the module must not start a stdio server.
+const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isDirectRun) {
   main().catch((err) => {
     console.error(err);

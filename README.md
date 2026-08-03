@@ -1,231 +1,165 @@
 # mail-mcp
 
-MCP server for IMAP/SMTP email access — works with Claude and other MCP clients.
+Reliable IMAP/SMTP MCP server for Codex and other MCP-compatible agents.
+
+This fork makes delivery state explicit. SMTP acceptance, Sent-folder persistence, and uncertain outcomes are reported separately so an agent cannot claim that a message was sent without evidence.
+
+## Distribution status
+
+The supported installation method is currently **from source**.
+
+- No package is published under the `@1amsheldon` npm scope yet.
+- No Homebrew formula is published for this fork.
+- The package is marked private to prevent accidental publication through stale upstream release automation.
 
 ## Requirements
 
-- Node.js >=18
-- macOS, Windows, or Linux (credentials stored in the OS keychain via [cross-keychain](https://www.npmjs.com/package/cross-keychain))
+- Node.js 20 or 22
+- An email account with IMAP and SMTP access
+- An operating-system credential store supported by `cross-keychain`
 
-## Installation
-
-| Method | Install command | Best for | Auto-updates? |
-|--------|----------------|----------|---------------|
-| npx (no install) | `npx @honest-magic/mail-mcp` | Trying it out, always-latest | Yes -- on each run |
-| Global npm | `npm install -g @honest-magic/mail-mcp` | Daily use, offline-friendly | No -- run `npm update -g` |
-| Homebrew | `brew tap honest-magic/tap && brew install mail-mcp` | macOS users who prefer brew | Formula updated on publish -- run `brew upgrade` |
-
-### Run without installing (recommended)
+## Install from source
 
 ```bash
-npx @honest-magic/mail-mcp
+git clone https://github.com/1amSheldon/mail-mcp.git
+cd mail-mcp
+npm ci
+npm run build
+npm test
+npm audit
+node dist/index.js --version
 ```
 
-### Global install
+## Configure an account
+
+Interactive setup stores account metadata in `~/.config/mail-mcp/accounts.json` and credentials in the operating-system keychain.
 
 ```bash
-npm install -g @honest-magic/mail-mcp
-mail-mcp
+node dist/index.js accounts add
+node dist/index.js accounts list
+node dist/index.js accounts remove ACCOUNT_ID
 ```
 
-### Homebrew
+Do not put passwords or OAuth secrets in the repository or MCP configuration.
 
-```bash
-brew tap honest-magic/tap
-brew install mail-mcp
-```
+Supported account fields include IMAP/SMTP hosts and ports, login or OAuth2 authentication, TLS, signature, recipient allowlist, ManageSieve port, and an optional `sentFolder` override.
 
-## Updating
+## Codex setup
 
-### npx (run without installing)
+Build the repository first, then point Codex at the built entrypoint. A Windows configuration looks like this:
 
-npx always fetches the latest published version. No update step needed.
-
-### Global npm install
-
-```bash
-npm update -g @honest-magic/mail-mcp
-```
-
-### Homebrew
-
-The Homebrew formula is updated automatically when a new version is published to npm.
-
-```bash
-brew upgrade mail-mcp
-```
-
-### Version pinning
-
-To run a specific version instead of latest:
-
-```bash
-npx @honest-magic/mail-mcp@1.1.0
-```
-
-See the [Releases page](https://github.com/honest-magic/mail-mcp/releases) for version history.
-
-## Configuration
-
-### 1. Add an account (interactive)
-
-```bash
-npx @honest-magic/mail-mcp accounts add
-```
-
-This prompts for IMAP/SMTP settings, stores the account in `~/.config/mail-mcp/accounts.json`, and saves the password in macOS Keychain.
-
-### Manage accounts
-
-```bash
-mail-mcp accounts list       # show configured accounts
-mail-mcp accounts remove ID  # remove an account and its keychain entry
-```
-
-### Manual setup
-
-Alternatively, create `~/.config/mail-mcp/accounts.json` by hand:
-
-```json
-[
-  {
-    "id": "work",
-    "name": "Work Email",
-    "host": "imap.example.com",
-    "port": 993,
-    "smtpHost": "smtp.example.com",
-    "smtpPort": 587,
-    "user": "you@example.com",
-    "authType": "login",
-    "useTLS": true
-  }
+```toml
+[mcp_servers.mail]
+command = "C:\\Program Files\\nodejs\\node.exe"
+args = [
+  "C:\\path\\to\\mail-mcp\\dist\\index.js",
+  "--confirm",
+  "--audit-log",
+  "--redact"
 ]
+cwd = "C:\\path\\to\\mail-mcp"
 ```
 
-Then store the password in the OS keychain. The easiest way is `mail-mcp accounts add`, which handles this automatically. On macOS you can also use:
+Restart Codex after changing `config.toml`. Validate the registered command without connecting to a mailbox:
 
 ```bash
-security add-generic-password \
-  -s ch.honest-magic.config.mail-server \
-  -a <account-id> \
-  -w <password-or-app-password>
+npm run smoke:stdio
+npm run smoke:import
 ```
 
-### Account fields
+The stdio smoke performs MCP `initialize`, checks the server version and tool list, closes stdin, and requires a clean process exit. It does not connect to IMAP or SMTP.
 
-| Field | Type | Required | Description |
-|-------|------|----------|-------------|
-| `id` | string | yes | Unique identifier used by MCP tools |
-| `name` | string | yes | Human-readable label |
-| `host` | string | yes | IMAP hostname |
-| `port` | number | yes | IMAP port (993 for TLS, 143 for STARTTLS) |
-| `smtpHost` | string | no | SMTP hostname (omit for read-only use) |
-| `smtpPort` | number | no | SMTP port (587 for STARTTLS, 465 for TLS) |
-| `user` | string | yes | Login username / email address |
-| `authType` | string | yes | `login` or `oauth2` |
-| `useTLS` | boolean | yes | `true` for implicit TLS on IMAP; `false` for STARTTLS |
-| `sentFolder` | string | no | Explicit Sent folder path; otherwise IMAP special-use discovery falls back to `Sent` |
+## Reliable delivery contract
 
-**OAuth2** — after starting the server, call the `register_oauth2_account` MCP tool:
+Send, reply, and forward return structured JSON instead of a generic success sentence.
 
-```json
-{
-  "tool": "register_oauth2_account",
-  "arguments": {
-    "accountId": "work",
-    "clientId": "<oauth2-client-id>",
-    "clientSecret": "<oauth2-client-secret>",
-    "refreshToken": "<oauth2-refresh-token>",
-    "tokenEndpoint": "https://oauth2.googleapis.com/token"
-  }
-}
-```
+Important fields:
 
-The credentials are stored in Keychain under the same service name. Token refresh is handled automatically.
+- `status`: the delivery state
+- `smtpAccepted`: `true`, `false`, or `null` when the SMTP outcome is unknown
+- `accepted` and `rejected`: SMTP recipient results
+- `messageId`: correlation ID shared by SMTP and the Sent copy
+- `sentFolderSaved`: whether IMAP confirmed persistence
+- `sentFolderUid`: UID returned by IMAP append, when available
+- `retrySafe`: the authoritative retry decision
+- `nextAction`: guidance for the calling agent
 
-### 3. Add to your MCP client
+Delivery states:
 
-**Claude Desktop** (`~/Library/Application Support/Claude/claude_desktop_config.json`):
+| Status | Meaning |
+| --- | --- |
+| `sent_and_saved` | SMTP accepted the message and IMAP confirmed the Sent copy |
+| `partially_sent_and_saved` | Some recipients were rejected, accepted recipients were sent, and Sent was saved |
+| `smtp_accepted_sent_not_confirmed` | SMTP accepted the message, but the Sent copy was not confirmed |
+| `smtp_partially_accepted_sent_not_confirmed` | Partial SMTP acceptance, without confirmed Sent persistence |
+| `smtp_rejected` | SMTP rejected all recipients |
+| `smtp_connection_failed` | The SMTP connection failed before a confirmed delivery result |
+| `smtp_outcome_unknown` | Delivery may have happened; do not retry automatically |
 
-```json
-{
-  "mcpServers": {
-    "mail": {
-      "command": "npx",
-      "args": ["-y", "@honest-magic/mail-mcp"]
-    }
-  }
-}
-```
+Never retry solely because the message is absent from Sent. Use `retrySafe` and verify by `messageId`.
 
-**Generic MCP client**:
+## Verify a sent message
 
-```json
-{
-  "mcpServers": {
-    "mail": {
-      "command": "mail-mcp"
-    }
-  }
-}
-```
+`verify_sent_message` is read-only. It resolves the configured or IMAP special-use Sent folder and searches for the exact `Message-ID`.
 
-Use `"command": "mail-mcp"` if installed globally, or `"command": "npx", "args": ["-y", "@honest-magic/mail-mcp"]` otherwise.
+A no-match result is not proof that SMTP delivery failed. The Sent append may have failed after SMTP accepted the message.
 
-## Available Tools
+## Tools
 
-| Tool | Description |
-|------|-------------|
-| `list_accounts` | List all configured email accounts |
-| `list_emails` | List recent emails from a folder with metadata and snippets |
-| `search_emails` | Search emails by sender, recipient, Message-ID, subject, date range, or keywords |
-| `verify_sent_message` | Read-only lookup of an exact Message-ID in the resolved Sent folder; never retries SMTP |
-| `read_email` | Fetch the full content of an email as Markdown |
-| `send_email` | Send a new email via SMTP |
-| `create_draft` | Save a draft to the Drafts folder without sending |
-| `list_folders` | List all available folders and labels in a mailbox |
-| `move_email` | Move a message to another folder (Archive, Trash, Spam, etc.) |
-| `modify_labels` | Add or remove IMAP flags / provider labels on a message |
-| `get_thread` | Fetch all messages in a conversation thread |
-| `get_attachment` | Download attachment content via MCP Resource URI |
-| `extract_attachment_text` | Extract plain text from PDF and document attachments |
-| `register_oauth2_account` | Store OAuth2 tokens in Keychain for an account |
-| `batch_operations` | Apply move, delete, or label actions to multiple emails at once |
+Read-only tools:
 
-## Reliable delivery
+- `list_accounts`, `list_emails`, `search_emails`, `verify_sent_message`
+- `read_email`, `get_thread`, `get_attachment`, `extract_attachment_text`
+- `list_folders`, `mailbox_stats`, `extract_contacts`
+- `list_templates`, `use_template`, `list_filters`, `get_filter`
 
-`send_email`, `reply_email`, and `forward_email` return structured SMTP and Sent-folder evidence. A successful SMTP submission is reported separately from IMAP persistence. The server never retries SMTP after an uncertain result.
+Write tools:
 
-Use `verify_sent_message` with the returned `messageId` when delivery is uncertain. A match confirms the Sent copy exists. No match is not proof that SMTP did not deliver, so an agent must not resend without a separate user decision.
+- `send_email`, `reply_email`, `forward_email`, `create_draft`
+- `move_email`, `modify_labels`, `batch_operations`, `delete_email`
+- `mark_read`, `mark_unread`, `star`, `unstar`
+- `register_oauth2_account`, `set_filter`, `delete_filter`
 
-See [Architecture and delivery contract](docs/ARCHITECTURE.md) for the status model and [Operations, diagnostics, and rollback](docs/OPERATIONS.md) for safe validation and restart checks.
-
-## Read-Only Mode
-
-Start the server with `--read-only` to disable all write operations:
+## Safety modes
 
 ```bash
-npx @honest-magic/mail-mcp --read-only
+node dist/index.js --read-only
+node dist/index.js --allow-tools create_draft,move_email
+node dist/index.js --confirm --audit-log --redact
 ```
 
-In read-only mode:
-- Write tools (`send_email`, `create_draft`, `move_email`, `modify_labels`, `batch_operations`, `register_oauth2_account`) are removed from the tool list entirely and return a descriptive error if called directly.
-- SMTP authentication is skipped — only IMAP connects.
-- The active mode is advertised to the MCP client at handshake via `InitializeResult.instructions`.
+- `--read-only` removes write tools.
+- `--allow-tools` limits the exposed write surface.
+- `--confirm` binds a short-lived confirmation token to one tool and its original arguments.
+- `--audit-log` writes JSONL diagnostics to `~/.config/mail-mcp/audit.log`.
+- `--redact` masks selected sensitive content before returning it to an agent.
 
-Claude Desktop read-only config:
+## Validation
 
-```json
-{
-  "mcpServers": {
-    "mail-readonly": {
-      "command": "npx",
-      "args": ["-y", "@honest-magic/mail-mcp", "--read-only"]
-    }
-  }
-}
+Safe local validation:
+
+```bash
+npm ci
+npm run build
+npm test
+npm run smoke:stdio
+npm run smoke:import
+npm audit
 ```
+
+Network validation, without sending a message:
+
+```bash
+node dist/index.js --validate-accounts
+```
+
+`--validate-accounts` connects to configured IMAP and SMTP servers. Run it only when live account access is explicitly intended.
+
+## Architecture and operations
+
+- [Architecture and delivery states](docs/ARCHITECTURE.md)
+- [Deployment, rollback, and diagnostics](docs/OPERATIONS.md)
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE) for retained copyright and license notices.
