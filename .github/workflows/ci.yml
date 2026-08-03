@@ -43,5 +43,8 @@ jobs:
       - name: Stdio smoke
         run: npm run smoke:stdio
 
-      - name: Production dependency audit
-        run: npm audit --omit=dev
+      - name: Import smoke
+        run: npm run smoke:import
+
+      - name: Dependency audit
+        run: npm audit
