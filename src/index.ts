@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -25,6 +26,8 @@ import { SieveClient } from './protocol/sieve.js';
 import { AuditLogger } from './utils/audit-logger.js';
 import { ConfirmationStore } from './utils/confirmation-store.js';
 import { AUDIT_LOG_PATH } from './config.js';
+import { MailMCPRuntimeState } from './runtime-state.js';
+import { startHttpHost } from './http-host.js';
 
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
@@ -103,23 +106,26 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
 
 export class MailMCPServer {
   private server: Server;
-  private services: Map<string, MailService> = new Map();
-  private serviceCreations: Map<string, Promise<MailService>> = new Map();
+  private services: Map<string, MailService>;
+  private serviceCreations: Map<string, Promise<MailService>>;
   private shuttingDown = false;
   private inFlightCount = 0;
-  private readonly rateLimiter = new TieredRateLimiter();
+  private readonly rateLimiter: TieredRateLimiter;
   private readonly allowedTools?: Set<string>;
   private readonly confirmMode: boolean;
   private readonly confirmStore: ConfirmationStore;
   private readonly auditLogger?: AuditLogger;
   private readonly redact: boolean;
+  private readonly runtimeState: MailMCPRuntimeState;
+  private readonly ownsRuntimeState: boolean;
 
   constructor(
     private readonly readOnly: boolean = false,
     allowedTools?: Set<string>,
     auditLogger?: AuditLogger,
     confirmMode: boolean = false,
-    redact: boolean = false
+    redact: boolean = false,
+    runtimeState?: MailMCPRuntimeState
   ) {
     if (readOnly && allowedTools !== undefined) {
       throw new Error(
@@ -132,6 +138,11 @@ export class MailMCPServer {
     this.confirmMode = confirmMode;
     this.confirmStore = new ConfirmationStore();
     this.redact = redact;
+    this.runtimeState = runtimeState ?? new MailMCPRuntimeState();
+    this.ownsRuntimeState = runtimeState === undefined;
+    this.services = this.runtimeState.services;
+    this.serviceCreations = this.runtimeState.serviceCreations;
+    this.rateLimiter = this.runtimeState.rateLimiter;
 
     const instructionsSuffix = (() => {
       if (readOnly) {
@@ -174,12 +185,9 @@ export class MailMCPServer {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
 
-    // Disconnect all cached services
-    const disconnects = Array.from(this.services.values()).map(svc =>
-      svc.disconnect().catch(err => console.error('Disconnect error:', err))
-    );
-    await Promise.allSettled(disconnects);
-    this.services.clear();
+    if (this.ownsRuntimeState) {
+      await this.runtimeState.shutdown();
+    }
     await this.server.close();
   }
 
@@ -195,7 +203,7 @@ export class MailMCPServer {
 
     // Wire close listener for auto-reconnect (CONN-02)
     service.imap.onClose = () => {
-      if (!this.shuttingDown && this.services.get(accountId) === service) {
+      if (!this.runtimeState.isShuttingDown && this.services.get(accountId) === service) {
         this.services.delete(accountId);
       }
     };
@@ -958,6 +966,83 @@ export class MailMCPServer {
         };
       }
 
+      if (name === 'read_email') {
+        const service = await this.getService(args.accountId as string);
+        const content = await service.readEmail(
+          args.uid as string,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return { content: [{ type: 'text', text: content }] };
+      }
+
+      if (name === 'list_folders') {
+        const service = await this.getService(args.accountId as string);
+        const folders = await service.listFolders();
+        return {
+          content: [{ type: 'text', text: JSON.stringify(folders, null, 2) }],
+        };
+      }
+
+      if (name === 'get_thread') {
+        const service = await this.getService(args.accountId as string);
+        const messages = await service.getThread(
+          args.threadId as string,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return {
+          content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],
+        };
+      }
+
+      if (name === 'get_attachment') {
+        const filename = args.filename as string;
+        const uid = args.uid as string;
+        const service = await this.getService(args.accountId as string);
+        const { content, contentType } = await service.downloadAttachment(
+          uid,
+          filename,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ filename, contentType, bytes: content.length }, null, 2),
+            },
+            {
+              type: 'resource',
+              resource: {
+                uri: `mail-attachment://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(uid)}/${encodeURIComponent(filename)}`,
+                mimeType: contentType,
+                blob: content.toString('base64'),
+              },
+            },
+          ],
+        };
+      }
+
+      if (name === 'extract_attachment_text') {
+        const service = await this.getService(args.accountId as string);
+        const content = await service.extractAttachmentText(
+          args.uid as string,
+          args.filename as string,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return { content: [{ type: 'text', text: content }] };
+      }
+
+      if (name === 'extract_contacts') {
+        const service = await this.getService(args.accountId as string);
+        const count = Math.min((args.count as number | undefined) ?? 100, 500);
+        const contacts = await service.extractContacts(
+          (args.folder as string | undefined) ?? 'INBOX',
+          count
+        );
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ contacts }, null, 2) }],
+        };
+      }
+
       if (name === 'verify_sent_message') {
         const messageId = String(args.messageId ?? '').trim();
         if (!messageId) {
@@ -1005,9 +1090,105 @@ export class MailMCPServer {
 
       if (name === 'create_draft') {
         const service = await this.getService(args.accountId as string);
-        await (service as any).createDraft(args.to, args.subject, args.body, args.isHtml, args.cc, args.bcc);
+        const includeSignature = (args.includeSignature as boolean | undefined) !== false;
+        await service.createDraft(
+          args.to as string,
+          args.subject as string,
+          args.body as string,
+          args.isHtml as boolean | undefined,
+          args.cc as string | undefined,
+          args.bcc as string | undefined,
+          includeSignature
+        );
         return {
           content: [{ type: 'text', text: `Draft successfully created in Drafts folder.` }],
+        };
+      }
+
+      if (name === 'move_email') {
+        const service = await this.getService(args.accountId as string);
+        const uid = args.uid as string;
+        const sourceFolder = args.sourceFolder as string;
+        const targetFolder = args.targetFolder as string;
+        await service.moveMessage(uid, sourceFolder, targetFolder);
+        service.invalidateBodyCache(sourceFolder, uid);
+        return {
+          content: [{
+            type: 'text',
+            text: `Email ${uid} moved from ${sourceFolder} to ${targetFolder}.`,
+          }],
+        };
+      }
+
+      if (name === 'modify_labels') {
+        const service = await this.getService(args.accountId as string);
+        await service.modifyLabels(
+          args.uid as string,
+          args.folder as string,
+          (args.addLabels as string[] | undefined) ?? [],
+          (args.removeLabels as string[] | undefined) ?? []
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: `Labels updated for email ${args.uid as string} in ${args.folder as string}.`,
+          }],
+        };
+      }
+
+      if (name === 'batch_operations') {
+        const service = await this.getService(args.accountId as string);
+        const action = args.action as 'move' | 'delete' | 'label';
+        let operation: Parameters<MailService['batchOperations']>[2];
+
+        if (action === 'move') {
+          const targetFolder = args.targetFolder as string | undefined;
+          if (!targetFolder) throw new Error('targetFolder is required for move action');
+          operation = { type: 'move', targetFolder };
+        } else if (action === 'delete') {
+          operation = { type: 'delete' };
+        } else if (action === 'label') {
+          operation = {
+            type: 'label',
+            addLabels: args.addLabels as string[] | undefined,
+            removeLabels: args.removeLabels as string[] | undefined,
+          };
+        } else {
+          throw new Error(`Unknown action: ${String(args.action)}`);
+        }
+
+        const result = await service.batchOperations(
+          args.uids as string[],
+          args.folder as string,
+          operation
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: `Batch ${action} completed. ${result.processed} email(s) processed.`,
+          }],
+        };
+      }
+
+      if (name === 'register_oauth2_account') {
+        const accountId = args.accountId as string;
+        const accounts = await getAccounts();
+        if (!accounts.some(account => account.id === accountId)) {
+          throw new Error(`Account ${accountId} not found in configuration.`);
+        }
+
+        const { saveCredentials } = await import('./security/keychain.js');
+        await saveCredentials(accountId, JSON.stringify({
+          clientId: args.clientId,
+          clientSecret: args.clientSecret,
+          refreshToken: args.refreshToken,
+          tokenEndpoint: args.tokenEndpoint,
+        }));
+        return {
+          content: [{
+            type: 'text',
+            text: `OAuth2 credentials successfully saved for account ${accountId}.`,
+          }],
         };
       }
 
@@ -1215,8 +1396,12 @@ export class MailMCPServer {
 
   async run() {
     const transport = new StdioServerTransport();
-    await this.server.connect(transport);
+    await this.connect(transport);
     console.error('Mail MCP server running on stdio');
+  }
+
+  async connect(transport: StreamableHTTPServerTransport | StdioServerTransport): Promise<void> {
+    await this.server.connect(transport);
   }
 }
 
@@ -1271,6 +1456,10 @@ async function main() {
       'confirm': { type: 'boolean', default: false },
       'audit-log': { type: 'boolean', default: false },
       'redact': { type: 'boolean', default: false },
+      'http': { type: 'boolean', default: false },
+      'host': { type: 'string', default: '127.0.0.1' },
+      'port': { type: 'string', default: '8765' },
+      'bearer-token-env': { type: 'string', default: 'MAIL_MCP_BEARER_TOKEN' },
       'validate-accounts': { type: 'boolean', default: false },
       'install-claude': { type: 'boolean', default: false },
       'version': { type: 'boolean', default: false },
@@ -1300,6 +1489,10 @@ Options:
   --confirm                   Enable confirmation mode; write tools require a two-step call (first returns confirmationId, second executes)
   --audit-log                 Append a JSONL entry for every tool call to ~/.config/mail-mcp/audit.log
   --redact                    Mask credit card numbers, SSNs, passwords, and API keys in email content before returning to AI
+  --http                      Run one shared Streamable HTTP service instead of stdio
+  --host HOST                 HTTP bind address (default: 127.0.0.1)
+  --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
+  --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
   --install-claude            Write mail-mcp to Claude Desktop config and exit (one-command setup)
   --version                   Show version number
@@ -1363,7 +1556,42 @@ Options:
   const auditLogEnabled = (values['audit-log'] as boolean | undefined) ?? false;
   const auditLogger = new AuditLogger(AUDIT_LOG_PATH, auditLogEnabled);
   const redact = (values['redact'] as boolean | undefined) ?? false;
-  const server = new MailMCPServer(readOnly, allowedTools, auditLogger, confirmMode, redact);
+  const httpMode = (values['http'] as boolean | undefined) ?? false;
+  const runtimeState = httpMode ? new MailMCPRuntimeState() : undefined;
+  const createServer = () => new MailMCPServer(
+    readOnly,
+    allowedTools,
+    auditLogger,
+    confirmMode,
+    redact,
+    runtimeState
+  );
+  const server = httpMode ? undefined : createServer();
+  let httpHost: Awaited<ReturnType<typeof startHttpHost>> | undefined;
+
+  if (httpMode) {
+    const host = values['host'] as string;
+    const portRaw = values['port'] as string;
+    const port = Number.parseInt(portRaw, 10);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      throw new Error(`Invalid HTTP port: ${portRaw}`);
+    }
+
+    const tokenEnv = values['bearer-token-env'] as string;
+    const bearerToken = process.env[tokenEnv];
+    if (!bearerToken) {
+      throw new Error(`Environment variable ${tokenEnv} is not set`);
+    }
+
+    httpHost = await startHttpHost({
+      host,
+      port,
+      bearerToken,
+      createSession: createServer,
+      shutdownSharedResources: () => runtimeState!.shutdown(),
+    });
+    console.error(`Mail MCP server running on ${httpHost.url}`);
+  }
 
   const shutdown = async () => {
     const timer = setTimeout(() => {
@@ -1371,13 +1599,19 @@ Options:
       process.exit(1);
     }, 10_000);
     timer.unref();
-    await server.shutdown();
+    if (httpHost) {
+      await httpHost.close();
+    } else {
+      await server!.shutdown();
+    }
     process.exit(0);
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  await server.run();
+  if (!httpMode) {
+    await server!.run();
+  }
 }
 
 // Importing the module must not start a stdio server.

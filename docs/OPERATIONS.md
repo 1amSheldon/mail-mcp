@@ -10,6 +10,7 @@ npm ci
 npm test
 npm run build
 npm run smoke:stdio
+npm run smoke:http
 node --check dist/index.js
 ```
 
@@ -34,11 +35,13 @@ Do not run `--validate-accounts` in a network-isolated or read-only audit. It op
 
 Build in the source repository, validate it, then deploy the complete package atomically: `dist`, `package.json`, `package-lock.json`, and runtime dependencies must belong to the same revision. Keep Codex configuration on a stable install path rather than a temporary worktree. After deployment, run the exact configured command through `smoke:stdio` before restarting Codex.
 
+For a shared HTTP deployment, bind only to `127.0.0.1`, put the bearer token in the named environment variable rather than `config.toml`, and configure Codex with `url` plus `bearer_token_env_var`. Verify `/health`, then complete an authenticated MCP `initialize` and `tools/list` with `smoke:http`. The service should be started once per Windows user session; Codex tasks must not spawn their own copies.
+
 ## Rollback
 
 1. Preserve the previous installed directory or archive before replacing it.
 2. Restore the previous complete package directory; do not mix old `node_modules` with a new lockfile.
-3. Restore the previous MCP `command`, `args`, and `cwd` if they changed.
+3. Restore the previous MCP `command`, `args`, and `cwd`, or the previous HTTP `url` and token environment variable, if they changed.
 4. Run `node --check`, `--version`, `--help`, and exact-command `smoke:stdio` against the restored path.
 5. Restart Codex only after the rollback smoke passes.
 

@@ -46,7 +46,29 @@ Supported account fields include IMAP/SMTP hosts and ports, login or OAuth2 auth
 
 ## Codex setup
 
-Build the repository first, then point Codex at the built entrypoint. A Windows configuration looks like this:
+For several concurrent Codex tasks, run one loopback-only Streamable HTTP service. All tasks then share one process and one IMAP/SMTP connection pool instead of starting a Node.js process per task.
+
+Generate a long random token, keep it outside `config.toml`, and start the service:
+
+```powershell
+$env:MAIL_MCP_BEARER_TOKEN = '<random-token>'
+node dist/index.js --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
+```
+
+Point Codex at the local endpoint:
+
+```toml
+[mcp_servers.mail]
+url = "http://127.0.0.1:8765/mcp"
+bearer_token_env_var = "MAIL_MCP_BEARER_TOKEN"
+enabled = true
+startup_timeout_sec = 15.0
+tool_timeout_sec = 300.0
+```
+
+`GET http://127.0.0.1:8765/health` reports service health and the number of active MCP sessions without exposing mailbox or account data. The MCP endpoint requires the bearer token and is bound to localhost by default.
+
+The stdio transport remains available for clients that cannot use Streamable HTTP. A Windows configuration looks like this:
 
 ```toml
 [mcp_servers.mail]
@@ -64,10 +86,11 @@ Restart Codex after changing `config.toml`. Validate the registered command with
 
 ```bash
 npm run smoke:stdio
+npm run smoke:http
 npm run smoke:import
 ```
 
-The stdio smoke performs MCP `initialize`, checks the server version and tool list, closes stdin, and requires a clean process exit. It does not connect to IMAP or SMTP.
+Both transport smokes perform MCP `initialize` and check the tool list without connecting to IMAP or SMTP. The HTTP smoke also verifies bearer authentication, session creation, and clean shutdown.
 
 ## Reliable delivery contract
 
@@ -143,6 +166,7 @@ npm ci
 npm run build
 npm test
 npm run smoke:stdio
+npm run smoke:http
 npm run smoke:import
 npm audit
 ```
