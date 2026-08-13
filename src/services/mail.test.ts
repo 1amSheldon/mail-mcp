@@ -461,6 +461,62 @@ describe('readEmail List-Unsubscribe header extraction', () => {
   });
 });
 
+describe('readEmail inline image handling', () => {
+  const account = { id: 'test', name: 'Test', user: 'test@example.com', imap: {} as any, smtp: {} as any };
+
+  beforeEach(() => {
+    mockFetchMessageBody.mockClear();
+  });
+
+  function makeParsedMail(html: string, attachments: any[] = []): any {
+    return {
+      from: { text: 'sender@example.com' },
+      to: { text: 'recipient@example.com' },
+      subject: 'Inline image',
+      date: new Date('2026-01-01T00:00:00Z'),
+      html,
+      headers: new Map(),
+      attachments,
+    };
+  }
+
+  it('references CID images through get_attachment without embedding base64', async () => {
+    mockFetchMessageBody.mockResolvedValue(
+      makeParsedMail('<p>Hello</p><img alt="Diagram" src="cid:hero">', [
+        {
+          contentId: 'hero',
+          filename: 'diagram.png',
+          contentType: 'image/png',
+          content: Buffer.from('binary-image-data'),
+          size: 17,
+        },
+      ])
+    );
+    const service = new MailService(account, false);
+    await service.connect();
+
+    const result = await service.readEmail('42');
+
+    expect(result).toContain('mail-attachment://test/42/diagram.png');
+    expect(result).not.toContain('data:image/');
+    expect(result).not.toContain(Buffer.from('binary-image-data').toString('base64'));
+  });
+
+  it('removes pre-embedded data image payloads from HTML', async () => {
+    mockFetchMessageBody.mockResolvedValue(
+      makeParsedMail('<img alt="Embedded" src="data:image/png;base64,QUJDRA==">')
+    );
+    const service = new MailService(account, false);
+    await service.connect();
+
+    const result = await service.readEmail('43');
+
+    expect(result).toContain('mail-inline-image://omitted');
+    expect(result).not.toContain('data:image/');
+    expect(result).not.toContain('QUJDRA==');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // replyEmail tests
 // ---------------------------------------------------------------------------

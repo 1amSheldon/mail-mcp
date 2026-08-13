@@ -8,8 +8,8 @@ import { redactSensitiveContent } from '../utils/redact.js';
 import type { ParsedMail } from 'mailparser';
 
 const DEFAULT_SENT_FOLDER = 'Sent';
-const MAX_INLINE_IMAGE_BYTES = 1024 * 1024;
 const MAX_READ_BODY_CHARS = 200_000;
+const INLINE_DATA_IMAGE_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/_=-]+/gi;
 
 export type DeliveryStatus =
   | 'sent_and_saved'
@@ -384,25 +384,22 @@ export class MailService {
 
     if (parsed.html) {
       let html = parsed.html;
-      // Convert inline images to base64 if needed
+      // Keep binary image data out of tool responses. Agents can fetch the
+      // original attachment explicitly through get_attachment when needed.
       if (parsed.attachments) {
         for (const att of parsed.attachments) {
-          if (
-            att.contentId &&
-            att.content &&
-            att.contentType.startsWith('image/') &&
-            att.size <= MAX_INLINE_IMAGE_BYTES
-          ) {
-            const base64 = att.content.toString('base64');
-            const dataUri = `data:${att.contentType};base64,${base64}`;
-            const cidRegex = new RegExp(`cid:${att.contentId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g');
-            html = html.replace(cidRegex, dataUri);
+          if (att.contentId && att.contentType.startsWith('image/')) {
+            const attachmentName = att.filename || att.contentId;
+            const attachmentUri = `mail-attachment://${encodeURIComponent(this.account.id)}/${encodeURIComponent(uid)}/${encodeURIComponent(attachmentName)}`;
+            const cidRegex = new RegExp(`cid:${att.contentId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'gi');
+            html = html.replace(cidRegex, attachmentUri);
           }
         }
       }
+      html = html.replace(INLINE_DATA_IMAGE_PATTERN, 'mail-inline-image://omitted');
       content = htmlToMarkdown(html);
     } else if (parsed.textAsHtml) {
-      content = htmlToMarkdown(parsed.textAsHtml);
+      content = htmlToMarkdown(parsed.textAsHtml.replace(INLINE_DATA_IMAGE_PATTERN, 'mail-inline-image://omitted'));
     } else if (parsed.text) {
       content = parsed.text;
     }
