@@ -43,6 +43,9 @@ jobs:
       - name: Stdio smoke
         run: npm run smoke:stdio
 
+      - name: HTTP smoke
+        run: npm run smoke:http
+
       - name: Import smoke
         run: npm run smoke:import
 

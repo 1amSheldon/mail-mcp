@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SmtpClient } from './smtp.js';
+import { SmtpClient, SmtpRecipientRejectedError } from './smtp.js';
 import { EmailAccount } from '../types/index.js';
 
 const mocks = vi.hoisted(() => ({
@@ -118,6 +118,34 @@ describe('SmtpClient', () => {
     const result = await client.send('ok@example.com,bad@example.com', 'Subject', 'Body');
     expect(result.accepted).toEqual(['ok@example.com']);
     expect(result.rejected).toEqual(['bad@example.com']);
+  });
+
+  it('reports an all-recipient RCPT rejection as a definitive result', async () => {
+    mocks.send.mockRejectedValueOnce(Object.assign(
+      new Error("Can't send mail - all recipients were rejected"),
+      {
+        code: 'EENVELOPE',
+        command: 'RCPT TO',
+        rejected: ['bad@example.com'],
+      }
+    ));
+    const client = new SmtpClient(account);
+    await client.connect();
+
+    const rejection = client.send('bad@example.com', 'Subject', 'Body');
+    await expect(rejection).rejects.toBeInstanceOf(SmtpRecipientRejectedError);
+    await expect(rejection)
+      .rejects.toMatchObject({
+        name: 'SmtpRecipientRejectedError',
+        messageId: '<test@example.com>',
+        rejected: ['bad@example.com'],
+      });
+
+    await client.connect();
+    await expect(client.send('recipient@example.com', 'Subject', 'Body'))
+      .resolves.toMatchObject({ accepted: ['recipient@example.com'] });
+    expect(mocks.close).toHaveBeenCalledTimes(1);
+    expect(mocks.verify).toHaveBeenCalledTimes(2);
   });
 
   it('marks send failures as outcome-unknown and resets the transport without retrying', async () => {

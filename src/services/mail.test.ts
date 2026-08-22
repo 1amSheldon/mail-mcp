@@ -46,10 +46,21 @@ vi.mock('../protocol/smtp.js', () => {
       this.name = 'SmtpSendError';
     }
   }
+  class MockSmtpRecipientRejectedError extends Error {
+    constructor(
+      message: string,
+      public readonly messageId: string,
+      public readonly rejected: string[]
+    ) {
+      super(message);
+      this.name = 'SmtpRecipientRejectedError';
+    }
+  }
   return {
     SmtpClient: vi.fn(function () {
       return { connect: mockSmtpConnect, disconnect: mockSmtpDisconnect, send: mockSmtpSend };
     }),
+    SmtpRecipientRejectedError: MockSmtpRecipientRejectedError,
     SmtpSendError: MockSmtpSendError,
   };
 });
@@ -173,6 +184,30 @@ describe('MailService delivery contract', () => {
     expect(result.retrySafe).toBe(false);
     expect(result.nextAction).toContain('Do not retry automatically');
     expect(mockSmtpSend).toHaveBeenCalledTimes(1);
+    expect(mockImapAppendMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports a definitive all-recipient rejection without Sent verification advice', async () => {
+    const { SmtpRecipientRejectedError } = await import('../protocol/smtp.js');
+    mockSmtpSend.mockRejectedValueOnce(new SmtpRecipientRejectedError(
+      'SMTP rejected all recipients',
+      '<rejected@example.com>',
+      ['bad@example.com']
+    ));
+    const service = new MailService(account, false);
+    await service.connect();
+    const result = await service.sendEmail('bad@example.com', 'Subject', 'Body');
+
+    expect(result).toMatchObject({
+      status: 'smtp_rejected',
+      smtpAccepted: false,
+      accepted: [],
+      rejected: ['bad@example.com'],
+      messageId: '<rejected@example.com>',
+      sentFolderSaved: false,
+      retrySafe: false,
+    });
+    expect(result.nextAction).toContain('Correct the rejected recipients');
     expect(mockImapAppendMessage).not.toHaveBeenCalled();
   });
 

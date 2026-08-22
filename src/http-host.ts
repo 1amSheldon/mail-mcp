@@ -77,6 +77,11 @@ function sessionIdFrom(req: IncomingMessage): string | undefined {
   return Array.isArray(value) ? value[0] : value;
 }
 
+function formatUrlHost(host: string): string {
+  if (host.startsWith('[') && host.endsWith(']')) return host;
+  return host.includes(':') ? `[${host}]` : host;
+}
+
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
@@ -103,6 +108,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   const startedAt = new Date().toISOString();
   const sessionIdleTimeoutMs = options.sessionIdleTimeoutMs ?? DEFAULT_SESSION_IDLE_TIMEOUT_MS;
   const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
+  const urlHost = formatUrlHost(options.host);
   let shuttingDown = false;
 
   const closeSession = async (record: ActiveSession): Promise<void> => {
@@ -127,7 +133,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   cleanupTimer.unref();
 
   const httpServer = createServer(async (req, res) => {
-    const pathname = new URL(req.url ?? '/', `http://${options.host}`).pathname;
+    const pathname = new URL(req.url ?? '/', `http://${urlHost}`).pathname;
 
     if (pathname === '/health' && req.method === 'GET') {
       json(res, shuttingDown ? 503 : 200, {
@@ -188,20 +194,19 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         }
 
         const mcpServer = options.createSession();
+        const sessionId = randomUUID();
         const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => randomUUID(),
-          onsessioninitialized: initializedId => {
-            record!.id = initializedId;
-            sessions.set(initializedId, record!);
-          },
+          sessionIdGenerator: () => sessionId,
         });
         record = {
+          id: sessionId,
           transport,
           server: mcpServer,
           closing: false,
           activeRequests: 1,
           lastUsedAt: Date.now(),
         };
+        sessions.set(sessionId, record);
         transport.onclose = () => {
           void closeSession(record!);
         };
@@ -285,7 +290,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   return {
     host: options.host,
     port: address.port,
-    url: `http://${options.host}:${address.port}/mcp`,
+    url: `http://${urlHost}:${address.port}/mcp`,
     close,
   };
 }

@@ -96,4 +96,72 @@ describe('Streamable HTTP host', () => {
     const health = await fetch(host.url.replace('/mcp', '/health')).then(response => response.json());
     expect(health.activeSessions).toBe(0);
   });
+
+  it('brackets an IPv6 bind address in generated URLs', async () => {
+    host = await startHttpHost({
+      host: '::1',
+      port: 0,
+      bearerToken: 'test-token',
+      createSession: () => new TestMcpSession(),
+    });
+
+    expect(host.url).toMatch(/^http:\/\/\[::1\]:\d+\/mcp$/);
+    const response = await fetch(host.url.replace('/mcp', '/health'));
+    expect(response.status).toBe(200);
+  });
+
+  it('reserves capacity while an MCP session is initializing', async () => {
+    let releaseConnect!: () => void;
+    let markConnectStarted!: () => void;
+    const connectGate = new Promise<void>(resolve => { releaseConnect = resolve; });
+    const connectStarted = new Promise<void>(resolve => { markConnectStarted = resolve; });
+
+    host = await startHttpHost({
+      host: '127.0.0.1',
+      port: 0,
+      bearerToken: 'test-token',
+      maxSessions: 1,
+      createSession: () => {
+        const session = new TestMcpSession();
+        return {
+          connect: async transport => {
+            markConnectStarted();
+            await connectGate;
+            await session.connect(transport);
+          },
+          shutdown: () => session.shutdown(),
+        };
+      },
+    });
+
+    const initialize = () => fetch(host!.url, {
+      method: 'POST',
+      headers: {
+        accept: 'application/json, text/event-stream',
+        authorization: 'Bearer test-token',
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'capacity-test', version: '1.0.0' },
+        },
+      }),
+    });
+
+    const first = initialize();
+    await connectStarted;
+    const second = await initialize();
+    expect(second.status).toBe(503);
+    expect(await second.json()).toMatchObject({
+      error: { message: 'Too many active MCP sessions' },
+    });
+
+    releaseConnect();
+    expect((await first).status).toBe(200);
+  });
 });

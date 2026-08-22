@@ -1,5 +1,9 @@
 import { ImapClient, MessageMetadata, MailboxStatus, SenderEnvelope } from '../protocol/imap.js';
-import { SmtpClient, SmtpSendError } from '../protocol/smtp.js';
+import {
+  SmtpClient,
+  SmtpRecipientRejectedError,
+  SmtpSendError,
+} from '../protocol/smtp.js';
 import { htmlToMarkdown } from '../utils/markdown.js';
 import { EmailAccount } from '../types/index.js';
 import { ValidationError } from '../errors.js';
@@ -170,6 +174,20 @@ export class MailService {
           );
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (error instanceof SmtpRecipientRejectedError) {
+        return {
+          status: 'smtp_rejected',
+          smtpAccepted: false,
+          accepted: [],
+          rejected: error.rejected,
+          ...(error.messageId ? { messageId: error.messageId } : {}),
+          sentFolderSaved: false,
+          retrySafe: false,
+          nextAction: 'Correct the rejected recipients or SMTP policy failure before a new user-requested send.',
+          error: reason,
+        };
+      }
+
       const messageId = error instanceof SmtpSendError ? error.messageId : undefined;
       return {
         status: 'smtp_outcome_unknown',

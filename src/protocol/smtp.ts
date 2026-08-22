@@ -22,6 +22,18 @@ export class SmtpSendError extends Error {
   }
 }
 
+export class SmtpRecipientRejectedError extends Error {
+  constructor(
+    message: string,
+    public readonly messageId: string,
+    public readonly rejected: string[],
+    options?: ErrorOptions
+  ) {
+    super(message, options);
+    this.name = 'SmtpRecipientRejectedError';
+  }
+}
+
 export class SmtpClient {
   private transporter: nodemailer.Transporter | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -139,6 +151,24 @@ export class SmtpClient {
     } catch (error) {
       this.disconnect();
       const reason = error instanceof Error ? error.message : String(error);
+      const smtpError = error && typeof error === 'object'
+        ? error as { code?: unknown; command?: unknown; rejected?: unknown }
+        : undefined;
+      const rejected = smtpError?.code === 'EENVELOPE' &&
+        smtpError.command === 'RCPT TO' &&
+        Array.isArray(smtpError.rejected)
+        ? smtpError.rejected.map(String)
+        : [];
+
+      if (rejected.length > 0) {
+        throw new SmtpRecipientRejectedError(
+          `SMTP rejected all recipients: ${reason}`,
+          messageId,
+          rejected,
+          { cause: error }
+        );
+      }
+
       throw new SmtpSendError(
         `SMTP outcome is unknown: ${reason}`,
         messageId,

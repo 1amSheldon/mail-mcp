@@ -1,14 +1,12 @@
 {
   "name": "@1amsheldon/mail-mcp",
   "version": "1.4.0",
-  "description": "MCP server for AI-powered email access via IMAP and SMTP",
+  "description": "Reliable IMAP and SMTP MCP server with explicit delivery states",
   "keywords": [
     "mcp",
     "email",
     "imap",
     "smtp",
-    "ai",
-    "llm",
     "model-context-protocol"
   ],
   "author": "1amSheldon",
@@ -23,7 +21,7 @@
     "url": "https://github.com/1amSheldon/mail-mcp/issues"
   },
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.19.0"
   },
   "type": "module",
   "bin": {
@@ -49,8 +47,8 @@
     "cross-keychain": "^1.1.0",
     "dotenv": "^17.4.2",
     "imapflow": "^1.6.5",
-    "mailparser": "^3.9.14",
-    "nodemailer": "^9.0.3",
+    "mailparser": "^3.9.15",
+    "nodemailer": "^9.0.5",
     "pdf-parse": "^2.4.5",
     "rate-limiter-flexible": "^10.0.1",
     "turndown": "^7.2.4",
@@ -66,6 +64,9 @@
     "smtp-server": "^3.18.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.10"
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0"
   }
 }
