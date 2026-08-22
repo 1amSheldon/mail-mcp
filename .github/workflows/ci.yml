@@ -49,5 +49,8 @@ jobs:
       - name: Import smoke
         run: npm run smoke:import
 
+      - name: Package preview
+        run: npm pack --dry-run
+
       - name: Dependency audit
         run: npm audit

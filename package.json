@@ -1,6 +1,6 @@
 {
   "name": "@1amsheldon/mail-mcp",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "description": "Reliable IMAP and SMTP MCP server with explicit delivery states",
   "keywords": [
     "mcp",
@@ -10,8 +10,10 @@
     "model-context-protocol"
   ],
   "author": "1amSheldon",
-  "private": true,
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "homepage": "https://github.com/1amSheldon/mail-mcp#readme",
   "repository": {
     "type": "git",
@@ -29,6 +31,7 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md",
     "LICENSE"
   ],
@@ -40,7 +43,10 @@
     "smoke:stdio": "node scripts/smoke-stdio.mjs",
     "smoke:http": "node scripts/smoke-http.mjs",
     "probe:mail-read": "node scripts/probe-mail-read.mjs",
-    "smoke:import": "node -e \"import('./dist/index.js')\""
+    "smoke:import": "node -e \"import('./dist/index.js')\"",
+    "release:check": "npm run build && npm test && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run release:check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -51,6 +57,7 @@
     "nodemailer": "^9.0.5",
     "pdf-parse": "^2.4.5",
     "rate-limiter-flexible": "^10.0.1",
+    "smol-toml": "^1.8.0",
     "turndown": "^7.2.4",
     "zod": "^4.4.3"
   },

@@ -14,6 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { getAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
 import { installClaude } from './cli/install-claude.js';
+import { installCodex } from './cli/install-codex.js';
 import { MailService } from './services/mail.js';
 import type { SendDeliveryResult } from './services/mail.js';
 import { MailMCPError, NetworkError } from './errors.js';
@@ -1462,6 +1463,7 @@ async function main() {
       'bearer-token-env': { type: 'string', default: 'MAIL_MCP_BEARER_TOKEN' },
       'validate-accounts': { type: 'boolean', default: false },
       'install-claude': { type: 'boolean', default: false },
+      'install-codex': { type: 'boolean', default: false },
       'version': { type: 'boolean', default: false },
       'help': { type: 'boolean', short: 'h', default: false },
     },
@@ -1495,6 +1497,7 @@ Options:
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
   --install-claude            Write mail-mcp to Claude Desktop config and exit (one-command setup)
+  --install-codex             Write a pinned npm command to ~/.codex/config.toml and exit
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);
@@ -1502,6 +1505,43 @@ Options:
 
   if (values['validate-accounts']) {
     await runValidateAccounts();
+    process.exit(0);
+  }
+
+  if (values['install-codex']) {
+    const { join } = await import('node:path');
+    const { homedir } = await import('node:os');
+    const readOnly = (values['read-only'] as boolean | undefined) ?? false;
+    const allowToolsRaw = values['allow-tools'] as string | undefined;
+
+    if (readOnly && allowToolsRaw !== undefined) {
+      console.error('Error: --read-only and --allow-tools are mutually exclusive.');
+      process.exit(1);
+    }
+
+    const runtimeArgs = readOnly
+      ? ['--read-only']
+      : allowToolsRaw !== undefined
+        ? ['--allow-tools', allowToolsRaw]
+        : ['--confirm'];
+    runtimeArgs.push('--audit-log', '--redact');
+
+    const configPath = join(homedir(), '.codex', 'config.toml');
+    const packageSpec = `@1amsheldon/mail-mcp@${PACKAGE_VERSION}`;
+    try {
+      const result = await installCodex(configPath, packageSpec, runtimeArgs);
+      console.log(result.changed
+        ? `mail-mcp configured for Codex at: ${result.configPath}`
+        : `Codex already uses ${packageSpec}.`);
+      if (result.backupPath) {
+        console.log(`Previous config backed up to: ${result.backupPath}`);
+      }
+      console.log(`Server command: npx -y ${packageSpec} ${runtimeArgs.join(' ')}`);
+      console.log('Restart Codex to load the server.');
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
     process.exit(0);
   }
 
