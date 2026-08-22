@@ -6,9 +6,11 @@ import * as os from 'node:os';
 
 export const ACCOUNTS_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'accounts.json');
 export const AUDIT_LOG_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'audit.log');
+export const DEFAULT_KEYCHAIN_SERVICE = 'com.1amsheldon.mail-mcp';
+export const LEGACY_KEYCHAIN_SERVICE = 'ch.honest-magic.config.mail-server';
 
 const configSchema = z.object({
-  serviceName: z.string().default('ch.honest-magic.config.mail-server'),
+  serviceName: z.string().default(DEFAULT_KEYCHAIN_SERVICE),
   logLevel: z.string().default('info'),
 });
 
@@ -34,6 +36,7 @@ export const emailAccountSchema = z.object({
   signature: z.string().optional(),
   manageSievePort: z.number().int().positive().optional(),
   allowedRecipients: z.array(z.string()).optional(),
+  sentFolder: z.string().min(1).optional(),
 });
 
 export type EmailAccount = z.infer<typeof emailAccountSchema>;
@@ -53,11 +56,11 @@ function startWatcher(): void {
       cachedAccounts = null;
     });
   } catch {
-    // File may not exist yet — cache stays null until next read
+    // File may not exist yet; cache stays null until next read.
   }
 }
 
-/** @internal — exposed for testing only */
+/** @internal Exposed for testing only. */
 export function resetConfigCache(): void {
   cachedAccounts = null;
   watcherStarted = false;
@@ -83,7 +86,7 @@ async function loadAccountsFromDisk(): Promise<EmailAccount[]> {
     } else {
       const id = typeof item?.id === 'string' ? item.id : '(unknown)';
       const fields = result.error.issues.map((i) => i.path.join('.') || 'root').join(', ');
-      console.error(`accounts.json: account "${id}" skipped — invalid fields: ${fields}`);
+      console.error(`accounts.json: account "${id}" skipped; invalid fields: ${fields}`);
     }
   }
   return valid;
@@ -113,7 +116,7 @@ export async function getAccounts(): Promise<EmailAccount[]> {
 /**
  * Writes account definitions to ~/.config/mail-mcp/accounts.json.
  * Creates the directory if it does not exist.
- * Synchronous — CLI-only, used by `accounts add/remove`.
+ * Synchronous and CLI-only; used by `accounts add/remove`.
  * The fs.watch callback will invalidate the cache after this write.
  */
 export function saveAccounts(accounts: EmailAccount[]): void {

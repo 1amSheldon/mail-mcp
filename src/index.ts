@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
@@ -8,10 +9,14 @@ import {
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parseArgs } from 'node:util';
+import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { getAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
 import { installClaude } from './cli/install-claude.js';
+import { installCodex } from './cli/install-codex.js';
 import { MailService } from './services/mail.js';
+import type { SendDeliveryResult } from './services/mail.js';
 import { MailMCPError, NetworkError } from './errors.js';
 import { TieredRateLimiter } from './utils/rate-limiter.js';
 import { ImapClient } from './protocol/imap.js';
@@ -22,6 +27,11 @@ import { SieveClient } from './protocol/sieve.js';
 import { AuditLogger } from './utils/audit-logger.js';
 import { ConfirmationStore } from './utils/confirmation-store.js';
 import { AUDIT_LOG_PATH } from './config.js';
+import { MailMCPRuntimeState } from './runtime-state.js';
+import { startHttpHost } from './http-host.js';
+
+const require = createRequire(import.meta.url);
+const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
 
 const WRITE_TOOLS = new Set<string>([
   'send_email',
@@ -40,6 +50,16 @@ const WRITE_TOOLS = new Set<string>([
   'set_filter',
   'delete_filter',
 ]);
+
+function formatDeliveryResult(result: SendDeliveryResult) {
+  const isError = result.status === 'smtp_rejected' ||
+    result.status === 'smtp_connection_failed' ||
+    result.status === 'smtp_outcome_unknown';
+  return {
+    content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
+    ...(isError ? { isError: true } : {}),
+  };
+}
 
 /**
  * Build a human-readable description of a write tool action for the confirmation prompt.
@@ -87,22 +107,26 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
 
 export class MailMCPServer {
   private server: Server;
-  private services: Map<string, MailService> = new Map();
+  private services: Map<string, MailService>;
+  private serviceCreations: Map<string, Promise<MailService>>;
   private shuttingDown = false;
   private inFlightCount = 0;
-  private readonly rateLimiter = new TieredRateLimiter();
+  private readonly rateLimiter: TieredRateLimiter;
   private readonly allowedTools?: Set<string>;
   private readonly confirmMode: boolean;
   private readonly confirmStore: ConfirmationStore;
   private readonly auditLogger?: AuditLogger;
   private readonly redact: boolean;
+  private readonly runtimeState: MailMCPRuntimeState;
+  private readonly ownsRuntimeState: boolean;
 
   constructor(
     private readonly readOnly: boolean = false,
     allowedTools?: Set<string>,
     auditLogger?: AuditLogger,
     confirmMode: boolean = false,
-    redact: boolean = false
+    redact: boolean = false,
+    runtimeState?: MailMCPRuntimeState
   ) {
     if (readOnly && allowedTools !== undefined) {
       throw new Error(
@@ -115,6 +139,11 @@ export class MailMCPServer {
     this.confirmMode = confirmMode;
     this.confirmStore = new ConfirmationStore();
     this.redact = redact;
+    this.runtimeState = runtimeState ?? new MailMCPRuntimeState();
+    this.ownsRuntimeState = runtimeState === undefined;
+    this.services = this.runtimeState.services;
+    this.serviceCreations = this.runtimeState.serviceCreations;
+    this.rateLimiter = this.runtimeState.rateLimiter;
 
     const instructionsSuffix = (() => {
       if (readOnly) {
@@ -133,7 +162,7 @@ export class MailMCPServer {
     this.server = new Server(
       {
         name: 'mail-mcp-server',
-        version: '0.1.0',
+        version: PACKAGE_VERSION,
       },
       {
         capabilities: {
@@ -157,12 +186,10 @@ export class MailMCPServer {
       await new Promise(resolve => setTimeout(resolve, 50));
     }
 
-    // Disconnect all cached services
-    const disconnects = Array.from(this.services.values()).map(svc =>
-      svc.disconnect().catch(err => console.error('Disconnect error:', err))
-    );
-    await Promise.allSettled(disconnects);
-    this.services.clear();
+    if (this.ownsRuntimeState) {
+      await this.runtimeState.shutdown();
+    }
+    await this.server.close();
   }
 
   private async _createAndCacheService(accountId: string): Promise<MailService> {
@@ -177,7 +204,7 @@ export class MailMCPServer {
 
     // Wire close listener for auto-reconnect (CONN-02)
     service.imap.onClose = () => {
-      if (!this.shuttingDown) {
+      if (!this.runtimeState.isShuttingDown && this.services.get(accountId) === service) {
         this.services.delete(accountId);
       }
     };
@@ -189,20 +216,31 @@ export class MailMCPServer {
     if (this.services.has(accountId)) {
       return this.services.get(accountId)!;
     }
-    try {
-      return await this._createAndCacheService(accountId);
-    } catch (firstErr) {
-      // One retry with 1-second backoff (CONN-02)
-      await new Promise(r => setTimeout(r, 1_000));
+    const existingCreation = this.serviceCreations.get(accountId);
+    if (existingCreation) return existingCreation;
+
+    const creation = (async () => {
       try {
-        return await this._createAndCacheService(accountId);
-      } catch (secondErr) {
-        throw new NetworkError(
-          `Could not connect to account ${accountId} after reconnect attempt: ${(secondErr as Error).message}`,
-          { cause: secondErr }
-        );
+        try {
+          return await this._createAndCacheService(accountId);
+        } catch (firstErr) {
+          // IMAP connection setup is safe to retry because no SMTP send has started.
+          await new Promise(r => setTimeout(r, 1_000));
+          try {
+            return await this._createAndCacheService(accountId);
+          } catch (secondErr) {
+            throw new NetworkError(
+              `Could not connect to account ${accountId} after reconnect attempt: ${(secondErr as Error).message}`,
+              { cause: secondErr }
+            );
+          }
+        }
+      } finally {
+        this.serviceCreations.delete(accountId);
       }
-    }
+    })();
+    this.serviceCreations.set(accountId, creation);
+    return creation;
   }
 
   getTools(readOnly: boolean, allowedTools?: Set<string>) {
@@ -242,6 +280,9 @@ export class MailMCPServer {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             folder: { type: 'string', description: 'The folder to search in (default: INBOX)' },
             from: { type: 'string', description: 'Filter by sender' },
+            to: { type: 'string', description: 'Filter by To recipient' },
+            cc: { type: 'string', description: 'Filter by Cc recipient' },
+            messageId: { type: 'string', description: 'Filter by exact RFC Message-ID header' },
             subject: { type: 'string', description: 'Filter by subject' },
             since: { type: 'string', description: 'Filter by date (ISO format)' },
             before: { type: 'string', description: 'Filter by date (ISO format)' },
@@ -251,6 +292,22 @@ export class MailMCPServer {
           },
           required: ['accountId']
         }
+      },
+      {
+        name: 'verify_sent_message',
+        description: 'Read-only verification of whether a Message-ID exists in the IMAP Sent folder. Use after an uncertain SMTP result; absence is not proof that SMTP did not deliver. This tool never sends or retries a message.',
+        annotations: { readOnlyHint: true, destructiveHint: false },
+        inputSchema: {
+          type: 'object',
+          properties: {
+            accountId: { type: 'string', description: 'The ID of the account to use' },
+            messageId: { type: 'string', description: 'The exact RFC Message-ID returned by send_email, reply_email, or forward_email' },
+            sentFolder: { type: 'string', description: 'Optional Sent folder override. By default the account override or IMAP special-use Sent folder is used.' },
+            count: { type: 'number', description: 'Maximum matching messages to return (default: 10)' },
+            offset: { type: 'number', description: 'Number of matching messages to skip from the newest (default: 0)' },
+          },
+          required: ['accountId', 'messageId'],
+        },
       },
       {
         name: 'read_email',
@@ -690,26 +747,36 @@ export class MailMCPServer {
     const _dispatchStart = Date.now();
     let _dispatchIsError = false;
     let _dispatchErrorMsg: string | undefined;
+    const trackResult = <T extends { isError?: boolean; content?: Array<{ type: string; text?: string }> }>(result: T): T => {
+      if (result.isError) {
+        _dispatchIsError = true;
+        _dispatchErrorMsg = result.content
+          ?.map(item => item.text)
+          .filter((text): text is string => Boolean(text))
+          .join('\n') || 'Tool returned an error result';
+      }
+      return result;
+    };
     try {
       if (readOnly && WRITE_TOOLS.has(name)) {
-        return {
+        return trackResult({
           content: [{
             type: 'text',
             text: `Tool '${name}' is not available: server is running in read-only mode. Use a server without --read-only to perform write operations.`,
           }],
           isError: true,
-        };
+        });
       }
 
       if (this.allowedTools !== undefined && WRITE_TOOLS.has(name) && !this.allowedTools.has(name)) {
         const list = [...this.allowedTools].join(', ') || 'none';
-        return {
+        return trackResult({
           content: [{
             type: 'text',
             text: `Tool '${name}' is not available: not in the allowed tools list. Allowed write tools: ${list}. Use --allow-tools to change the list.`,
           }],
           isError: true,
-        };
+        });
       }
 
       // Confirmation mode gate — intercept write tools when --confirm is active
@@ -719,17 +786,25 @@ export class MailMCPServer {
           // Second call: validate and consume the token
           const pending = this.confirmStore.consume(confirmationId);
           if (!pending) {
-            return {
+            return trackResult({
               content: [{
                 type: 'text',
                 text: 'Confirmation token invalid or expired. Call the tool again without confirmationId to get a new token.',
               }],
               isError: true,
-            };
+            });
           }
           // Token valid — strip confirmationId from args and fall through to execute
-          const { confirmationId: _removed, ...cleanArgs } = args;
-          args = cleanArgs;
+          if (pending.toolName !== name) {
+            return trackResult({
+              content: [{
+                type: 'text',
+                text: `Confirmation token was issued for '${pending.toolName}', not '${name}'. Request a new confirmation token.`,
+              }],
+              isError: true,
+            });
+          }
+          args = { ...pending.args };
         } else {
           // First call: create confirmation token and return prompt
           const argsWithoutId = { ...args };
@@ -839,7 +914,7 @@ export class MailMCPServer {
       if (name === 'reply_email') {
         const service = await this.getService(args.accountId as string);
         const includeSignature = (args.includeSignature as boolean | undefined) !== false;
-        await (service as any).replyEmail(
+        const result = await service.replyEmail(
           args.uid as string,
           (args.folder as string | undefined) || 'INBOX',
           args.body as string,
@@ -848,15 +923,13 @@ export class MailMCPServer {
           args.bcc as string | undefined,
           includeSignature
         );
-        return {
-          content: [{ type: 'text', text: `Reply sent and saved to Sent folder.` }],
-        };
+        return trackResult(formatDeliveryResult(result));
       }
 
       if (name === 'forward_email') {
         const service = await this.getService(args.accountId as string);
         const includeSignature = (args.includeSignature as boolean | undefined) !== false;
-        await (service as any).forwardEmail(
+        const result = await service.forwardEmail(
           args.uid as string,
           (args.folder as string | undefined) || 'INBOX',
           args.to as string,
@@ -866,9 +939,7 @@ export class MailMCPServer {
           args.bcc as string | undefined,
           includeSignature
         );
-        return {
-          content: [{ type: 'text', text: `Email forwarded to ${args.to as string} and saved to Sent folder.` }],
-        };
+        return trackResult(formatDeliveryResult(result));
       }
 
       if (name === 'list_emails') {
@@ -883,6 +954,9 @@ export class MailMCPServer {
         const service = await this.getService(args.accountId as string);
         const messages = await (service as any).searchEmails({
           from: args.from,
+          to: args.to,
+          cc: args.cc,
+          messageId: args.messageId,
           subject: args.subject,
           since: args.since,
           before: args.before,
@@ -893,19 +967,229 @@ export class MailMCPServer {
         };
       }
 
+      if (name === 'read_email') {
+        const service = await this.getService(args.accountId as string);
+        const content = await service.readEmail(
+          args.uid as string,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return { content: [{ type: 'text', text: content }] };
+      }
+
+      if (name === 'list_folders') {
+        const service = await this.getService(args.accountId as string);
+        const folders = await service.listFolders();
+        return {
+          content: [{ type: 'text', text: JSON.stringify(folders, null, 2) }],
+        };
+      }
+
+      if (name === 'get_thread') {
+        const service = await this.getService(args.accountId as string);
+        const messages = await service.getThread(
+          args.threadId as string,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return {
+          content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],
+        };
+      }
+
+      if (name === 'get_attachment') {
+        const filename = args.filename as string;
+        const uid = args.uid as string;
+        const service = await this.getService(args.accountId as string);
+        const { content, contentType } = await service.downloadAttachment(
+          uid,
+          filename,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({ filename, contentType, bytes: content.length }, null, 2),
+            },
+            {
+              type: 'resource',
+              resource: {
+                uri: `mail-attachment://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(uid)}/${encodeURIComponent(filename)}`,
+                mimeType: contentType,
+                blob: content.toString('base64'),
+              },
+            },
+          ],
+        };
+      }
+
+      if (name === 'extract_attachment_text') {
+        const service = await this.getService(args.accountId as string);
+        const content = await service.extractAttachmentText(
+          args.uid as string,
+          args.filename as string,
+          (args.folder as string | undefined) ?? 'INBOX'
+        );
+        return { content: [{ type: 'text', text: content }] };
+      }
+
+      if (name === 'extract_contacts') {
+        const service = await this.getService(args.accountId as string);
+        const count = Math.min((args.count as number | undefined) ?? 100, 500);
+        const contacts = await service.extractContacts(
+          (args.folder as string | undefined) ?? 'INBOX',
+          count
+        );
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ contacts }, null, 2) }],
+        };
+      }
+
+      if (name === 'verify_sent_message') {
+        const messageId = String(args.messageId ?? '').trim();
+        if (!messageId) {
+          throw new Error('messageId is required');
+        }
+        const service = await this.getService(args.accountId as string);
+        const sentFolder = await service.resolveSentFolder(args.sentFolder as string | undefined);
+        const matches = await service.searchEmails(
+          { messageId },
+          sentFolder,
+          (args.count as number | undefined) ?? 10,
+          (args.offset as number | undefined) ?? 0
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              status: matches.length > 0 ? 'found_in_sent' : 'not_found_in_sent',
+              messageId,
+              sentFolder,
+              count: matches.length,
+              matches,
+              caution: matches.length > 0
+                ? 'The IMAP Sent copy exists. Do not resend.'
+                : 'Absence from Sent does not prove SMTP non-delivery. Do not retry automatically.',
+            }, null, 2),
+          }],
+        };
+      }
+
       if (name === 'send_email') {
         const service = await this.getService(args.accountId as string);
-        await (service as any).sendEmail(args.to, args.subject, args.body, args.isHtml, args.cc, args.bcc);
-        return {
-          content: [{ type: 'text', text: `Email successfully sent to ${args.to} and saved to Sent folder.` }],
-        };
+        const includeSignature = (args.includeSignature as boolean | undefined) !== false;
+        const result = await service.sendEmail(
+          args.to as string,
+          args.subject as string,
+          args.body as string,
+          args.isHtml as boolean | undefined,
+          args.cc as string | undefined,
+          args.bcc as string | undefined,
+          includeSignature
+        );
+        return trackResult(formatDeliveryResult(result));
       }
 
       if (name === 'create_draft') {
         const service = await this.getService(args.accountId as string);
-        await (service as any).createDraft(args.to, args.subject, args.body, args.isHtml, args.cc, args.bcc);
+        const includeSignature = (args.includeSignature as boolean | undefined) !== false;
+        await service.createDraft(
+          args.to as string,
+          args.subject as string,
+          args.body as string,
+          args.isHtml as boolean | undefined,
+          args.cc as string | undefined,
+          args.bcc as string | undefined,
+          includeSignature
+        );
         return {
           content: [{ type: 'text', text: `Draft successfully created in Drafts folder.` }],
+        };
+      }
+
+      if (name === 'move_email') {
+        const service = await this.getService(args.accountId as string);
+        const uid = args.uid as string;
+        const sourceFolder = args.sourceFolder as string;
+        const targetFolder = args.targetFolder as string;
+        await service.moveMessage(uid, sourceFolder, targetFolder);
+        service.invalidateBodyCache(sourceFolder, uid);
+        return {
+          content: [{
+            type: 'text',
+            text: `Email ${uid} moved from ${sourceFolder} to ${targetFolder}.`,
+          }],
+        };
+      }
+
+      if (name === 'modify_labels') {
+        const service = await this.getService(args.accountId as string);
+        await service.modifyLabels(
+          args.uid as string,
+          args.folder as string,
+          (args.addLabels as string[] | undefined) ?? [],
+          (args.removeLabels as string[] | undefined) ?? []
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: `Labels updated for email ${args.uid as string} in ${args.folder as string}.`,
+          }],
+        };
+      }
+
+      if (name === 'batch_operations') {
+        const service = await this.getService(args.accountId as string);
+        const action = args.action as 'move' | 'delete' | 'label';
+        let operation: Parameters<MailService['batchOperations']>[2];
+
+        if (action === 'move') {
+          const targetFolder = args.targetFolder as string | undefined;
+          if (!targetFolder) throw new Error('targetFolder is required for move action');
+          operation = { type: 'move', targetFolder };
+        } else if (action === 'delete') {
+          operation = { type: 'delete' };
+        } else if (action === 'label') {
+          operation = {
+            type: 'label',
+            addLabels: args.addLabels as string[] | undefined,
+            removeLabels: args.removeLabels as string[] | undefined,
+          };
+        } else {
+          throw new Error(`Unknown action: ${String(args.action)}`);
+        }
+
+        const result = await service.batchOperations(
+          args.uids as string[],
+          args.folder as string,
+          operation
+        );
+        return {
+          content: [{
+            type: 'text',
+            text: `Batch ${action} completed. ${result.processed} email(s) processed.`,
+          }],
+        };
+      }
+
+      if (name === 'register_oauth2_account') {
+        const accountId = args.accountId as string;
+        const accounts = await getAccounts();
+        if (!accounts.some(account => account.id === accountId)) {
+          throw new Error(`Account ${accountId} not found in configuration.`);
+        }
+
+        const { saveCredentials } = await import('./security/keychain.js');
+        await saveCredentials(accountId, JSON.stringify({
+          clientId: args.clientId,
+          clientSecret: args.clientSecret,
+          refreshToken: args.refreshToken,
+          tokenEndpoint: args.tokenEndpoint,
+        }));
+        return {
+          content: [{
+            type: 'text',
+            text: `OAuth2 credentials successfully saved for account ${accountId}.`,
+          }],
         };
       }
 
@@ -943,10 +1227,10 @@ export class MailMCPServer {
         const templates = await getTemplates();
         const template = templates.find(t => t.id === templateId);
         if (!template) {
-          return {
+          return trackResult({
             content: [{ type: 'text', text: `Template not found: "${templateId}". Use list_templates to see available templates.` }],
             isError: true,
-          };
+          });
         }
         const result: Record<string, unknown> = {
           body: applyVariables(template.body, variables),
@@ -1097,523 +1381,28 @@ export class MailMCPServer {
           isError: true,
         };
       }
+
       this.inFlightCount++;
-      const _auditStart = Date.now();
-      let _auditIsError = false;
-      let _auditErrorMsg: string | undefined;
       try {
-        const toolName = request.params.name;
-
-        if (this.readOnly && WRITE_TOOLS.has(toolName)) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Tool '${toolName}' is not available: server is running in read-only mode. Use a server without --read-only to perform write operations.`,
-            }],
-            isError: true,
-          };
-        }
-
-        if (this.allowedTools !== undefined && WRITE_TOOLS.has(toolName) && !this.allowedTools.has(toolName)) {
-          const list = [...this.allowedTools].join(', ') || 'none';
-          return {
-            content: [{
-              type: 'text',
-              text: `Tool '${toolName}' is not available: not in the allowed tools list. Allowed write tools: ${list}. Use --allow-tools to change the list.`,
-            }],
-            isError: true,
-          };
-        }
-
-        // Confirmation mode gate — intercept write tools when --confirm is active
-        if (this.confirmMode && WRITE_TOOLS.has(toolName)) {
-          const reqArgs = (request.params.arguments ?? {}) as Record<string, unknown>;
-          const confirmationId = reqArgs.confirmationId as string | undefined;
-          if (confirmationId) {
-            const pending = this.confirmStore.consume(confirmationId);
-            if (!pending) {
-              return {
-                content: [{
-                  type: 'text',
-                  text: 'Confirmation token invalid or expired. Call the tool again without confirmationId to get a new token.',
-                }],
-                isError: true,
-              };
-            }
-            // Token valid — replace request args with stored args (strip confirmationId)
-            (request.params as Record<string, unknown>).arguments = pending.args;
-          } else {
-            const argsForStore = { ...reqArgs };
-            delete argsForStore.confirmationId;
-            const id = this.confirmStore.create(toolName, argsForStore);
-            const description = buildConfirmationDescription(toolName, reqArgs);
-            return {
-              content: [{
-                type: 'text',
-                text: JSON.stringify({
-                  confirmationRequired: true,
-                  action: toolName,
-                  description,
-                  confirmationId: id,
-                  expiresIn: '5 minutes',
-                }, null, 2),
-              }],
-            };
-          }
-        }
-
-        // Rate limit guard — before any I/O
-        const reqAccountId = (request.params.arguments as Record<string, unknown>)?.accountId as string | undefined;
-        if (reqAccountId) {
-          if (WRITE_TOOLS.has(toolName)) {
-            await this.rateLimiter.consumeWrite(reqAccountId);
-          } else {
-            await this.rateLimiter.consumeRead(reqAccountId);
-          }
-        }
-
-        if (request.params.name === 'list_accounts') {
-          const accounts = await getAccounts();
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(
-                  accounts.map((a) => ({ id: a.id, name: a.name, user: a.user })),
-                  null,
-                  2
-                ),
-              },
-            ],
-          };
-        }
-
-        if (request.params.name === 'list_emails') {
-          const args = request.params.arguments as { accountId: string; folder?: string; count?: number; offset?: number; headerOnly?: boolean };
-          const service = await this.getService(args.accountId);
-          const messages = await service.listEmails(args.folder, args.count, args.offset, args.headerOnly ?? false);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(messages, null, 2)
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'search_emails') {
-          const args = request.params.arguments as {
-            accountId: string;
-            folder?: string;
-            from?: string;
-            subject?: string;
-            since?: string;
-            before?: string;
-            keywords?: string;
-            count?: number;
-            offset?: number;
-          };
-          const service = await this.getService(args.accountId);
-          const messages = await service.searchEmails({
-            from: args.from,
-            subject: args.subject,
-            since: args.since,
-            before: args.before,
-            keywords: args.keywords
-          }, args.folder, args.count, args.offset);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(messages, null, 2)
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'read_email') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string };
-          const service = await this.getService(args.accountId);
-          const content = await service.readEmail(args.uid, args.folder);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: content
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'reply_email') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string; body: string; isHtml?: boolean; cc?: string; bcc?: string; includeSignature?: boolean };
-          const includeSignature = args.includeSignature !== false;
-          const service = await this.getService(args.accountId);
-          await service.replyEmail(args.uid, args.folder || 'INBOX', args.body, args.isHtml, args.cc, args.bcc, includeSignature);
-          return {
-            content: [{ type: 'text', text: `Reply sent and saved to Sent folder.` }],
-          };
-        }
-
-        if (request.params.name === 'forward_email') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string; to: string; body?: string; isHtml?: boolean; cc?: string; bcc?: string; includeSignature?: boolean };
-          validateEmailAddresses(args.to, args.cc, args.bcc);
-          const includeSignature = args.includeSignature !== false;
-          const service = await this.getService(args.accountId);
-          await service.forwardEmail(args.uid, args.folder || 'INBOX', args.to, args.body || '', args.isHtml, args.cc, args.bcc, includeSignature);
-          return {
-            content: [{ type: 'text', text: `Email forwarded to ${args.to} and saved to Sent folder.` }],
-          };
-        }
-
-        if (request.params.name === 'send_email') {
-          const args = request.params.arguments as { accountId: string; to: string; subject: string; body: string; isHtml?: boolean; cc?: string; bcc?: string; includeSignature?: boolean };
-          validateEmailAddresses(args.to, args.cc, args.bcc);
-          const includeSignature = args.includeSignature !== false; // default true
-          const service = await this.getService(args.accountId);
-          await service.sendEmail(args.to, args.subject, args.body, args.isHtml, args.cc, args.bcc, includeSignature);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Email successfully sent to ${args.to} and saved to Sent folder.`
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'create_draft') {
-          const args = request.params.arguments as { accountId: string; to: string; subject: string; body: string; isHtml?: boolean; cc?: string; bcc?: string; includeSignature?: boolean };
-          validateEmailAddresses(args.to, args.cc, args.bcc);
-          const includeSignature = args.includeSignature !== false; // default true
-          const service = await this.getService(args.accountId);
-          await service.createDraft(args.to, args.subject, args.body, args.isHtml, args.cc, args.bcc, includeSignature);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Draft successfully created in Drafts folder.`
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'list_folders') {
-          const args = request.params.arguments as { accountId: string };
-          const service = await this.getService(args.accountId);
-          const folders = await service.listFolders();
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(folders, null, 2)
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'move_email') {
-          const args = request.params.arguments as { accountId: string; uid: string; sourceFolder: string; targetFolder: string };
-          const service = await this.getService(args.accountId);
-          await service.moveMessage(args.uid, args.sourceFolder, args.targetFolder);
-          // Invalidate cached body for the moved message (D-01 from 18-CONTEXT)
-          service.invalidateBodyCache(args.sourceFolder, args.uid);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Email ${args.uid} moved from ${args.sourceFolder} to ${args.targetFolder}.`
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'modify_labels') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder: string; addLabels?: string[]; removeLabels?: string[] };
-          const service = await this.getService(args.accountId);
-          await service.modifyLabels(args.uid, args.folder, args.addLabels || [], args.removeLabels || []);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Labels updated for email ${args.uid} in ${args.folder}.`
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'mark_read') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string };
-          const folder = args.folder || 'INBOX';
-          const service = await this.getService(args.accountId);
-          await service.modifyLabels(args.uid, folder, ['\\Seen'], []);
-          return {
-            content: [{ type: 'text', text: `Email ${args.uid} marked as read in ${folder}.` }]
-          };
-        }
-
-        if (request.params.name === 'mark_unread') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string };
-          const folder = args.folder || 'INBOX';
-          const service = await this.getService(args.accountId);
-          await service.modifyLabels(args.uid, folder, [], ['\\Seen']);
-          return {
-            content: [{ type: 'text', text: `Email ${args.uid} marked as unread in ${folder}.` }]
-          };
-        }
-
-        if (request.params.name === 'star') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string };
-          const folder = args.folder || 'INBOX';
-          const service = await this.getService(args.accountId);
-          await service.modifyLabels(args.uid, folder, ['\\Flagged'], []);
-          return {
-            content: [{ type: 'text', text: `Email ${args.uid} starred in ${folder}.` }]
-          };
-        }
-
-        if (request.params.name === 'unstar') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string };
-          const folder = args.folder || 'INBOX';
-          const service = await this.getService(args.accountId);
-          await service.modifyLabels(args.uid, folder, [], ['\\Flagged']);
-          return {
-            content: [{ type: 'text', text: `Email ${args.uid} unstarred in ${folder}.` }]
-          };
-        }
-
-        if (request.params.name === 'get_thread') {
-          const args = request.params.arguments as { accountId: string; threadId: string; folder?: string };
-          const service = await this.getService(args.accountId);
-          const messages = await service.getThread(args.threadId, args.folder);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify(messages, null, 2)
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'get_attachment') {
-          const args = request.params.arguments as { accountId: string; uid: string; filename: string; folder?: string };
-          const service = await this.getService(args.accountId);
-          const { content, contentType } = await service.downloadAttachment(args.uid, args.filename, args.folder);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Attachment "${args.filename}" downloaded successfully (${contentType}, ${content.length} bytes). Content (base64):\n\n${content.toString('base64')}`
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'extract_attachment_text') {
-          const args = request.params.arguments as { accountId: string; uid: string; filename: string; folder?: string };
-          const service = await this.getService(args.accountId);
-          const text = await service.extractAttachmentText(args.uid, args.filename, args.folder);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: text
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'register_oauth2_account') {
-          const args = request.params.arguments as { accountId: string; clientId: string; clientSecret: string; refreshToken: string; tokenEndpoint: string };
-          const { saveCredentials } = await import('./security/keychain.js');
-          const tokens = {
-            clientId: args.clientId,
-            clientSecret: args.clientSecret,
-            refreshToken: args.refreshToken,
-            tokenEndpoint: args.tokenEndpoint
-          };
-          await saveCredentials(args.accountId, JSON.stringify(tokens));
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `OAuth2 credentials successfully saved for account ${args.accountId}.`
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'batch_operations') {
-          const args = request.params.arguments as {
-            accountId: string;
-            uids: string[];
-            folder: string;
-            action: 'move' | 'delete' | 'label';
-            targetFolder?: string;
-            addLabels?: string[];
-            removeLabels?: string[];
-          };
-          const service = await this.getService(args.accountId);
-
-          let operation: Parameters<typeof service.batchOperations>[2];
-          if (args.action === 'move') {
-            if (!args.targetFolder) {
-              throw new Error('targetFolder is required for move action');
-            }
-            operation = { type: 'move', targetFolder: args.targetFolder };
-          } else if (args.action === 'delete') {
-            operation = { type: 'delete' };
-          } else if (args.action === 'label') {
-            operation = { type: 'label', addLabels: args.addLabels, removeLabels: args.removeLabels };
-          } else {
-            throw new Error(`Unknown action: ${args.action}`);
-          }
-
-          const result = await service.batchOperations(args.uids, args.folder, operation);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Batch ${args.action} completed. ${result.processed} email(s) processed.`
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'mailbox_stats') {
-          const args = request.params.arguments as { accountId: string; folders?: string[] };
-          const service = await this.getService(args.accountId);
-          const stats = await service.getMailboxStats(args.folders);
-          const header = `Folder            | Total | Unread | Recent\n` +
-                         `------------------|-------|--------|-------\n`;
-          const rows = stats.map(s => {
-            const total = s.total !== null ? String(s.total) : (s.error ? 'ERR' : '-');
-            const unread = s.unread !== null ? String(s.unread) : (s.error ? 'ERR' : '-');
-            const recent = s.recent !== null ? String(s.recent) : (s.error ? 'ERR' : '-');
-            const name = s.name.padEnd(17).slice(0, 17);
-            return `${name} | ${total.padStart(5)} | ${unread.padStart(6)} | ${recent.padStart(6)}${s.error ? `  [${s.error}]` : ''}`;
-          }).join('\n');
-          return {
-            content: [
-              {
-                type: 'text',
-                text: header + rows
-              }
-            ]
-          };
-        }
-
-        if (request.params.name === 'extract_contacts') {
-          const args = request.params.arguments as { accountId: string; folder?: string; count?: number };
-          const service = await this.getService(args.accountId);
-          const contacts = await service.extractContacts(args.folder ?? 'INBOX', args.count ?? 100);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: JSON.stringify({ contacts }, null, 2),
-              },
-            ],
-          };
-        }
-
-        if (request.params.name === 'delete_email') {
-          const args = request.params.arguments as { accountId: string; uid: string; folder?: string };
-          const service = await this.getService(args.accountId);
-          const folder = args.folder ?? 'INBOX';
-          await service.deleteEmail(args.uid, folder);
-          return {
-            content: [
-              {
-                type: 'text',
-                text: `Email ${args.uid} deleted from ${folder}.`
-              }
-            ]
-          };
-        }
-
-        if (
-          request.params.name === 'list_filters' ||
-          request.params.name === 'get_filter' ||
-          request.params.name === 'set_filter' ||
-          request.params.name === 'delete_filter'
-        ) {
-          const args = request.params.arguments as { accountId: string; name?: string; content?: string };
-          const accounts = await getAccounts();
-          const account = accounts.find(a => a.id === args.accountId);
-          if (!account) {
-            throw new Error(`Account ${args.accountId} not found in configuration.`);
-          }
-          const { loadCredentials } = await import('./security/keychain.js');
-          const password = await loadCredentials(args.accountId);
-          if (!password) {
-            throw new Error(`Credentials not found for account: ${args.accountId}`);
-          }
-          const sievePort = account.manageSievePort ?? 4190;
-          const sieve = new SieveClient(account.host, sievePort, account.user, password);
-          await sieve.connect();
-          try {
-            if (request.params.name === 'list_filters') {
-              const scripts = await sieve.listScripts();
-              return { content: [{ type: 'text', text: JSON.stringify(scripts, null, 2) }] };
-            }
-            if (request.params.name === 'get_filter') {
-              const content = await sieve.getScript(args.name!);
-              return { content: [{ type: 'text', text: content }] };
-            }
-            if (request.params.name === 'set_filter') {
-              await sieve.putScript(args.name!, args.content!);
-              return { content: [{ type: 'text', text: `Filter "${args.name}" saved successfully.` }] };
-            }
-            if (request.params.name === 'delete_filter') {
-              await sieve.deleteScript(args.name!);
-              return { content: [{ type: 'text', text: `Filter "${args.name}" deleted.` }] };
-            }
-          } finally {
-            await sieve.disconnect();
-          }
-        }
-
-        throw new McpError(ErrorCode.MethodNotFound, `Tool not found: ${request.params.name}`);
-      } catch (error: unknown) {
-        const message = error instanceof MailMCPError
-          ? `[${error.code}] ${error.message}`
-          : error instanceof Error
-            ? error.message
-            : String(error);
-        _auditIsError = true;
-        _auditErrorMsg = message;
-        return {
-          content: [{ type: 'text', text: message }],
-          isError: true,
-        };
+        return await this.dispatchTool(
+          request.params.name,
+          this.readOnly,
+          (request.params.arguments ?? {}) as Record<string, unknown>
+        );
       } finally {
         this.inFlightCount--;
-        if (this.auditLogger) {
-          const _toolName = request.params.name;
-          const _rawArgs = (request.params.arguments ?? {}) as Record<string, unknown>;
-          const _accountId = _rawArgs.accountId as string | undefined;
-          const _errMsg = _auditIsError ? (_auditErrorMsg ?? '(error)') : undefined;
-          this.auditLogger.log({
-            timestamp: new Date().toISOString(),
-            tool: _toolName,
-            ...(_accountId !== undefined ? { accountId: _accountId } : {}),
-            args: _rawArgs,
-            success: !_auditIsError,
-            durationMs: Date.now() - _auditStart,
-            ...(_auditIsError ? { error: _errMsg } : {}),
-          }).catch(() => {});
-        }
       }
     });
   }
 
   async run() {
     const transport = new StdioServerTransport();
-    await this.server.connect(transport);
+    await this.connect(transport);
     console.error('Mail MCP server running on stdio');
+  }
+
+  async connect(transport: StreamableHTTPServerTransport | StdioServerTransport): Promise<void> {
+    await this.server.connect(transport);
   }
 }
 
@@ -1668,8 +1457,13 @@ async function main() {
       'confirm': { type: 'boolean', default: false },
       'audit-log': { type: 'boolean', default: false },
       'redact': { type: 'boolean', default: false },
+      'http': { type: 'boolean', default: false },
+      'host': { type: 'string', default: '127.0.0.1' },
+      'port': { type: 'string', default: '8765' },
+      'bearer-token-env': { type: 'string', default: 'MAIL_MCP_BEARER_TOKEN' },
       'validate-accounts': { type: 'boolean', default: false },
       'install-claude': { type: 'boolean', default: false },
+      'install-codex': { type: 'boolean', default: false },
       'version': { type: 'boolean', default: false },
       'help': { type: 'boolean', short: 'h', default: false },
     },
@@ -1677,18 +1471,12 @@ async function main() {
   });
 
   if (values['version']) {
-    const { createRequire } = await import('node:module');
-    const require = createRequire(import.meta.url);
-    const pkg = require('../package.json');
-    console.log(pkg.version);
+    console.log(PACKAGE_VERSION);
     process.exit(0);
   }
 
   if (values['help']) {
-    const { createRequire } = await import('node:module');
-    const require = createRequire(import.meta.url);
-    const pkg = require('../package.json');
-    console.log(`mail-mcp v${pkg.version} — MCP server for IMAP/SMTP email access
+    console.log(`mail-mcp v${PACKAGE_VERSION} - MCP server for IMAP/SMTP email access
 
 Usage: mail-mcp [options] [command]
 
@@ -1700,11 +1488,16 @@ Commands:
 Options:
   --read-only                 Start in read-only mode (no send/move/label tools)
   --allow-tools t1,t2,...     Allow only specific write tools (comma-separated). Mutually exclusive with --read-only.
-  --confirm                   Enable confirmation mode — write tools require a two-step call (first returns confirmationId, second executes)
+  --confirm                   Enable confirmation mode; write tools require a two-step call (first returns confirmationId, second executes)
   --audit-log                 Append a JSONL entry for every tool call to ~/.config/mail-mcp/audit.log
   --redact                    Mask credit card numbers, SSNs, passwords, and API keys in email content before returning to AI
+  --http                      Run one shared Streamable HTTP service instead of stdio
+  --host HOST                 HTTP bind address (default: 127.0.0.1)
+  --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
+  --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
   --install-claude            Write mail-mcp to Claude Desktop config and exit (one-command setup)
+  --install-codex             Write a pinned npm command to ~/.codex/config.toml and exit
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);
@@ -1712,6 +1505,43 @@ Options:
 
   if (values['validate-accounts']) {
     await runValidateAccounts();
+    process.exit(0);
+  }
+
+  if (values['install-codex']) {
+    const { join } = await import('node:path');
+    const { homedir } = await import('node:os');
+    const readOnly = (values['read-only'] as boolean | undefined) ?? false;
+    const allowToolsRaw = values['allow-tools'] as string | undefined;
+
+    if (readOnly && allowToolsRaw !== undefined) {
+      console.error('Error: --read-only and --allow-tools are mutually exclusive.');
+      process.exit(1);
+    }
+
+    const runtimeArgs = readOnly
+      ? ['--read-only']
+      : allowToolsRaw !== undefined
+        ? ['--allow-tools', allowToolsRaw]
+        : ['--confirm'];
+    runtimeArgs.push('--audit-log', '--redact');
+
+    const configPath = join(homedir(), '.codex', 'config.toml');
+    const packageSpec = `@1amsheldon/mail-mcp@${PACKAGE_VERSION}`;
+    try {
+      const result = await installCodex(configPath, packageSpec, runtimeArgs);
+      console.log(result.changed
+        ? `mail-mcp configured for Codex at: ${result.configPath}`
+        : `Codex already uses ${packageSpec}.`);
+      if (result.backupPath) {
+        console.log(`Previous config backed up to: ${result.backupPath}`);
+      }
+      console.log(`Server command: npx -y ${packageSpec} ${runtimeArgs.join(' ')}`);
+      console.log('Restart Codex to load the server.');
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
     process.exit(0);
   }
 
@@ -1723,7 +1553,8 @@ Options:
     // Detect binary path: try `which mail-mcp`, fall back to current script
     let binaryPath: string;
     try {
-      binaryPath = execSync('which mail-mcp', { encoding: 'utf8' }).trim();
+      const lookupCommand = process.platform === 'win32' ? 'where.exe mail-mcp' : 'command -v mail-mcp';
+      binaryPath = execSync(lookupCommand, { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
     } catch {
       binaryPath = process.argv[1];
     }
@@ -1765,7 +1596,42 @@ Options:
   const auditLogEnabled = (values['audit-log'] as boolean | undefined) ?? false;
   const auditLogger = new AuditLogger(AUDIT_LOG_PATH, auditLogEnabled);
   const redact = (values['redact'] as boolean | undefined) ?? false;
-  const server = new MailMCPServer(readOnly, allowedTools, auditLogger, confirmMode, redact);
+  const httpMode = (values['http'] as boolean | undefined) ?? false;
+  const runtimeState = httpMode ? new MailMCPRuntimeState() : undefined;
+  const createServer = () => new MailMCPServer(
+    readOnly,
+    allowedTools,
+    auditLogger,
+    confirmMode,
+    redact,
+    runtimeState
+  );
+  const server = httpMode ? undefined : createServer();
+  let httpHost: Awaited<ReturnType<typeof startHttpHost>> | undefined;
+
+  if (httpMode) {
+    const host = values['host'] as string;
+    const portRaw = values['port'] as string;
+    const port = Number.parseInt(portRaw, 10);
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      throw new Error(`Invalid HTTP port: ${portRaw}`);
+    }
+
+    const tokenEnv = values['bearer-token-env'] as string;
+    const bearerToken = process.env[tokenEnv];
+    if (!bearerToken) {
+      throw new Error(`Environment variable ${tokenEnv} is not set`);
+    }
+
+    httpHost = await startHttpHost({
+      host,
+      port,
+      bearerToken,
+      createSession: createServer,
+      shutdownSharedResources: () => runtimeState!.shutdown(),
+    });
+    console.error(`Mail MCP server running on ${httpHost.url}`);
+  }
 
   const shutdown = async () => {
     const timer = setTimeout(() => {
@@ -1773,17 +1639,23 @@ Options:
       process.exit(1);
     }, 10_000);
     timer.unref();
-    await server.shutdown();
+    if (httpHost) {
+      await httpHost.close();
+    } else {
+      await server!.shutdown();
+    }
     process.exit(0);
   };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 
-  server.run().catch(console.error);
+  if (!httpMode) {
+    await server!.run();
+  }
 }
 
-// Only auto-run when executed directly (not when imported by tests)
-const isDirectRun = !process.env.VITEST && !process.env.NODE_TEST;
+// Importing the module must not start a stdio server.
+const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isDirectRun) {
   main().catch((err) => {
     console.error(err);

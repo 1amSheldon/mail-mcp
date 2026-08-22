@@ -1,9 +1,16 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 const mockImapConnect = vi.fn().mockResolvedValue(undefined);
-const mockImapAppendMessage = vi.fn().mockResolvedValue(undefined);
+const mockImapAppendMessage = vi.fn().mockResolvedValue({ uid: 101 });
+const mockFindSpecialUseFolder = vi.fn().mockResolvedValue('Sent');
 const mockSmtpConnect = vi.fn().mockResolvedValue(undefined);
-const mockSmtpSend = vi.fn().mockResolvedValue({ messageId: 'test' });
+const mockSmtpDisconnect = vi.fn();
+const mockSmtpSend = vi.fn().mockResolvedValue({
+  messageId: '<test@example.com>',
+  accepted: ['to@example.com'],
+  rejected: [],
+  rawMessage: Buffer.from('Message-ID: <test@example.com>\r\n\r\nBody'),
+});
 const mockFetchAttachmentSize = vi.fn();
 const mockFetchMessageBody = vi.fn();
 const mockGetMailboxStatus = vi.fn().mockResolvedValue([
@@ -12,6 +19,7 @@ const mockGetMailboxStatus = vi.fn().mockResolvedValue([
 ]);
 const mockListFolders = vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts']);
 const mockScanSenderEnvelopes = vi.fn().mockResolvedValue([]);
+const mockSearchMessages = vi.fn().mockResolvedValue([]);
 
 vi.mock('../protocol/imap.js', () => {
   return {
@@ -19,25 +27,57 @@ vi.mock('../protocol/imap.js', () => {
       return {
         connect: mockImapConnect,
         appendMessage: mockImapAppendMessage,
+        findSpecialUseFolder: mockFindSpecialUseFolder,
         fetchAttachmentSize: mockFetchAttachmentSize,
         fetchMessageBody: mockFetchMessageBody,
         getMailboxStatus: mockGetMailboxStatus,
         listFolders: mockListFolders,
         scanSenderEnvelopes: mockScanSenderEnvelopes,
+        searchMessages: mockSearchMessages,
       };
     }),
   };
 });
 
 vi.mock('../protocol/smtp.js', () => {
+  class MockSmtpSendError extends Error {
+    constructor(message: string, public readonly messageId: string) {
+      super(message);
+      this.name = 'SmtpSendError';
+    }
+  }
+  class MockSmtpRecipientRejectedError extends Error {
+    constructor(
+      message: string,
+      public readonly messageId: string,
+      public readonly rejected: string[]
+    ) {
+      super(message);
+      this.name = 'SmtpRecipientRejectedError';
+    }
+  }
   return {
     SmtpClient: vi.fn(function () {
-      return { connect: mockSmtpConnect, send: mockSmtpSend };
+      return { connect: mockSmtpConnect, disconnect: mockSmtpDisconnect, send: mockSmtpSend };
     }),
+    SmtpRecipientRejectedError: MockSmtpRecipientRejectedError,
+    SmtpSendError: MockSmtpSendError,
   };
 });
 
 import { MailService, applySignature } from './mail.js';
+
+beforeEach(() => {
+  mockSmtpConnect.mockReset().mockResolvedValue(undefined);
+  mockSmtpSend.mockReset().mockResolvedValue({
+    messageId: '<test@example.com>',
+    accepted: ['to@example.com'],
+    rejected: [],
+    rawMessage: Buffer.from('Message-ID: <test@example.com>\r\n\r\nBody'),
+  });
+  mockImapAppendMessage.mockReset().mockResolvedValue({ uid: 101 });
+  mockFindSpecialUseFolder.mockReset().mockResolvedValue('Sent');
+});
 
 describe('MailService SMTP connection behavior', () => {
   beforeEach(() => {
@@ -72,6 +112,146 @@ describe('MailService SMTP connection behavior', () => {
     expect(mockSmtpConnect).not.toHaveBeenCalled();
     await service.sendEmail('to@test.com', 'subject', 'body');
     expect(mockSmtpConnect).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('MailService delivery contract', () => {
+  const account = {
+    id: 'test',
+    name: 'Test',
+    user: 'test@example.com',
+    authType: 'login' as const,
+    host: 'imap.example.com',
+    port: 993,
+    useTLS: true,
+  };
+
+  beforeEach(() => {
+    mockSmtpConnect.mockReset().mockResolvedValue(undefined);
+    mockSmtpSend.mockReset().mockResolvedValue({
+      messageId: '<delivery@example.com>',
+      accepted: ['recipient@example.com'],
+      rejected: [],
+      rawMessage: Buffer.from('Message-ID: <delivery@example.com>\r\n\r\nBody'),
+    });
+    mockImapAppendMessage.mockReset().mockResolvedValue({ uid: 777 });
+    mockFindSpecialUseFolder.mockReset().mockResolvedValue('Sent Items');
+  });
+
+  it('returns sent_and_saved with the IMAP UID', async () => {
+    const service = new MailService(account, false);
+    await service.connect();
+    const result = await service.sendEmail('recipient@example.com', 'Subject', 'Body');
+
+    expect(result).toMatchObject({
+      status: 'sent_and_saved',
+      smtpAccepted: true,
+      messageId: '<delivery@example.com>',
+      sentFolder: 'Sent Items',
+      sentFolderSaved: true,
+      sentFolderUid: 777,
+      retrySafe: false,
+    });
+    expect(mockImapAppendMessage).toHaveBeenCalledWith(
+      'Sent Items',
+      expect.any(Buffer),
+      ['\\Seen']
+    );
+  });
+
+  it('does not claim Sent persistence or retry SMTP when append fails', async () => {
+    mockImapAppendMessage.mockRejectedValueOnce(new Error('folder unavailable'));
+    const service = new MailService(account, false);
+    await service.connect();
+    const result = await service.sendEmail('recipient@example.com', 'Subject', 'Body');
+
+    expect(result.status).toBe('smtp_accepted_sent_not_confirmed');
+    expect(result.smtpAccepted).toBe(true);
+    expect(result.sentFolderSaved).toBe(false);
+    expect(result.warning).toContain('folder unavailable');
+    expect(result.nextAction).toContain('Do not retry SMTP');
+    expect(mockSmtpSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports an unknown SMTP outcome and never appends or retries', async () => {
+    mockSmtpSend.mockRejectedValueOnce(new Error('transport closed after DATA'));
+    const service = new MailService(account, false);
+    await service.connect();
+    const result = await service.sendEmail('recipient@example.com', 'Subject', 'Body');
+
+    expect(result.status).toBe('smtp_outcome_unknown');
+    expect(result.smtpAccepted).toBeNull();
+    expect(result.retrySafe).toBe(false);
+    expect(result.nextAction).toContain('Do not retry automatically');
+    expect(mockSmtpSend).toHaveBeenCalledTimes(1);
+    expect(mockImapAppendMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports a definitive all-recipient rejection without Sent verification advice', async () => {
+    const { SmtpRecipientRejectedError } = await import('../protocol/smtp.js');
+    mockSmtpSend.mockRejectedValueOnce(new SmtpRecipientRejectedError(
+      'SMTP rejected all recipients',
+      '<rejected@example.com>',
+      ['bad@example.com']
+    ));
+    const service = new MailService(account, false);
+    await service.connect();
+    const result = await service.sendEmail('bad@example.com', 'Subject', 'Body');
+
+    expect(result).toMatchObject({
+      status: 'smtp_rejected',
+      smtpAccepted: false,
+      accepted: [],
+      rejected: ['bad@example.com'],
+      messageId: '<rejected@example.com>',
+      sentFolderSaved: false,
+      retrySafe: false,
+    });
+    expect(result.nextAction).toContain('Correct the rejected recipients');
+    expect(mockImapAppendMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports partial SMTP acceptance explicitly', async () => {
+    mockSmtpSend.mockResolvedValueOnce({
+      messageId: '<partial@example.com>',
+      accepted: ['ok@example.com'],
+      rejected: ['bad@example.com'],
+      rawMessage: Buffer.from('Message-ID: <partial@example.com>\r\n\r\nBody'),
+    });
+    const service = new MailService(account, false);
+    await service.connect();
+    const result = await service.sendEmail('ok@example.com,bad@example.com', 'Subject', 'Body');
+    expect(result.status).toBe('partially_sent_and_saved');
+    expect(result.accepted).toEqual(['ok@example.com']);
+    expect(result.rejected).toEqual(['bad@example.com']);
+  });
+
+  it('returns a connection failure before any SMTP send attempt', async () => {
+    mockSmtpConnect.mockRejectedValueOnce(new Error('authentication failed'));
+    const service = new MailService(account, false);
+    await service.connect();
+    const result = await service.sendEmail('recipient@example.com', 'Subject', 'Body');
+    expect(result.status).toBe('smtp_connection_failed');
+    expect(result.retrySafe).toBe(true);
+    expect(mockSmtpSend).not.toHaveBeenCalled();
+    expect(mockImapAppendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('MailService searchable delivery identifiers', () => {
+  it('maps to, cc, and Message-ID to IMAP search criteria', async () => {
+    const account = { id: 'test', name: 'Test', user: 'test@example.com' } as any;
+    const service = new MailService(account, false);
+    await service.searchEmails({
+      to: 'to@example.com',
+      cc: 'cc@example.com',
+      messageId: '<delivery@example.com>',
+    }, 'Sent', 5, 2);
+    expect(mockSearchMessages).toHaveBeenCalledWith({
+      to: 'to@example.com',
+      cc: 'cc@example.com',
+      header: { 'Message-ID': '<delivery@example.com>' },
+    }, 'Sent', 5, 2);
   });
 });
 
@@ -316,6 +496,62 @@ describe('readEmail List-Unsubscribe header extraction', () => {
   });
 });
 
+describe('readEmail inline image handling', () => {
+  const account = { id: 'test', name: 'Test', user: 'test@example.com', imap: {} as any, smtp: {} as any };
+
+  beforeEach(() => {
+    mockFetchMessageBody.mockClear();
+  });
+
+  function makeParsedMail(html: string, attachments: any[] = []): any {
+    return {
+      from: { text: 'sender@example.com' },
+      to: { text: 'recipient@example.com' },
+      subject: 'Inline image',
+      date: new Date('2026-01-01T00:00:00Z'),
+      html,
+      headers: new Map(),
+      attachments,
+    };
+  }
+
+  it('references CID images through get_attachment without embedding base64', async () => {
+    mockFetchMessageBody.mockResolvedValue(
+      makeParsedMail('<p>Hello</p><img alt="Diagram" src="cid:hero">', [
+        {
+          contentId: 'hero',
+          filename: 'diagram.png',
+          contentType: 'image/png',
+          content: Buffer.from('binary-image-data'),
+          size: 17,
+        },
+      ])
+    );
+    const service = new MailService(account, false);
+    await service.connect();
+
+    const result = await service.readEmail('42');
+
+    expect(result).toContain('mail-attachment://test/42/diagram.png');
+    expect(result).not.toContain('data:image/');
+    expect(result).not.toContain(Buffer.from('binary-image-data').toString('base64'));
+  });
+
+  it('removes pre-embedded data image payloads from HTML', async () => {
+    mockFetchMessageBody.mockResolvedValue(
+      makeParsedMail('<img alt="Embedded" src="data:image/png;base64,QUJDRA==">')
+    );
+    const service = new MailService(account, false);
+    await service.connect();
+
+    const result = await service.readEmail('43');
+
+    expect(result).toContain('mail-inline-image://omitted');
+    expect(result).not.toContain('data:image/');
+    expect(result).not.toContain('QUJDRA==');
+  });
+});
+
 // ---------------------------------------------------------------------------
 // replyEmail tests
 // ---------------------------------------------------------------------------
@@ -423,7 +659,7 @@ describe('MailService replyEmail', () => {
     const service = new MailService(baseAccount, false);
     await service.connect();
     await service.replyEmail('42', 'INBOX', 'My reply');
-    expect(mockImapAppendMessage).toHaveBeenCalledWith('Sent', expect.any(String), ['\\Seen']);
+    expect(mockImapAppendMessage).toHaveBeenCalledWith('Sent', expect.any(Buffer), ['\\Seen']);
   });
 
   it('applies signature when account has one and includeSignature is true', async () => {
@@ -455,6 +691,15 @@ describe('MailService replyEmail', () => {
     // extraHeaders should be empty or absent
     const extraHeaders = mockSmtpSend.mock.calls[0][6];
     expect(extraHeaders === undefined || Object.keys(extraHeaders).length === 0).toBe(true);
+  });
+
+  it('refuses to send when the original message has no From address', async () => {
+    mockFetchMessageBody.mockResolvedValueOnce(makeOriginalMail({ from: undefined }));
+    const service = new MailService(baseAccount, false);
+    await service.connect();
+    await expect(service.replyEmail('42', 'INBOX', 'My reply'))
+      .rejects.toThrow('no valid From address');
+    expect(mockSmtpSend).not.toHaveBeenCalled();
   });
 });
 
@@ -569,7 +814,7 @@ describe('MailService forwardEmail', () => {
     const service = new MailService(baseAccount, false);
     await service.connect();
     await service.forwardEmail('42', 'INBOX', 'friend@example.com', '');
-    expect(mockImapAppendMessage).toHaveBeenCalledWith('Sent', expect.any(String), ['\\Seen']);
+    expect(mockImapAppendMessage).toHaveBeenCalledWith('Sent', expect.any(Buffer), ['\\Seen']);
   });
 
   it('applies signature when account has one and includeSignature is true', async () => {

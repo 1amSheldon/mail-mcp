@@ -28,6 +28,10 @@ export interface SenderEnvelope {
   date: Date;
 }
 
+export interface AppendMessageResult {
+  uid?: number;
+}
+
 export class ImapClient {
   private client: ImapFlow | null = null;
   private account: EmailAccount;
@@ -258,14 +262,18 @@ export class ImapClient {
     }
   }
 
-  async appendMessage(folder: string, rawMessage: string | Buffer, flags: string[] = []): Promise<void> {
+  async appendMessage(folder: string, rawMessage: string | Buffer, flags: string[] = []): Promise<AppendMessageResult> {
     if (!this.client) {
       throw new Error('Not connected');
     }
 
     const lock = await this.client.getMailboxLock(folder);
     try {
-      await this.client.append(folder, rawMessage, flags);
+      const response = await this.client.append(folder, rawMessage, flags);
+      if (!response) {
+        throw new Error(`IMAP APPEND to ${folder} returned no confirmation`);
+      }
+      return { uid: response.uid };
     } finally {
       lock.release();
     }
@@ -275,6 +283,13 @@ export class ImapClient {
     if (!this.client) throw new Error('Not connected');
     const folders = await this.client.list();
     return folders.map(f => f.path);
+  }
+
+  async findSpecialUseFolder(specialUse: string): Promise<string | undefined> {
+    if (!this.client) throw new Error('Not connected');
+    const normalized = specialUse.toLowerCase();
+    const folders = await this.client.list();
+    return folders.find(folder => folder.specialUse?.toLowerCase() === normalized)?.path;
   }
 
   async moveMessage(uid: string, sourceFolder: string, targetFolder: string): Promise<void> {

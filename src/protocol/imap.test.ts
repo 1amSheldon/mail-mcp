@@ -35,10 +35,11 @@ vi.mock('imapflow', () => {
         search: vi.fn().mockResolvedValue([1]),
         list: vi.fn().mockResolvedValue([
           { path: 'INBOX' },
-          { path: 'Sent' },
+          { path: 'Sent', specialUse: '\\Sent' },
           { path: 'Drafts' },
           { path: 'Trash' }
         ]),
+        append: vi.fn().mockResolvedValue({ uid: 321 }),
         messageMove: vi.fn().mockResolvedValue(undefined),
         messageFlagsAdd: vi.fn().mockResolvedValue(undefined),
         messageFlagsRemove: vi.fn().mockResolvedValue(undefined),
@@ -109,6 +110,37 @@ describe('ImapClient', () => {
       await client.connect();
       const folders = await client.listFolders();
       expect(folders).toEqual(['INBOX', 'Sent', 'Drafts', 'Trash']);
+    });
+
+    it('resolves the server special-use Sent folder', async () => {
+      const client = new ImapClient(account);
+      await client.connect();
+      await expect(client.findSpecialUseFolder('\\Sent')).resolves.toBe('Sent');
+    });
+  });
+
+  describe('appendMessage', () => {
+    it('returns the UID supplied by UIDPLUS', async () => {
+      const client = new ImapClient(account);
+      await client.connect();
+      await expect(client.appendMessage('Sent', Buffer.from('raw'), ['\\Seen']))
+        .resolves.toEqual({ uid: 321 });
+    });
+
+    it('treats an empty APPEND response as unconfirmed', async () => {
+      const { ImapFlow } = await import('imapflow');
+      const MockImapFlow = ImapFlow as any;
+      MockImapFlow.mockImplementationOnce(function () {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          once: vi.fn(),
+          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+          append: vi.fn().mockResolvedValue(false),
+        };
+      });
+      const client = new ImapClient(account);
+      await client.connect();
+      await expect(client.appendMessage('Sent', 'raw')).rejects.toThrow('no confirmation');
     });
   });
 

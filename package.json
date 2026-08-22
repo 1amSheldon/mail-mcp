@@ -1,28 +1,29 @@
 {
-  "name": "@honest-magic/mail-mcp",
-  "version": "1.4.0",
-  "description": "MCP server for AI-powered email access via IMAP and SMTP",
+  "name": "@1amsheldon/mail-mcp",
+  "version": "1.5.0",
+  "description": "Reliable IMAP and SMTP MCP server with explicit delivery states",
   "keywords": [
     "mcp",
     "email",
     "imap",
     "smtp",
-    "ai",
-    "llm",
     "model-context-protocol"
   ],
-  "author": "honest-magic",
+  "author": "1amSheldon",
   "license": "MIT",
-  "homepage": "https://github.com/honest-magic/mail-mcp#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "homepage": "https://github.com/1amSheldon/mail-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/honest-magic/mail-mcp.git"
+    "url": "git+https://github.com/1amSheldon/mail-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/honest-magic/mail-mcp/issues"
+    "url": "https://github.com/1amSheldon/mail-mcp/issues"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.19.0"
   },
   "type": "module",
   "bin": {
@@ -30,40 +31,49 @@
   },
   "files": [
     "dist",
+    "docs",
     "README.md",
     "LICENSE"
   ],
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
-    "test:integration": "vitest run --config vitest.integration.config.ts"
+    "test:integration": "vitest run --config vitest.integration.config.ts",
+    "smoke:stdio": "node scripts/smoke-stdio.mjs",
+    "smoke:http": "node scripts/smoke-http.mjs",
+    "probe:mail-read": "node scripts/probe-mail-read.mjs",
+    "smoke:import": "node -e \"import('./dist/index.js')\"",
+    "release:check": "npm run build && npm test && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run release:check"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "cross-keychain": "^1.1.0",
-    "dotenv": "^17.3.1",
-    "imapflow": "^1.2.16",
-    "mailparser": "^3.9.4",
-    "nodemailer": "^8.0.3",
+    "dotenv": "^17.4.2",
+    "imapflow": "^1.6.5",
+    "mailparser": "^3.9.15",
+    "nodemailer": "^9.0.5",
     "pdf-parse": "^2.4.5",
     "rate-limiter-flexible": "^10.0.1",
-    "turndown": "^7.2.2",
-    "zod": "^4.3.6"
+    "smol-toml": "^1.8.0",
+    "turndown": "^7.2.4",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/mailparser": "^3.4.6",
-    "@types/node": "^25.5.0",
-    "@types/nodemailer": "^7.0.11",
+    "@types/node": "^20.19.43",
+    "@types/nodemailer": "^8.0.1",
     "@types/pdf-parse": "^1.1.5",
-    "@types/smtp-server": "^3.5.12",
+    "@types/smtp-server": "^3.5.13",
     "@types/turndown": "^5.0.6",
     "smtp-server": "^3.18.1",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.0"
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "deepmerge-ts": "^8.0.0"
   }
 }

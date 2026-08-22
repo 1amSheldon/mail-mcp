@@ -1,0 +1,56 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - agent/**
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Node ${{ matrix.node-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node-version:
+          - 20
+          - 22
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      - name: Stdio smoke
+        run: npm run smoke:stdio
+
+      - name: HTTP smoke
+        run: npm run smoke:http
+
+      - name: Import smoke
+        run: npm run smoke:import
+
+      - name: Package preview
+        run: npm pack --dry-run
+
+      - name: Dependency audit
+        run: npm audit

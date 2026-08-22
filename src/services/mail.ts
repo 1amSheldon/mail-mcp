@@ -1,11 +1,53 @@
 import { ImapClient, MessageMetadata, MailboxStatus, SenderEnvelope } from '../protocol/imap.js';
-import { SmtpClient } from '../protocol/smtp.js';
+import {
+  SmtpClient,
+  SmtpRecipientRejectedError,
+  SmtpSendError,
+} from '../protocol/smtp.js';
 import { htmlToMarkdown } from '../utils/markdown.js';
 import { EmailAccount } from '../types/index.js';
 import { ValidationError } from '../errors.js';
 import { MessageBodyCache } from '../utils/message-cache.js';
 import { redactSensitiveContent } from '../utils/redact.js';
 import type { ParsedMail } from 'mailparser';
+
+const DEFAULT_SENT_FOLDER = 'Sent';
+const MAX_READ_BODY_CHARS = 200_000;
+const INLINE_DATA_IMAGE_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/_=-]+/gi;
+
+export type DeliveryStatus =
+  | 'sent_and_saved'
+  | 'partially_sent_and_saved'
+  | 'smtp_accepted_sent_not_confirmed'
+  | 'smtp_partially_accepted_sent_not_confirmed'
+  | 'smtp_rejected'
+  | 'smtp_connection_failed'
+  | 'smtp_outcome_unknown';
+
+export interface SendDeliveryResult {
+  status: DeliveryStatus;
+  smtpAccepted: boolean | null;
+  accepted: string[];
+  rejected: string[];
+  messageId?: string;
+  sentFolder?: string;
+  sentFolderSaved: boolean;
+  sentFolderUid?: number;
+  retrySafe: boolean;
+  nextAction: string;
+  warning?: string;
+  error?: string;
+}
+
+interface OutgoingMessage {
+  to: string;
+  subject: string;
+  body: string;
+  isHtml: boolean;
+  cc?: string;
+  bcc?: string;
+  extraHeaders?: Record<string, string>;
+}
 
 /**
  * Pure helper — appends `signature` to `body` when `includeSignature` is true and
@@ -37,7 +79,7 @@ export class MailService {
   private smtpClient: SmtpClient;
   private account: EmailAccount;
 
-  private smtpConnected = false;
+  private sentFolderPromise: Promise<string> | null = null;
   private readonly bodyCache = new MessageBodyCache();
 
   constructor(account: EmailAccount, private readonly readOnly: boolean = false, private readonly redact: boolean = false) {
@@ -55,59 +97,172 @@ export class MailService {
   }
 
   private async ensureSmtp(): Promise<void> {
-    if (!this.smtpConnected) {
-      await this.smtpClient.connect();
-      this.smtpConnected = true;
-    }
+    await this.smtpClient.connect();
   }
 
   async disconnect() {
+    this.smtpClient.disconnect();
     await this.imapClient.disconnect();
-    // nodemailer transporter doesn't strictly need closing, but good practice if pooling
   }
 
   async listEmails(folder: string = 'INBOX', count: number = 10, offset: number = 0, headerOnly: boolean = false): Promise<MessageMetadata[]> {
     return this.imapClient.listMessages(folder, count, offset, headerOnly);
   }
 
-  async searchEmails(query: { from?: string, subject?: string, since?: string, before?: string, keywords?: string }, folder: string = 'INBOX', count: number = 10, offset: number = 0): Promise<MessageMetadata[]> {
+  async searchEmails(query: { from?: string, to?: string, cc?: string, subject?: string, since?: string, before?: string, keywords?: string, messageId?: string }, folder: string = 'INBOX', count: number = 10, offset: number = 0): Promise<MessageMetadata[]> {
     const criteria: any = {};
     if (query.from) criteria.from = query.from;
+    if (query.to) criteria.to = query.to;
+    if (query.cc) criteria.cc = query.cc;
     if (query.subject) criteria.subject = query.subject;
     if (query.since) criteria.since = query.since;
     if (query.before) criteria.before = query.before;
     if (query.keywords) criteria.body = query.keywords;
+    if (query.messageId) criteria.header = { 'Message-ID': query.messageId };
 
     return this.imapClient.searchMessages(criteria, folder, count, offset);
   }
 
-  async sendEmail(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<any> {
-    const effectiveBody = applySignature(body, this.account.signature, isHtml, includeSignature);
-
-    // Build raw message before sending so we can append to Sent folder
-    const rawMessage = [
-      `From: ${this.account.user}`,
-      `To: ${to}`,
-      ...(cc ? [`Cc: ${cc}`] : []),
-      ...(bcc ? [`Bcc: ${bcc}`] : []),
-      `Subject: ${subject}`,
-      'MIME-Version: 1.0',
-      `Content-Type: ${isHtml ? 'text/html' : 'text/plain'}; charset=utf-8`,
-      '',
-      effectiveBody
-    ].join('\r\n');
-
-    await this.ensureSmtp();
-    const info = await this.smtpClient.send(to, subject, effectiveBody, isHtml, cc, bcc);
-    try {
-      await this.imapClient.appendMessage('Sent', rawMessage, ['\\Seen']);
-    } catch (e) {
-      console.error('Failed to append to Sent folder:', e);
+  async resolveSentFolder(explicitFolder?: string): Promise<string> {
+    if (explicitFolder) return explicitFolder;
+    if (this.account.sentFolder) return this.account.sentFolder;
+    if (!this.sentFolderPromise) {
+      this.sentFolderPromise = this.imapClient
+        .findSpecialUseFolder('\\Sent')
+        .then(folder => folder || DEFAULT_SENT_FOLDER)
+        .catch(() => DEFAULT_SENT_FOLDER);
     }
-    return info;
+    return this.sentFolderPromise;
   }
 
-  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<any> {
+  private async sendAndRecord(message: OutgoingMessage): Promise<SendDeliveryResult> {
+    try {
+      await this.ensureSmtp();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return {
+        status: 'smtp_connection_failed',
+        smtpAccepted: false,
+        accepted: [],
+        rejected: [],
+        sentFolderSaved: false,
+        retrySafe: true,
+        nextAction: 'No SMTP message was attempted. Fix the connection before a new user-requested send.',
+        error: reason,
+      };
+    }
+
+    let info;
+    try {
+      info = message.extraHeaders
+        ? await this.smtpClient.send(
+            message.to,
+            message.subject,
+            message.body,
+            message.isHtml,
+            message.cc,
+            message.bcc,
+            message.extraHeaders
+          )
+        : await this.smtpClient.send(
+            message.to,
+            message.subject,
+            message.body,
+            message.isHtml,
+            message.cc,
+            message.bcc
+          );
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (error instanceof SmtpRecipientRejectedError) {
+        return {
+          status: 'smtp_rejected',
+          smtpAccepted: false,
+          accepted: [],
+          rejected: error.rejected,
+          ...(error.messageId ? { messageId: error.messageId } : {}),
+          sentFolderSaved: false,
+          retrySafe: false,
+          nextAction: 'Correct the rejected recipients or SMTP policy failure before a new user-requested send.',
+          error: reason,
+        };
+      }
+
+      const messageId = error instanceof SmtpSendError ? error.messageId : undefined;
+      return {
+        status: 'smtp_outcome_unknown',
+        smtpAccepted: null,
+        accepted: [],
+        rejected: [],
+        ...(messageId ? { messageId } : {}),
+        sentFolderSaved: false,
+        retrySafe: false,
+        nextAction: 'Do not retry automatically. Use verify_sent_message with messageId before any user-approved resend.',
+        error: reason,
+      };
+    }
+
+    if (info.accepted.length === 0) {
+      const rejected = info.rejected.length > 0;
+      return {
+        status: rejected ? 'smtp_rejected' : 'smtp_outcome_unknown',
+        smtpAccepted: rejected ? false : null,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        ...(info.messageId ? { messageId: info.messageId } : {}),
+        sentFolderSaved: false,
+        retrySafe: false,
+        nextAction: rejected
+          ? 'Do not retry automatically. Correct the recipients or SMTP policy failure first.'
+          : 'Do not retry automatically. Use verify_sent_message before any user-approved resend.',
+        warning: rejected ? 'SMTP accepted no recipients.' : 'SMTP returned no accepted or rejected recipients.',
+      };
+    }
+
+    const sentFolder = await this.resolveSentFolder();
+    const partial = info.rejected.length > 0;
+    try {
+      const appendResult = await this.imapClient.appendMessage(sentFolder, info.rawMessage, ['\\Seen']);
+      return {
+        status: partial ? 'partially_sent_and_saved' : 'sent_and_saved',
+        smtpAccepted: true,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        ...(info.messageId ? { messageId: info.messageId } : {}),
+        sentFolder,
+        sentFolderSaved: true,
+        ...(appendResult.uid !== undefined ? { sentFolderUid: appendResult.uid } : {}),
+        retrySafe: false,
+        nextAction: partial
+          ? 'Do not resend accepted recipients. Review the rejected recipient list.'
+          : 'Do not resend this message.',
+        ...(partial ? { warning: 'SMTP rejected one or more recipients; accepted recipients were still sent.' } : {}),
+      };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      return {
+        status: partial
+          ? 'smtp_partially_accepted_sent_not_confirmed'
+          : 'smtp_accepted_sent_not_confirmed',
+        smtpAccepted: true,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        ...(info.messageId ? { messageId: info.messageId } : {}),
+        sentFolder,
+        sentFolderSaved: false,
+        retrySafe: false,
+        nextAction: 'Do not retry SMTP. Use verify_sent_message to inspect the Sent folder.',
+        warning: `SMTP accepted the message, but IMAP could not confirm the Sent copy: ${reason}`,
+      };
+    }
+  }
+
+  async sendEmail(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<SendDeliveryResult> {
+    const effectiveBody = applySignature(body, this.account.signature, isHtml, includeSignature);
+    return this.sendAndRecord({ to, subject, body: effectiveBody, isHtml, cc, bcc });
+  }
+
+  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<SendDeliveryResult> {
     const parsed = await this._cachedFetchBody(uid, folder);
 
     const originalMessageId = parsed.messageId;
@@ -128,7 +283,10 @@ export class MailService {
     const originalFrom = Array.isArray(parsed.from?.value)
       ? parsed.from!.value[0]?.address
       : (parsed.from as any)?.address;
-    const replyTo = originalFrom || 'unknown@example.com';
+    if (!originalFrom) {
+      throw new ValidationError('Cannot reply because the original message has no valid From address.');
+    }
+    const replyTo = originalFrom;
 
     // Build subject with "Re: " prefix
     const originalSubject = parsed.subject || '';
@@ -138,32 +296,18 @@ export class MailService {
 
     const effectiveBody = applySignature(body, this.account.signature, isHtml, includeSignature);
 
-    // Build raw message for Sent folder append
-    const rawMessage = [
-      `From: ${this.account.user}`,
-      `To: ${replyTo}`,
-      ...(cc ? [`Cc: ${cc}`] : []),
-      ...(bcc ? [`Bcc: ${bcc}`] : []),
-      `Subject: ${replySubject}`,
-      ...(extraHeaders['In-Reply-To'] ? [`In-Reply-To: ${extraHeaders['In-Reply-To']}`] : []),
-      ...(extraHeaders['References'] ? [`References: ${extraHeaders['References']}`] : []),
-      'MIME-Version: 1.0',
-      `Content-Type: ${isHtml ? 'text/html' : 'text/plain'}; charset=utf-8`,
-      '',
-      effectiveBody,
-    ].join('\r\n');
-
-    await this.ensureSmtp();
-    const info = await this.smtpClient.send(replyTo, replySubject, effectiveBody, isHtml, cc, bcc, Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined);
-    try {
-      await this.imapClient.appendMessage('Sent', rawMessage, ['\\Seen']);
-    } catch (e) {
-      console.error('Failed to append reply to Sent folder:', e);
-    }
-    return info;
+    return this.sendAndRecord({
+      to: replyTo,
+      subject: replySubject,
+      body: effectiveBody,
+      isHtml,
+      cc,
+      bcc,
+      extraHeaders: Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
+    });
   }
 
-  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<any> {
+  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<SendDeliveryResult> {
     const parsed = await this._cachedFetchBody(uid, folder);
 
     // Build subject with "Fwd: " prefix
@@ -195,27 +339,7 @@ export class MailService {
     const combinedBody = body + forwardedBlock;
     const effectiveBody = applySignature(combinedBody, this.account.signature, isHtml, includeSignature);
 
-    // Build raw message for Sent folder append
-    const rawMessage = [
-      `From: ${this.account.user}`,
-      `To: ${to}`,
-      ...(cc ? [`Cc: ${cc}`] : []),
-      ...(bcc ? [`Bcc: ${bcc}`] : []),
-      `Subject: ${fwdSubject}`,
-      'MIME-Version: 1.0',
-      `Content-Type: ${isHtml ? 'text/html' : 'text/plain'}; charset=utf-8`,
-      '',
-      effectiveBody,
-    ].join('\r\n');
-
-    await this.ensureSmtp();
-    const info = await this.smtpClient.send(to, fwdSubject, effectiveBody, isHtml, cc, bcc);
-    try {
-      await this.imapClient.appendMessage('Sent', rawMessage, ['\\Seen']);
-    } catch (e) {
-      console.error('Failed to append forward to Sent folder:', e);
-    }
-    return info;
+    return this.sendAndRecord({ to, subject: fwdSubject, body: effectiveBody, isHtml, cc, bcc });
   }
 
   async createDraft(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<void> {
@@ -278,20 +402,22 @@ export class MailService {
 
     if (parsed.html) {
       let html = parsed.html;
-      // Convert inline images to base64 if needed
+      // Keep binary image data out of tool responses. Agents can fetch the
+      // original attachment explicitly through get_attachment when needed.
       if (parsed.attachments) {
         for (const att of parsed.attachments) {
-          if (att.contentId && att.content && att.contentType.startsWith('image/')) {
-            const base64 = att.content.toString('base64');
-            const dataUri = `data:${att.contentType};base64,${base64}`;
-            const cidRegex = new RegExp(`cid:${att.contentId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'g');
-            html = html.replace(cidRegex, dataUri);
+          if (att.contentId && att.contentType.startsWith('image/')) {
+            const attachmentName = att.filename || att.contentId;
+            const attachmentUri = `mail-attachment://${encodeURIComponent(this.account.id)}/${encodeURIComponent(uid)}/${encodeURIComponent(attachmentName)}`;
+            const cidRegex = new RegExp(`cid:${att.contentId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'gi');
+            html = html.replace(cidRegex, attachmentUri);
           }
         }
       }
+      html = html.replace(INLINE_DATA_IMAGE_PATTERN, 'mail-inline-image://omitted');
       content = htmlToMarkdown(html);
     } else if (parsed.textAsHtml) {
-      content = htmlToMarkdown(parsed.textAsHtml);
+      content = htmlToMarkdown(parsed.textAsHtml.replace(INLINE_DATA_IMAGE_PATTERN, 'mail-inline-image://omitted'));
     } else if (parsed.text) {
       content = parsed.text;
     }
@@ -344,6 +470,9 @@ export class MailService {
 
     header += `\n---\n\n`;
 
+    if (content.length > MAX_READ_BODY_CHARS) {
+      content = `${content.slice(0, MAX_READ_BODY_CHARS)}\n\n[Body truncated at ${MAX_READ_BODY_CHARS} characters]`;
+    }
     const body = this.redact ? redactSensitiveContent(content) : content;
     return header + body + attachmentInfo;
   }
