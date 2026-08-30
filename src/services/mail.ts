@@ -81,6 +81,7 @@ export class MailService {
 
   private sentFolderPromise: Promise<string> | null = null;
   private readonly bodyCache = new MessageBodyCache();
+  private readonly bodyFetches = new Map<string, Promise<ParsedMail>>();
 
   constructor(account: EmailAccount, private readonly redact: boolean = false) {
     this.account = account;
@@ -364,13 +365,31 @@ export class MailService {
     const key = `${this.account.id}:${folder}:${uid}`;
     const cached = this.bodyCache.get(key);
     if (cached) return cached;
-    const parsed = await this.imapClient.fetchMessageBody(uid, folder);
-    this.bodyCache.set(key, parsed);
-    return parsed;
+
+    const existingFetch = this.bodyFetches.get(key);
+    if (existingFetch) return existingFetch;
+
+    const fetch = this.imapClient.fetchMessageBody(uid, folder)
+      .then(parsed => {
+        if (this.bodyFetches.get(key) === fetch) {
+          this.bodyCache.set(key, parsed);
+        }
+        return parsed;
+      })
+      .finally(() => {
+        if (this.bodyFetches.get(key) === fetch) {
+          this.bodyFetches.delete(key);
+        }
+      });
+
+    this.bodyFetches.set(key, fetch);
+    return fetch;
   }
 
   invalidateBodyCache(folder: string, uid: string): void {
-    this.bodyCache.delete(`${this.account.id}:${folder}:${uid}`);
+    const key = `${this.account.id}:${folder}:${uid}`;
+    this.bodyCache.delete(key);
+    this.bodyFetches.delete(key);
   }
 
   /**

@@ -198,7 +198,7 @@ The default tests and smoke checks do not connect to a mailbox or send mail. `--
 
 - Gmail `535` or `Invalid credentials`: use the full email address and an app password, not the normal account password.
 - `Transport closed`: check Node.js, run the exact configured command with `--version`, then reinstall the Codex entry.
-- `pdfParser is not a function`: upgrade to 1.5.1 or newer.
+- `pdfParser is not a function`: upgrade to the latest release.
 - `smtp_outcome_unknown`: do not retry automatically; verify the returned `messageId` first.
 
 ## License

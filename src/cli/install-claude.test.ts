@@ -1,4 +1,4 @@
-import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -8,7 +8,7 @@ import { getClaudeConfigPath, installClaude } from './install-claude.js';
 describe('installClaude', () => {
   let tmpDir: string;
   let configPath: string;
-  const packageSpec = '@1amsheldon/mail-mcp@1.5.2';
+  const packageSpec = '@1amsheldon/mail-mcp@1.5.3';
   const runtimeArgs = ['-y', packageSpec, '--confirm', '--audit-log', '--redact'];
 
   beforeEach(async () => {
@@ -125,6 +125,18 @@ describe('installClaude', () => {
     await expect(installClaude(configPath, 'npx', runtimeArgs)).rejects.toThrow(
       /Malformed JSON/
     );
+  });
+
+  it('preserves the file when mcpServers is not an object', async () => {
+    const source = JSON.stringify({ mcpServers: 'invalid', keep: true }, null, 2);
+    await writeFile(configPath, source, 'utf8');
+
+    await expect(installClaude(configPath, 'npx', runtimeArgs)).rejects.toThrow(
+      /Invalid mcpServers value/
+    );
+
+    const { readFile } = await import('node:fs/promises');
+    expect(await readFile(configPath, 'utf8')).toBe(source);
   });
 
   it('does not rewrite an identical config', async () => {

@@ -6,6 +6,10 @@ interface QuestionPrompt {
   question(query: string): Promise<string>;
 }
 
+export function inferSmtpHost(imapHost: string): string {
+  return /^imap\./i.test(imapHost) ? imapHost.replace(/^imap\./i, 'smtp.') : '';
+}
+
 async function askPort(
   prompt: QuestionPrompt,
   label: string,
@@ -185,7 +189,7 @@ async function addAccount(): Promise<void> {
     const useTLS = tlsRaw.trim().toLowerCase() !== 'n';
 
     // smtpHost
-    const defaultSmtpHost = host.includes('imap') ? host.replace('imap', 'smtp') : '';
+    const defaultSmtpHost = inferSmtpHost(host);
     const smtpHostRaw = await rl.question(
       `SMTP host [${defaultSmtpHost || 'press enter to skip'}]: `
     );

@@ -33,7 +33,7 @@ interface ActiveSession {
   id?: string;
   transport: StreamableHTTPServerTransport;
   server: HostedMcpSession;
-  closing: boolean;
+  closePromise?: Promise<void>;
   activeRequests: number;
   lastUsedAt: number;
 }
@@ -109,6 +109,18 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   if (!options.bearerToken) {
     throw new Error('HTTP bearer token is required');
   }
+  if (
+    options.sessionIdleTimeoutMs !== undefined &&
+    (!Number.isFinite(options.sessionIdleTimeoutMs) || options.sessionIdleTimeoutMs <= 0)
+  ) {
+    throw new Error('HTTP session idle timeout must be greater than zero');
+  }
+  if (
+    options.maxSessions !== undefined &&
+    (!Number.isInteger(options.maxSessions) || options.maxSessions <= 0)
+  ) {
+    throw new Error('HTTP max sessions must be a positive integer');
+  }
 
   const sessions = new Map<string, ActiveSession>();
   const startedAt = new Date().toISOString();
@@ -116,16 +128,20 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   const maxSessions = options.maxSessions ?? DEFAULT_MAX_SESSIONS;
   const urlHost = formatUrlHost(options.host);
   let shuttingDown = false;
+  let closePromise: Promise<void> | undefined;
 
-  const closeSession = async (record: ActiveSession): Promise<void> => {
-    if (record.closing) return;
-    record.closing = true;
-    if (record.id) sessions.delete(record.id);
-    record.transport.onclose = undefined;
-    await Promise.allSettled([
-      record.server.shutdown(),
-      record.transport.close(),
-    ]);
+  const closeSession = (record: ActiveSession): Promise<void> => {
+    if (record.closePromise) return record.closePromise;
+
+    record.closePromise = (async () => {
+      if (record.id) sessions.delete(record.id);
+      record.transport.onclose = undefined;
+      await Promise.allSettled([
+        record.server.shutdown(),
+        record.transport.close(),
+      ]);
+    })();
+    return record.closePromise;
   };
 
   const cleanupTimer = setInterval(() => {
@@ -204,7 +220,6 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
           id: sessionId,
           transport,
           server: mcpServer,
-          closing: false,
           activeRequests: 1,
           lastUsedAt: Date.now(),
         };
@@ -237,18 +252,18 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         return;
       }
 
-      let body: unknown;
-      if (req.method === 'POST') {
-        try {
-          body = await readJsonBody(req);
-        } catch (error) {
-          respondToBodyError(res, error);
-          return;
-        }
-      }
       record.activeRequests++;
       record.lastUsedAt = Date.now();
       try {
+        let body: unknown;
+        if (req.method === 'POST') {
+          try {
+            body = await readJsonBody(req);
+          } catch (error) {
+            respondToBodyError(res, error);
+            return;
+          }
+        }
         await record.transport.handleRequest(req, res, body);
       } finally {
         record.activeRequests--;
@@ -283,18 +298,21 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     throw new Error('Could not determine HTTP listener address');
   }
 
-  const close = async (): Promise<void> => {
-    if (shuttingDown) return;
+  const close = (): Promise<void> => {
+    if (closePromise) return closePromise;
     shuttingDown = true;
-    clearInterval(cleanupTimer);
+    closePromise = (async () => {
+      clearInterval(cleanupTimer);
 
-    await Promise.allSettled(Array.from(sessions.values()).map(closeSession));
-    await options.shutdownSharedResources?.();
+      await Promise.allSettled(Array.from(sessions.values()).map(closeSession));
+      await options.shutdownSharedResources?.();
 
-    await new Promise<void>(resolve => {
-      httpServer.close(() => resolve());
-      httpServer.closeAllConnections?.();
-    });
+      await new Promise<void>(resolve => {
+        httpServer.close(() => resolve());
+        httpServer.closeAllConnections?.();
+      });
+    })();
+    return closePromise;
   };
 
   return {

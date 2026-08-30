@@ -1,6 +1,7 @@
-import { copyFile, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { copyFile, readFile, mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, posix, win32 } from 'node:path';
+import { writeTextFileAtomic } from '../utils/atomic-write.js';
 
 export interface ClaudeInstallResult {
   configPath: string;
@@ -63,8 +64,10 @@ export async function installClaude(
     }
   }
 
-  if (!config.mcpServers || typeof config.mcpServers !== 'object' || Array.isArray(config.mcpServers)) {
+  if (config.mcpServers === undefined) {
     config.mcpServers = {};
+  } else if (!config.mcpServers || typeof config.mcpServers !== 'object' || Array.isArray(config.mcpServers)) {
+    throw new Error(`Invalid mcpServers value in existing config at ${configPath}; expected an object.`);
   }
   (config.mcpServers as Record<string, unknown>).mail = {
     command,
@@ -82,7 +85,7 @@ export async function installClaude(
     await copyFile(configPath, backupPath);
   }
 
-  await writeFile(configPath, updated, 'utf8');
+  await writeTextFileAtomic(configPath, updated);
 
   return { configPath, backupPath, changed: true };
 }

@@ -134,6 +134,37 @@ describe('getTemplates', () => {
     consoleSpy.mockRestore();
   });
 
+  it('skips duplicate template IDs', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockedFsPromises.readFile.mockResolvedValueOnce(JSON.stringify([
+      { id: 'ack', name: 'Acknowledgement', body: 'First' },
+      { id: 'ack', name: 'Duplicate', body: 'Second' },
+    ]));
+
+    const { getTemplates } = await import('./templates.js');
+    const result = await getTemplates();
+
+    expect(result).toEqual([{ id: 'ack', name: 'Acknowledgement', body: 'First' }]);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      'templates.json: duplicate template ID "ack" skipped'
+    );
+    consoleSpy.mockRestore();
+  });
+
+  it('reports malformed JSON instead of silently hiding the template error', async () => {
+    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockedFsPromises.readFile.mockResolvedValueOnce('{not-json');
+
+    const { getTemplates } = await import('./templates.js');
+    const result = await getTemplates();
+
+    expect(result).toEqual([]);
+    expect(consoleSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unable to load templates.json')
+    );
+    consoleSpy.mockRestore();
+  });
+
   it('returns empty array if file contains a non-array JSON value', async () => {
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockedFsPromises.readFile.mockResolvedValueOnce(JSON.stringify({ not: 'array' }));

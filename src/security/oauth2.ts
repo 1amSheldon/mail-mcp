@@ -16,6 +16,19 @@ interface OAuth2TokenResponse {
 }
 
 const refreshes = new Map<string, Promise<string>>();
+const OAUTH2_REFRESH_TIMEOUT_MS = 30_000;
+
+function parseTokenEndpoint(value: string, accountId: string): string {
+  try {
+    const endpoint = new URL(value);
+    if (endpoint.protocol !== 'https:' && endpoint.protocol !== 'http:') {
+      throw new Error('unsupported protocol');
+    }
+    return endpoint.href;
+  } catch {
+    throw new Error(`OAuth2 credentials for account ${accountId} contain an invalid tokenEndpoint`);
+  }
+}
 
 function parseTokens(data: string, accountId: string): OAuth2Tokens {
   let parsed: unknown;
@@ -40,7 +53,7 @@ function parseTokens(data: string, accountId: string): OAuth2Tokens {
     clientId: value.clientId as string,
     clientSecret: value.clientSecret as string,
     refreshToken: value.refreshToken as string,
-    tokenEndpoint: value.tokenEndpoint as string,
+    tokenEndpoint: parseTokenEndpoint(value.tokenEndpoint as string, accountId),
     ...(typeof value.accessToken === 'string' ? { accessToken: value.accessToken } : {}),
     ...(typeof value.expiryDate === 'number' ? { expiryDate: value.expiryDate } : {}),
   };
@@ -66,18 +79,28 @@ function parseTokenResponse(value: unknown): OAuth2TokenResponse {
 }
 
 async function refreshAccessToken(accountId: string, tokens: OAuth2Tokens): Promise<string> {
-  const response = await fetch(tokens.tokenEndpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: new URLSearchParams({
-      client_id: tokens.clientId,
-      client_secret: tokens.clientSecret,
-      refresh_token: tokens.refreshToken,
-      grant_type: 'refresh_token',
-    }),
-  });
+  let response: Response;
+  try {
+    response = await fetch(tokens.tokenEndpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: new URLSearchParams({
+        client_id: tokens.clientId,
+        client_secret: tokens.clientSecret,
+        refresh_token: tokens.refreshToken,
+        grant_type: 'refresh_token',
+      }),
+      signal: AbortSignal.timeout(OAUTH2_REFRESH_TIMEOUT_MS),
+    });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'TimeoutError') {
+      throw new Error('OAuth2 token refresh timed out after 30 seconds', { cause: error });
+    }
+    const reason = error instanceof Error ? error.message : String(error);
+    throw new Error(`OAuth2 token refresh request failed: ${reason}`, { cause: error });
+  }
 
   if (!response.ok) {
     const detail = (await response.text()).trim().slice(0, 500);

@@ -62,14 +62,20 @@ async function loadTemplatesFromDisk(): Promise<EmailTemplate[]> {
   }
 
   const valid: EmailTemplate[] = [];
+  const seenIds = new Set<string>();
   for (const item of parsed) {
     const result = emailTemplateSchema.safeParse(item);
     if (result.success) {
+      if (seenIds.has(result.data.id)) {
+        console.error(`templates.json: duplicate template ID "${result.data.id}" skipped`);
+        continue;
+      }
+      seenIds.add(result.data.id);
       valid.push(result.data);
     } else {
       const id = typeof item?.id === 'string' ? item.id : '(unknown)';
       const fields = result.error.issues.map((i) => i.path.join('.') || 'root').join(', ');
-      console.error(`templates.json: template "${id}" skipped — invalid fields: ${fields}`);
+      console.error(`templates.json: template "${id}" skipped; invalid fields: ${fields}`);
     }
   }
   return valid;
@@ -92,7 +98,11 @@ export async function getTemplates(): Promise<EmailTemplate[]> {
     cachedTemplates = loaded;
     startWatcher();
     return loaded;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to load templates.json: ${message}`);
+    }
     return [];
   }
 }

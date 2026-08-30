@@ -5,12 +5,17 @@ vi.mock('node:fs/promises', () => ({
   readFile: vi.fn(),
 }));
 
-// Mock node:fs for watch, existsSync, mkdirSync, writeFileSync
+const atomicWrite = vi.hoisted(() => ({
+  writeTextFileAtomicSync: vi.fn(),
+}));
+
+vi.mock('./utils/atomic-write.js', () => atomicWrite);
+
+// Mock node:fs for watch, existsSync, and mkdirSync
 vi.mock('node:fs', () => ({
   watch: vi.fn(),
   existsSync: vi.fn(),
   mkdirSync: vi.fn(),
-  writeFileSync: vi.fn(),
 }));
 
 vi.mock('node:os', () => ({
@@ -162,6 +167,22 @@ describe('getAccounts (async with cache)', () => {
     expect(result[0].id).toBe('work');
   });
 
+  it('skips duplicate account IDs loaded from disk', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockedFsPromises.readFile.mockResolvedValue(
+      JSON.stringify([VALID_ACCOUNT, { ...VALID_ACCOUNT, name: 'Duplicate' }]) as any
+    );
+
+    const { getAccounts } = await import('./config.js');
+    const result = await getAccounts();
+
+    expect(result).toEqual([VALID_ACCOUNT]);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      'accounts.json: duplicate account ID "work" skipped'
+    );
+    consoleErrorSpy.mockRestore();
+  });
+
   it('error message for invalid account includes the account ID', async () => {
     const invalidAccount = { id: 'bad-account', name: '' }; // name is empty string — fails min(1)
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -256,6 +277,26 @@ describe('saveAccounts', () => {
     const { saveAccounts } = await import('./config.js');
 
     expect(() => saveAccounts([{ ...VALID_ACCOUNT, port: 70000 }])).toThrow();
-    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
+    expect(atomicWrite.writeTextFileAtomicSync).not.toHaveBeenCalled();
+  });
+
+  it('rejects duplicate account IDs before writing the file', async () => {
+    const { saveAccounts } = await import('./config.js');
+
+    expect(() => saveAccounts([VALID_ACCOUNT, { ...VALID_ACCOUNT }])).toThrow(
+      'Duplicate account ID(s): work'
+    );
+    expect(atomicWrite.writeTextFileAtomicSync).not.toHaveBeenCalled();
+  });
+
+  it('writes validated account data atomically', async () => {
+    const { saveAccounts, ACCOUNTS_PATH } = await import('./config.js');
+
+    saveAccounts([VALID_ACCOUNT]);
+
+    expect(atomicWrite.writeTextFileAtomicSync).toHaveBeenCalledWith(
+      ACCOUNTS_PATH,
+      `${JSON.stringify([VALID_ACCOUNT], null, 2)}\n`
+    );
   });
 });
