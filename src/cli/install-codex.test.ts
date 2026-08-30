@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { parse } from 'smol-toml';
 import { installCodex, upsertCodexServer } from './install-codex.js';
 import { buildMailMcpNpxArgs } from './npm-runtime.js';
 
@@ -26,9 +27,14 @@ describe('installCodex', () => {
     );
 
     expect(result).toEqual({ configPath, changed: true });
-    expect(await readFile(configPath, 'utf8')).toContain(
-      `args = ["-y", "--prefer-online", "--prefix", "${tempDir.replace(/\\/g, '\\\\')}\\\\.cache\\\\mail-mcp\\\\npm-runtime", "--package=@1amsheldon/mail-mcp@latest", "mail-mcp", "--confirm", "--audit-log", "--redact"]`
-    );
+    expect(parse(await readFile(configPath, 'utf8'))).toMatchObject({
+      mcp_servers: {
+        mail: {
+          command: 'npx',
+          args: buildMailMcpNpxArgs(runtimeArgs, tempDir),
+        },
+      },
+    });
   });
 
   it('replaces only the mail server section and keeps a backup', async () => {
