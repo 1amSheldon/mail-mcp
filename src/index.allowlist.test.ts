@@ -202,8 +202,8 @@ describe('AL-07: Constructor with readOnly=true and allowedTools set throws', ()
   });
 });
 
-describe('AL-08: Backward compatibility — no allowedTools returns all 29 tools', () => {
-  it('getTools() without allowedTools (undefined) and readOnly=false returns 29 tools', () => {
+describe('AL-08: omitting allowedTools returns every tool', () => {
+  it('getTools() without allowedTools (undefined) and readOnly=false returns 30 tools', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false, undefined);
     expect(tools).toHaveLength(30);

@@ -319,7 +319,7 @@ describe('ROM-04: instructions field in Server options', () => {
       internalServer._options?.instructions ??
       internalServer.options?.instructions ??
       internalServer.serverInfo?.instructions;
-    expect(instructions).toContain('Use mail-mcp for IMAP-based email accounts');
+    expect(instructions).toContain('Access configured email accounts over IMAP and SMTP');
     expect(instructions).toContain('read-only mode');
     expect(instructions).toContain('Write operations');
   });
@@ -331,7 +331,7 @@ describe('ROM-04: instructions field in Server options', () => {
       internalServer._options?.instructions ??
       internalServer.options?.instructions ??
       internalServer.serverInfo?.instructions;
-    expect(instructions).toContain('Use mail-mcp for IMAP-based email accounts');
+    expect(instructions).toContain('Access configured email accounts over IMAP and SMTP');
     expect(instructions).not.toContain('read-only mode');
   });
 });
@@ -1057,7 +1057,7 @@ describe('CONN-03: --validate-accounts health check', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Phase 20: reply_email and forward_email tools
+// Reply and forward tools
 // ---------------------------------------------------------------------------
 
 const ALL_WRITE_TOOL_NAMES_20 = [
@@ -1072,7 +1072,7 @@ const ALL_WRITE_TOOL_NAMES_20 = [
 ];
 
 // ---------------------------------------------------------------------------
-// Phase 26: mark_read, mark_unread, star, unstar tools
+// Message state shortcuts
 // ---------------------------------------------------------------------------
 
 const MARK_TOOL_NAMES = ['mark_read', 'mark_unread', 'star', 'unstar'];

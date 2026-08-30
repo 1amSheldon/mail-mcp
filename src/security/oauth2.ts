@@ -9,31 +9,63 @@ export interface OAuth2Tokens {
   tokenEndpoint: string;
 }
 
-export async function getValidAccessToken(accountId: string): Promise<string> {
-  const data = await loadCredentials(accountId);
-  if (!data) {
-    throw new Error(`No credentials found for account ${accountId}`);
-  }
+interface OAuth2TokenResponse {
+  accessToken: string;
+  expiresIn?: number;
+  refreshToken?: string;
+}
 
-  let tokens: OAuth2Tokens;
+const refreshes = new Map<string, Promise<string>>();
+
+function parseTokens(data: string, accountId: string): OAuth2Tokens {
+  let parsed: unknown;
   try {
-    tokens = JSON.parse(data);
-  } catch (e) {
-    // Legacy plaintext password
-    return data;
+    parsed = JSON.parse(data);
+  } catch {
+    throw new Error(`OAuth2 credentials for account ${accountId} are not valid JSON`);
   }
 
-  // If we don't have OAuth2 fields, assume it's a plain password
-  if (!tokens.clientId || !tokens.refreshToken) {
-    return data;
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`OAuth2 credentials for account ${accountId} are invalid`);
   }
 
-  // Check if access token is valid (with 1 minute buffer)
-  if (tokens.accessToken && tokens.expiryDate && Date.now() + 60000 < tokens.expiryDate) {
-    return tokens.accessToken;
+  const value = parsed as Record<string, unknown>;
+  for (const field of ['clientId', 'clientSecret', 'refreshToken', 'tokenEndpoint'] as const) {
+    if (typeof value[field] !== 'string' || value[field].trim() === '') {
+      throw new Error(`OAuth2 credentials for account ${accountId} are missing ${field}`);
+    }
   }
 
-  // Refresh token
+  return {
+    clientId: value.clientId as string,
+    clientSecret: value.clientSecret as string,
+    refreshToken: value.refreshToken as string,
+    tokenEndpoint: value.tokenEndpoint as string,
+    ...(typeof value.accessToken === 'string' ? { accessToken: value.accessToken } : {}),
+    ...(typeof value.expiryDate === 'number' ? { expiryDate: value.expiryDate } : {}),
+  };
+}
+
+function parseTokenResponse(value: unknown): OAuth2TokenResponse {
+  if (!value || typeof value !== 'object') {
+    throw new Error('OAuth2 token endpoint returned an invalid response');
+  }
+  const response = value as Record<string, unknown>;
+  if (typeof response.access_token !== 'string' || response.access_token.trim() === '') {
+    throw new Error('OAuth2 token endpoint returned no access_token');
+  }
+  return {
+    accessToken: response.access_token,
+    ...(typeof response.expires_in === 'number' && response.expires_in > 0
+      ? { expiresIn: response.expires_in }
+      : {}),
+    ...(typeof response.refresh_token === 'string' && response.refresh_token !== ''
+      ? { refreshToken: response.refresh_token }
+      : {}),
+  };
+}
+
+async function refreshAccessToken(accountId: string, tokens: OAuth2Tokens): Promise<string> {
   const response = await fetch(tokens.tokenEndpoint, {
     method: 'POST',
     headers: {
@@ -48,21 +80,46 @@ export async function getValidAccessToken(accountId: string): Promise<string> {
   });
 
   if (!response.ok) {
-    const errText = await response.text();
-    throw new Error(`Failed to refresh token: ${response.status} ${errText}`);
+    const detail = (await response.text()).trim().slice(0, 500);
+    throw new Error(
+      `OAuth2 token refresh failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}`
+    );
   }
 
-  const result = await response.json();
-  
-  tokens.accessToken = result.access_token;
-  if (result.expires_in) {
-    tokens.expiryDate = Date.now() + result.expires_in * 1000;
+  const result = parseTokenResponse(await response.json());
+  tokens.accessToken = result.accessToken;
+  if (result.expiresIn !== undefined) {
+    tokens.expiryDate = Date.now() + result.expiresIn * 1000;
   }
-  if (result.refresh_token) {
-    tokens.refreshToken = result.refresh_token;
+  if (result.refreshToken !== undefined) {
+    tokens.refreshToken = result.refreshToken;
   }
 
   await saveCredentials(accountId, JSON.stringify(tokens));
+  return result.accessToken;
+}
 
-  return tokens.accessToken!;
+export async function getValidAccessToken(accountId: string): Promise<string> {
+  const data = await loadCredentials(accountId);
+  if (!data) {
+    throw new Error(`No credentials found for account ${accountId}`);
+  }
+
+  const tokens = parseTokens(data, accountId);
+
+  // Check if access token is valid (with 1 minute buffer)
+  if (tokens.accessToken && tokens.expiryDate && Date.now() + 60000 < tokens.expiryDate) {
+    return tokens.accessToken;
+  }
+
+  const existing = refreshes.get(accountId);
+  if (existing) return existing;
+
+  const refresh = refreshAccessToken(accountId, tokens).finally(() => {
+    if (refreshes.get(accountId) === refresh) {
+      refreshes.delete(accountId);
+    }
+  });
+  refreshes.set(accountId, refresh);
+  return refresh;
 }

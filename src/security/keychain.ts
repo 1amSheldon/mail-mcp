@@ -30,7 +30,4 @@ export async function loadCredentials(accountId: string): Promise<string | null>
 
 export async function removeCredentials(accountId: string): Promise<void> {
   await deletePassword(config.serviceName, accountId);
-  if (config.serviceName === DEFAULT_KEYCHAIN_SERVICE) {
-    await deletePassword(LEGACY_KEYCHAIN_SERVICE, accountId);
-  }
 }

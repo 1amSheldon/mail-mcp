@@ -1,6 +1,6 @@
 import { vi, describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { ImapClient } from '../../src/protocol/imap.js';
-import type { EmailAccount } from '../../src/types/index.js';
+import type { EmailAccount } from '../../src/config.js';
 
 vi.mock('../../src/security/keychain.js', () => ({
   loadCredentials: vi.fn(() => Promise.resolve(process.env.TEST_IMAP_PASS)),

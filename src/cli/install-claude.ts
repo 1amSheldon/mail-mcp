@@ -1,46 +1,88 @@
-import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { copyFile, readFile, writeFile, mkdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
+import { dirname, posix, win32 } from 'node:path';
+
+export interface ClaudeInstallResult {
+  configPath: string;
+  backupPath?: string;
+  changed: boolean;
+}
+
+export function getClaudeConfigPath(
+  platform: NodeJS.Platform = process.platform,
+  environment: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+): string {
+  if (platform === 'darwin') {
+    return posix.join(home, 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json');
+  }
+  if (platform === 'win32') {
+    if (!environment.APPDATA) {
+      throw new Error('APPDATA is not set; cannot locate the Claude Desktop config');
+    }
+    return win32.join(environment.APPDATA, 'Claude', 'claude_desktop_config.json');
+  }
+  throw new Error('Claude Desktop installation is supported on macOS and Windows');
+}
 
 /**
  * Writes or updates the Claude Desktop MCP server config to include mail-mcp.
  *
  * @param configPath - Absolute path to claude_desktop_config.json
- * @param binaryPath - Absolute path to the mail-mcp binary
- * @returns The configPath that was written
+ * @param command - Executable used to start mail-mcp
+ * @param args - Arguments passed to the executable
  * @throws {Error} If the existing config file contains malformed JSON
  */
-export async function installClaude(configPath: string, binaryPath: string): Promise<string> {
-  // Ensure parent directory exists
+export async function installClaude(
+  configPath: string,
+  command: string,
+  args: readonly string[] = [],
+): Promise<ClaudeInstallResult> {
   await mkdir(dirname(configPath), { recursive: true });
 
-  // Read existing config or start fresh
   let config: Record<string, unknown> = {};
+  let source = '';
+  let fileExists = false;
   try {
-    const raw = await readFile(configPath, 'utf8');
+    source = await readFile(configPath, 'utf8');
+    fileExists = true;
     try {
-      config = JSON.parse(raw) as Record<string, unknown>;
+      const parsed = JSON.parse(source) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        throw new Error('root value must be an object');
+      }
+      config = parsed as Record<string, unknown>;
     } catch {
       throw new Error(
         `Malformed JSON in existing config at ${configPath}. Please fix or delete the file and try again.`
       );
     }
-  } catch (err) {
-    // Re-throw JSON parse errors
-    if (err instanceof Error && /malformed|Malformed/.test(err.message)) {
-      throw err;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
     }
-    // File not found or unreadable — start with empty config
-    config = {};
   }
 
-  // Merge: ensure mcpServers exists and set mail entry
-  if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+  if (!config.mcpServers || typeof config.mcpServers !== 'object' || Array.isArray(config.mcpServers)) {
     config.mcpServers = {};
   }
-  (config.mcpServers as Record<string, unknown>).mail = { command: binaryPath };
+  (config.mcpServers as Record<string, unknown>).mail = {
+    command,
+    ...(args.length > 0 ? { args: [...args] } : {}),
+  };
 
-  // Write back with 2-space indentation
-  await writeFile(configPath, JSON.stringify(config, null, 2) + '\n', 'utf8');
+  const updated = `${JSON.stringify(config, null, 2)}\n`;
+  if (updated === source) {
+    return { configPath, changed: false };
+  }
 
-  return configPath;
+  let backupPath: string | undefined;
+  if (fileExists) {
+    backupPath = `${configPath}.mail-mcp.bak`;
+    await copyFile(configPath, backupPath);
+  }
+
+  await writeFile(configPath, updated, 'utf8');
+
+  return { configPath, backupPath, changed: true };
 }

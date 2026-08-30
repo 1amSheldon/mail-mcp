@@ -1,7 +1,7 @@
 import type { ParsedMail } from 'mailparser';
 
-export const MESSAGE_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes (D-04)
-export const MESSAGE_CACHE_MAX_SIZE = 100; // max entries (D-05)
+export const MESSAGE_CACHE_TTL_MS = 5 * 60 * 1000;
+export const MESSAGE_CACHE_MAX_SIZE = 100;
 
 interface CacheEntry {
   value: ParsedMail;
@@ -10,10 +10,8 @@ interface CacheEntry {
 
 /**
  * In-memory TTL cache for parsed email bodies.
- * Key format: `${accountId}:${folder}:${uid}` (D-01)
- * Eviction: TTL expiry on read OR oldest-first when capacity exceeded (D-05, D-06)
- * Zero external dependencies (D-09). Lost on server restart (D-08).
- * Instantiate per MailService — NOT as a module-level singleton.
+ * Keys use `${accountId}:${folder}:${uid}`. Entries expire on read and the
+ * oldest entry is removed at capacity. Each MailService owns one cache.
  */
 export class MessageBodyCache {
   private readonly store = new Map<string, CacheEntry>();

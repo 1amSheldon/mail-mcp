@@ -77,7 +77,7 @@ describe('emailTemplateSchema', () => {
 describe('getTemplates', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
-    mockedFs.watch.mockReturnValue({ close: vi.fn() } as any);
+    mockedFs.watch.mockReturnValue({ close: vi.fn(), once: vi.fn() } as any);
     // Reset module cache so each test gets a fresh cache state
     const { resetTemplatesCache } = await import('./templates.js');
     resetTemplatesCache();
@@ -101,6 +101,22 @@ describe('getTemplates', () => {
     expect(result).toHaveLength(2);
     expect(result[0].id).toBe('ack');
     expect(result[1].accountId).toBe('work');
+  });
+
+  it('retries the watcher after the templates directory appears', async () => {
+    mockedFs.watch
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      })
+      .mockImplementationOnce(() => ({ close: vi.fn(), once: vi.fn() }) as any);
+    mockedFsPromises.readFile.mockResolvedValueOnce(
+      JSON.stringify([{ id: 'ack', name: 'Acknowledgement', body: 'Got it.' }])
+    );
+
+    const { getTemplates } = await import('./templates.js');
+    await getTemplates();
+
+    expect(mockedFs.watch).toHaveBeenCalledTimes(2);
   });
 
   it('skips invalid templates and logs an error for them', async () => {

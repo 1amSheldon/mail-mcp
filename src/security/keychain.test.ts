@@ -47,7 +47,7 @@ describe('keychain service', () => {
 
   it('removes credentials', async () => {
     await removeCredentials(accountId);
-    expect(deletePassword).toHaveBeenNthCalledWith(1, DEFAULT_KEYCHAIN_SERVICE, accountId);
-    expect(deletePassword).toHaveBeenNthCalledWith(2, LEGACY_KEYCHAIN_SERVICE, accountId);
+    expect(deletePassword).toHaveBeenCalledOnce();
+    expect(deletePassword).toHaveBeenCalledWith(DEFAULT_KEYCHAIN_SERVICE, accountId);
   });
 });

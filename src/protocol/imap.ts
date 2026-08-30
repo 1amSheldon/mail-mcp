@@ -1,5 +1,5 @@
 import { ImapFlow } from 'imapflow';
-import { EmailAccount } from '../types/index.js';
+import type { EmailAccount } from '../config.js';
 import { loadCredentials } from '../security/keychain.js';
 import { getValidAccessToken } from '../security/oauth2.js';
 import { simpleParser, ParsedMail } from 'mailparser';
@@ -232,10 +232,13 @@ export class ImapClient {
           const refUids = await this.client.search(
             { header: { References: threadId } }
           ) as number[];
+          const replyUids = await this.client.search(
+            { header: { 'In-Reply-To': threadId } }
+          ) as number[];
           const rootUids = await this.client.search(
             { header: { 'Message-ID': threadId } }
           ) as number[];
-          uids = [...new Set([...(refUids || []), ...(rootUids || [])])];
+          uids = [...new Set([...(refUids || []), ...(replyUids || []), ...(rootUids || [])])];
         } catch (e2) {
           // header search not supported — return empty
           return [];

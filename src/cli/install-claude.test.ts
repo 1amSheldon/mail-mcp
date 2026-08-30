@@ -1,25 +1,15 @@
-/**
- * Tests for installClaude() — Phase 34-01
- *
- * Tests cover:
- * - Creating new config file when neither dir nor file exist
- * - Creating config file when dir exists but file does not
- * - Merging into existing config that has other mcpServers
- * - Updating an existing 'mail' entry in mcpServers
- * - Throwing on malformed JSON in existing config file
- */
-
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { tmpdir } from 'node:os';
 import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
-import { installClaude } from './install-claude.js';
+import { getClaudeConfigPath, installClaude } from './install-claude.js';
 
 describe('installClaude', () => {
   let tmpDir: string;
   let configPath: string;
-  const binaryPath = '/opt/homebrew/bin/mail-mcp';
+  const packageSpec = '@1amsheldon/mail-mcp@1.5.2';
+  const runtimeArgs = ['-y', packageSpec, '--confirm', '--audit-log', '--redact'];
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'install-claude-test-'));
@@ -31,16 +21,16 @@ describe('installClaude', () => {
   });
 
   it('creates config file with mcpServers.mail when file does not exist', async () => {
-    const writtenPath = await installClaude(configPath, binaryPath);
+    const result = await installClaude(configPath, 'npx', runtimeArgs);
 
-    expect(writtenPath).toBe(configPath);
+    expect(result).toEqual({ configPath, changed: true });
 
     const { readFile } = await import('node:fs/promises');
     const contents = JSON.parse(await readFile(configPath, 'utf8'));
 
     expect(contents).toEqual({
       mcpServers: {
-        mail: { command: binaryPath },
+        mail: { command: 'npx', args: runtimeArgs },
       },
     });
   });
@@ -48,14 +38,14 @@ describe('installClaude', () => {
   it('creates parent directory and config file when neither exist', async () => {
     const nestedConfigPath = join(tmpDir, 'nested', 'dir', 'claude_desktop_config.json');
 
-    const writtenPath = await installClaude(nestedConfigPath, binaryPath);
+    const result = await installClaude(nestedConfigPath, 'npx', runtimeArgs);
 
-    expect(writtenPath).toBe(nestedConfigPath);
+    expect(result).toEqual({ configPath: nestedConfigPath, changed: true });
 
     const { readFile } = await import('node:fs/promises');
     const contents = JSON.parse(await readFile(nestedConfigPath, 'utf8'));
 
-    expect(contents.mcpServers.mail).toEqual({ command: binaryPath });
+    expect(contents.mcpServers.mail).toEqual({ command: 'npx', args: runtimeArgs });
   });
 
   it('merges into existing config preserving other mcpServers entries', async () => {
@@ -72,7 +62,7 @@ describe('installClaude', () => {
     };
     await writeFile(configPath, JSON.stringify(existingConfig, null, 2), 'utf8');
 
-    await installClaude(configPath, binaryPath);
+    await installClaude(configPath, 'npx', runtimeArgs);
 
     const { readFile } = await import('node:fs/promises');
     const result = JSON.parse(await readFile(configPath, 'utf8'));
@@ -84,13 +74,13 @@ describe('installClaude', () => {
     });
 
     // Mail server added
-    expect(result.mcpServers.mail).toEqual({ command: binaryPath });
+    expect(result.mcpServers.mail).toEqual({ command: 'npx', args: runtimeArgs });
 
     // Other top-level keys preserved
     expect(result.preferences).toEqual({ sidebarMode: 'chat' });
   });
 
-  it('updates an existing mail entry with the new binary path', async () => {
+  it('updates an existing mail entry and creates a backup', async () => {
     const existingConfig = {
       mcpServers: {
         mail: { command: '/old/path/to/mail-mcp' },
@@ -98,16 +88,20 @@ describe('installClaude', () => {
     };
     await writeFile(configPath, JSON.stringify(existingConfig, null, 2), 'utf8');
 
-    await installClaude(configPath, '/new/path/to/mail-mcp');
+    const installResult = await installClaude(configPath, 'npx', runtimeArgs);
 
     const { readFile } = await import('node:fs/promises');
     const result = JSON.parse(await readFile(configPath, 'utf8'));
 
-    expect(result.mcpServers.mail).toEqual({ command: '/new/path/to/mail-mcp' });
+    expect(result.mcpServers.mail).toEqual({ command: 'npx', args: runtimeArgs });
+    expect(installResult.backupPath).toBe(`${configPath}.mail-mcp.bak`);
+
+    const backup = JSON.parse(await readFile(installResult.backupPath!, 'utf8'));
+    expect(backup.mcpServers.mail).toEqual({ command: '/old/path/to/mail-mcp' });
   });
 
   it('writes config with 2-space indentation', async () => {
-    await installClaude(configPath, binaryPath);
+    await installClaude(configPath, 'npx', runtimeArgs);
 
     const { readFile } = await import('node:fs/promises');
     const raw = await readFile(configPath, 'utf8');
@@ -120,8 +114,41 @@ describe('installClaude', () => {
   it('throws with a clear error message when existing config is malformed JSON', async () => {
     await writeFile(configPath, '{ invalid json !!!', 'utf8');
 
-    await expect(installClaude(configPath, binaryPath)).rejects.toThrow(
+    await expect(installClaude(configPath, 'npx', runtimeArgs)).rejects.toThrow(
       /malformed|invalid|parse|JSON/i
+    );
+  });
+
+  it('rejects a non-object root config', async () => {
+    await writeFile(configPath, '[]', 'utf8');
+
+    await expect(installClaude(configPath, 'npx', runtimeArgs)).rejects.toThrow(
+      /Malformed JSON/
+    );
+  });
+
+  it('does not rewrite an identical config', async () => {
+    await installClaude(configPath, 'npx', runtimeArgs);
+    const result = await installClaude(configPath, 'npx', runtimeArgs);
+
+    expect(result).toEqual({ configPath, changed: false });
+  });
+});
+
+describe('getClaudeConfigPath', () => {
+  it('uses APPDATA on Windows', () => {
+    expect(getClaudeConfigPath('win32', { APPDATA: 'C:\\Users\\me\\AppData\\Roaming' }, 'C:\\Users\\me'))
+      .toBe('C:\\Users\\me\\AppData\\Roaming\\Claude\\claude_desktop_config.json');
+  });
+
+  it('uses Application Support on macOS', () => {
+    expect(getClaudeConfigPath('darwin', {}, '/Users/me'))
+      .toBe('/Users/me/Library/Application Support/Claude/claude_desktop_config.json');
+  });
+
+  it('rejects unsupported platforms', () => {
+    expect(() => getClaudeConfigPath('linux', {}, '/home/me')).toThrow(
+      'supported on macOS and Windows'
     );
   });
 });

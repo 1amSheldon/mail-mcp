@@ -1,8 +1,9 @@
 import { z } from 'zod';
-import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import type { FSWatcher } from 'node:fs';
+import { watchFileChanges } from './file-watcher.js';
 
 export const TEMPLATES_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'templates.json');
 
@@ -26,24 +27,26 @@ export type EmailTemplate = z.infer<typeof emailTemplateSchema>;
 // ---------------------------------------------------------------------------
 
 let cachedTemplates: EmailTemplate[] | null = null;
-let watcherStarted = false;
+let templatesWatcher: FSWatcher | undefined;
 
 function startWatcher(): void {
-  if (watcherStarted) return;
-  watcherStarted = true;
-  try {
-    fs.watch(TEMPLATES_PATH, () => {
+  if (templatesWatcher) return;
+  templatesWatcher = watchFileChanges(
+    TEMPLATES_PATH,
+    () => {
       cachedTemplates = null;
-    });
-  } catch {
-    // File may not exist yet — cache stays null until next read
-  }
+    },
+    () => {
+      templatesWatcher = undefined;
+    },
+  );
 }
 
 /** @internal — exposed for testing only */
 export function resetTemplatesCache(): void {
+  templatesWatcher?.close();
+  templatesWatcher = undefined;
   cachedTemplates = null;
-  watcherStarted = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -87,6 +90,7 @@ export async function getTemplates(): Promise<EmailTemplate[]> {
   try {
     const loaded = await loadTemplatesFromDisk();
     cachedTemplates = loaded;
+    startWatcher();
     return loaded;
   } catch {
     return [];
