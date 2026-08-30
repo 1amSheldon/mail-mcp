@@ -15,7 +15,11 @@ import { getAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
 import { getClaudeConfigPath, installClaude } from './cli/install-claude.js';
 import { installCodex } from './cli/install-codex.js';
-import { buildMailMcpNpxArgs, MAIL_MCP_LATEST_SPEC } from './cli/npm-runtime.js';
+import {
+  buildMailMcpNpxArgs,
+  MAIL_MCP_LATEST_SPEC,
+  prepareMailMcpNpxRuntime,
+} from './cli/npm-runtime.js';
 import { MailService } from './services/mail.js';
 import type { SendDeliveryResult } from './services/mail.js';
 import { MailMCPError, NetworkError } from './errors.js';
@@ -1555,6 +1559,11 @@ Options:
       ? ['--allow-tools', [...allowedTools].join(',')]
       : ['--confirm'];
   installRuntimeArgs.push('--audit-log', '--redact');
+  const npxArgs = buildMailMcpNpxArgs(installRuntimeArgs);
+
+  if (values['install-codex'] || values['install-claude']) {
+    await prepareMailMcpNpxRuntime();
+  }
 
   if (values['install-codex']) {
     const { join } = await import('node:path');
@@ -1562,14 +1571,14 @@ Options:
 
     const configPath = join(homedir(), '.codex', 'config.toml');
     try {
-      const result = await installCodex(configPath, MAIL_MCP_LATEST_SPEC, installRuntimeArgs);
+      const result = await installCodex(configPath, npxArgs);
       console.log(result.changed
         ? `mail-mcp configured for Codex at: ${result.configPath}`
         : `Codex already tracks ${MAIL_MCP_LATEST_SPEC}.`);
       if (result.backupPath) {
         console.log(`Previous config backed up to: ${result.backupPath}`);
       }
-      console.log(`Server command: npx ${buildMailMcpNpxArgs(installRuntimeArgs).join(' ')}`);
+      console.log(`Server command: npx ${npxArgs.join(' ')}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1583,7 +1592,7 @@ Options:
       const result = await installClaude(
         getClaudeConfigPath(),
         'npx',
-        buildMailMcpNpxArgs(installRuntimeArgs)
+        npxArgs
       );
       console.log(result.changed
         ? `mail-mcp configured for Claude Desktop at: ${result.configPath}`
@@ -1591,7 +1600,7 @@ Options:
       if (result.backupPath) {
         console.log(`Previous config backed up to: ${result.backupPath}`);
       }
-      console.log(`Server command: npx ${buildMailMcpNpxArgs(installRuntimeArgs).join(' ')}`);
+      console.log(`Server command: npx ${npxArgs.join(' ')}`);
       console.log('Restart Claude Desktop to activate.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
