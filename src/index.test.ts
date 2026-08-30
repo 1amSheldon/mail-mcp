@@ -136,6 +136,12 @@ describe('CLI argument validation', () => {
 
   it('parses supported options in strict mode', () => {
     expect(parseCliArgs(['--read-only'])['read-only']).toBe(true);
+    expect(parseCliArgs(['--install-codex'])['install-codex']).toBe(true);
+    expect(parseCliArgs(['--install-codex-stdio'])['install-codex-stdio']).toBe(true);
+    expect(parseCliArgs(['--http', '--auto-update-seconds', '21600'])).toMatchObject({
+      http: true,
+      'auto-update-seconds': '21600',
+    });
   });
 
   it('rejects misspelled write tools', () => {

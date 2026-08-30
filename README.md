@@ -2,7 +2,7 @@
 
 `mail-mcp` connects MCP clients to email accounts over IMAP and SMTP. It works with Gmail, Google Workspace, Mail.ru, iCloud, Fastmail, and other providers that expose standard mail protocols.
 
-The package runs locally over stdio by default. Credentials stay in the operating-system credential store, not in the repository or MCP configuration.
+The server supports stdio and authenticated Streamable HTTP. Credentials stay in the operating-system credential store, not in the repository or MCP configuration.
 
 ## Quick start with Codex
 
@@ -24,13 +24,21 @@ Check the connection without sending mail:
 npx -y --prefer-online @1amsheldon/mail-mcp@latest --validate-accounts
 ```
 
-Install an automatically updating MCP entry in Codex:
+Install it in Codex:
 
 ```bash
 npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex
 ```
 
-Restart Codex. The installer changes only `[mcp_servers.mail]`, saves the previous file as `config.toml.mail-mcp.bak`, and enables confirmation tokens, audit logging, and response redaction. The saved command uses `@latest` with `--prefer-online`, so every new Codex process checks npm for the current release.
+On Windows, this command installs one shared HTTP service, starts it, verifies `/health`, and points Codex at `http://127.0.0.1:8765/mcp`. It creates or reuses `MAIL_MCP_BEARER_TOKEN` in the user environment and writes only the variable name to Codex config. The scheduled task starts at logon, checks health every five minutes, and suppresses duplicate instances. All Codex conversations use the same process and shared mail connections.
+
+The installer changes only `[mcp_servers.mail]` and saves the previous file as `config.toml.mail-mcp.bak`. Restart Codex after installation so it reads the user-level bearer token.
+
+On macOS and Linux, `--install-codex` currently writes the stdio configuration. To select stdio explicitly on any platform:
+
+```bash
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex-stdio
+```
 
 For read-only access:
 
@@ -52,18 +60,20 @@ Use `--install-claude --read-only` to expose only read tools.
 
 ## Automatic updates
 
-Codex and Claude Desktop entries created by the installers run `@1amsheldon/mail-mcp@latest` with npm's `--prefer-online` option. The command uses a dedicated npm prefix, so an older global installation or a project-local binary cannot override the selected release. Restarting the client checks the registry before starting mail-mcp. Downloaded releases remain in npm's cache.
+The managed Windows service checks npm every six hours. When a newer version exists, the HTTP server stops accepting new MCP requests, gives in-flight requests up to eight seconds to finish, and exits. The supervisor then restarts `@1amsheldon/mail-mcp@latest` from a dedicated npm prefix. An older global installation or project-local binary cannot override the selected release.
+
+Stdio entries created by the Codex and Claude Desktop installers also use the dedicated prefix with npm's `--prefer-online` option. They check the registry whenever the client starts the server.
 
 Accounts, signatures, allowlists, and provider settings stay in `~/.config/mail-mcp/accounts.json`. Passwords and OAuth2 credentials stay in the operating-system credential store. Package updates do not rewrite either location.
 
-If an older installer wrote an exact version such as `@1amsheldon/mail-mcp@1.5.3`, run one of these commands once to replace that entry:
+If an older installer wrote an exact version, run the relevant installer again:
 
 ```bash
 npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex
 npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-claude
 ```
 
-Future releases will then be picked up on restart.
+The Windows HTTP service applies future releases without creating one mail process per conversation. Stdio clients apply them on client restart.
 
 ## Gmail and Google Workspace
 
@@ -124,7 +134,7 @@ Or configure the client to run:
 npx -y --prefer-online @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
 ```
 
-Manual Codex configuration:
+Manual stdio configuration:
 
 ```toml
 [mcp_servers.mail]
@@ -188,14 +198,14 @@ Use `retrySafe`, `messageId`, and `verify_sent_message`. Absence from Sent is no
 
 ## Shared local HTTP service
 
-Stdio is the simplest setup. If several MCP clients need one shared process, run the authenticated Streamable HTTP transport on loopback:
+On Windows, use `--install-codex` to install and supervise the shared service. For manual use with another local MCP client, run the authenticated Streamable HTTP transport on loopback:
 
 ```powershell
 $env:MAIL_MCP_BEARER_TOKEN = '<random-token>'
 npx -y --prefer-online @1amsheldon/mail-mcp@latest --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
 ```
 
-`GET /health` reports process health and active session count. `POST /mcp` requires the bearer token.
+`GET /health` reports the service version, start time, and active session count. `POST /mcp` requires the bearer token. Keep the bind address on loopback unless a separate authenticated reverse proxy protects the server.
 
 ## Develop and verify
 
