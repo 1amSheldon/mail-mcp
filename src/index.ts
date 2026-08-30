@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { getAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
 import { getClaudeConfigPath, installClaude } from './cli/install-claude.js';
-import { installCodex } from './cli/install-codex.js';
+import { installCodex, installCodexHttp } from './cli/install-codex.js';
 import {
   buildMailMcpNpxArgs,
   MAIL_MCP_LATEST_SPEC,
@@ -34,6 +34,8 @@ import { ConfirmationStore } from './utils/confirmation-store.js';
 import { AUDIT_LOG_PATH } from './config.js';
 import { MailMCPRuntimeState } from './runtime-state.js';
 import { startHttpHost } from './http-host.js';
+import { startAutoUpdateMonitor, type AutoUpdateMonitor } from './auto-update.js';
+import { installWindowsHttpService } from './cli/windows-service.js';
 
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
@@ -72,6 +74,8 @@ export function parseCliArgs(args: string[]) {
       'validate-accounts': { type: 'boolean', default: false },
       'install-claude': { type: 'boolean', default: false },
       'install-codex': { type: 'boolean', default: false },
+      'install-codex-stdio': { type: 'boolean', default: false },
+      'auto-update-seconds': { type: 'string' },
       'version': { type: 'boolean', default: false },
       'help': { type: 'boolean', short: 'h', default: false },
     },
@@ -1526,7 +1530,9 @@ Options:
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
   --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
-  --install-codex             Write an auto-updating npm command to ~/.codex/config.toml and exit
+  --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
+  --install-codex-stdio       Write an auto-updating per-client stdio command to Codex config
+  --auto-update-seconds N     Managed HTTP service update check interval (minimum: 60)
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);
@@ -1561,7 +1567,7 @@ Options:
   installRuntimeArgs.push('--audit-log', '--redact');
   const npxArgs = buildMailMcpNpxArgs(installRuntimeArgs);
 
-  if (values['install-codex'] || values['install-claude']) {
+  if (values['install-codex-stdio'] || values['install-claude']) {
     await prepareMailMcpNpxRuntime();
   }
 
@@ -1571,10 +1577,51 @@ Options:
 
     const configPath = join(homedir(), '.codex', 'config.toml');
     try {
+      if (process.platform === 'win32') {
+        const service = await installWindowsHttpService({ runtimeArgs: installRuntimeArgs });
+        const result = await installCodexHttp(configPath, {
+          url: service.url,
+          bearerTokenEnvVar: service.bearerTokenEnvVar,
+        });
+        console.log(result.changed
+          ? `mail-mcp shared HTTP service configured for Codex at: ${result.configPath}`
+          : `Codex already uses the shared mail-mcp HTTP service.`);
+        if (result.backupPath) {
+          console.log(`Previous config backed up to: ${result.backupPath}`);
+        }
+        console.log(`Service task: ${service.taskName}`);
+        console.log(`Health check: ${service.healthUrl}`);
+        console.log('Service status: healthy');
+        console.log('Restart Codex to load the bearer token from the user environment.');
+        process.exit(0);
+      }
+
+      await prepareMailMcpNpxRuntime();
       const result = await installCodex(configPath, npxArgs);
       console.log(result.changed
         ? `mail-mcp configured for Codex at: ${result.configPath}`
         : `Codex already tracks ${MAIL_MCP_LATEST_SPEC}.`);
+      if (result.backupPath) {
+        console.log(`Previous config backed up to: ${result.backupPath}`);
+      }
+      console.log(`Server command: npx ${npxArgs.join(' ')}`);
+      console.log('Restart Codex to load the server.');
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
+  if (values['install-codex-stdio']) {
+    const { join } = await import('node:path');
+    const { homedir } = await import('node:os');
+    const configPath = join(homedir(), '.codex', 'config.toml');
+    try {
+      const result = await installCodex(configPath, npxArgs);
+      console.log(result.changed
+        ? `mail-mcp stdio command configured for Codex at: ${result.configPath}`
+        : `Codex already tracks ${MAIL_MCP_LATEST_SPEC} over stdio.`);
       if (result.backupPath) {
         console.log(`Previous config backed up to: ${result.backupPath}`);
       }
@@ -1615,6 +1662,18 @@ Options:
   const auditLogger = new AuditLogger(AUDIT_LOG_PATH, auditLogEnabled);
   const redact = (values['redact'] as boolean | undefined) ?? false;
   const httpMode = (values['http'] as boolean | undefined) ?? false;
+  const autoUpdateSecondsRaw = values['auto-update-seconds'] as string | undefined;
+  let autoUpdateIntervalMs: number | undefined;
+  if (autoUpdateSecondsRaw !== undefined) {
+    const autoUpdateSeconds = Number(autoUpdateSecondsRaw);
+    if (!Number.isInteger(autoUpdateSeconds) || autoUpdateSeconds < 60) {
+      throw new Error(`Invalid auto-update interval: ${autoUpdateSecondsRaw}`);
+    }
+    if (!httpMode) {
+      throw new Error('--auto-update-seconds requires --http');
+    }
+    autoUpdateIntervalMs = autoUpdateSeconds * 1000;
+  }
   const runtimeState = httpMode ? new MailMCPRuntimeState() : undefined;
   const createServer = () => new MailMCPServer(
     readOnly,
@@ -1630,7 +1689,7 @@ Options:
   if (httpMode) {
     const host = values['host'] as string;
     const portRaw = values['port'] as string;
-    const port = Number.parseInt(portRaw, 10);
+    const port = Number(portRaw);
     if (!Number.isInteger(port) || port < 0 || port > 65535) {
       throw new Error(`Invalid HTTP port: ${portRaw}`);
     }
@@ -1647,25 +1706,49 @@ Options:
       bearerToken,
       createSession: createServer,
       shutdownSharedResources: () => runtimeState!.shutdown(),
+      serverVersion: PACKAGE_VERSION,
     });
     console.error(`Mail MCP server running on ${httpHost.url}`);
   }
 
-  const shutdown = async () => {
-    const timer = setTimeout(() => {
-      console.error('Forced exit after 10s shutdown timeout');
-      process.exit(1);
-    }, 10_000);
-    timer.unref();
-    if (httpHost) {
-      await httpHost.close();
-    } else {
-      await server!.shutdown();
-    }
-    process.exit(0);
+  let shutdownPromise: Promise<void> | undefined;
+  let autoUpdateMonitor: AutoUpdateMonitor | undefined;
+  const shutdown = (exitCode: number = 0): Promise<void> => {
+    if (shutdownPromise) return shutdownPromise;
+    shutdownPromise = (async () => {
+      autoUpdateMonitor?.stop();
+      const timer = setTimeout(() => {
+        console.error('Forced exit after 10s shutdown timeout');
+        process.exit(1);
+      }, 10_000);
+      timer.unref();
+      if (httpHost) {
+        await httpHost.close();
+      } else {
+        await server!.shutdown();
+      }
+      process.exit(exitCode);
+    })();
+    return shutdownPromise;
   };
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', () => { void shutdown(); });
+  process.on('SIGINT', () => { void shutdown(); });
+
+  if (autoUpdateIntervalMs !== undefined) {
+    autoUpdateMonitor = startAutoUpdateMonitor({
+      currentVersion: PACKAGE_VERSION,
+      intervalMs: autoUpdateIntervalMs,
+      onUpdateAvailable: async latestVersion => {
+        console.error(`mail-mcp ${latestVersion} is available; restarting the managed service.`);
+        await shutdown(75);
+      },
+      onCheckError: error => {
+        console.error(
+          `Automatic update check failed: ${error instanceof Error ? error.message : String(error)}`
+        );
+      },
+    });
+  }
 
   if (!httpMode) {
     await server!.run();

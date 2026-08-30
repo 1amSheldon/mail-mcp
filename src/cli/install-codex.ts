@@ -11,6 +11,11 @@ export interface CodexInstallResult {
   changed: boolean;
 }
 
+export interface CodexHttpServerOptions {
+  url: string;
+  bearerTokenEnvVar: string;
+}
+
 function tomlString(value: string): string {
   return JSON.stringify(value);
 }
@@ -51,10 +56,36 @@ export function buildCodexServerSection(
   ].join('\n');
 }
 
-export function upsertCodexServer(
-  source: string,
-  npxArgs: readonly string[],
+export function buildCodexHttpServerSection(
+  options: CodexHttpServerOptions,
   serverName: string = CODEX_MCP_SERVER_NAME
+): string {
+  if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
+    throw new Error(`Invalid Codex MCP server name: ${serverName}`);
+  }
+  const url = new URL(options.url);
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    throw new Error(`Invalid Codex MCP server URL: ${options.url}`);
+  }
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(options.bearerTokenEnvVar)) {
+    throw new Error(`Invalid bearer token environment variable: ${options.bearerTokenEnvVar}`);
+  }
+
+  return [
+    `[mcp_servers.${serverName}]`,
+    `url = ${tomlString(url.toString())}`,
+    `bearer_token_env_var = ${tomlString(options.bearerTokenEnvVar)}`,
+    'enabled = true',
+    'required = true',
+    'startup_timeout_sec = 15.0',
+    'tool_timeout_sec = 300.0',
+  ].join('\n');
+}
+
+function upsertCodexServerSection(
+  source: string,
+  section: string,
+  serverName: string
 ): string {
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const kept: string[] = [];
@@ -71,14 +102,38 @@ export function upsertCodexServer(
   }
 
   const base = kept.join(newline).trimEnd();
-  const section = buildCodexServerSection(npxArgs, serverName).replace(/\n/g, newline);
-  return `${base}${base === '' ? '' : `${newline}${newline}`}${section}${newline}`;
+  const normalizedSection = section.replace(/\n/g, newline);
+  return `${base}${base === '' ? '' : `${newline}${newline}`}${normalizedSection}${newline}`;
 }
 
-export async function installCodex(
-  configPath: string,
+export function upsertCodexServer(
+  source: string,
   npxArgs: readonly string[],
   serverName: string = CODEX_MCP_SERVER_NAME
+): string {
+  return upsertCodexServerSection(
+    source,
+    buildCodexServerSection(npxArgs, serverName),
+    serverName
+  );
+}
+
+export function upsertCodexHttpServer(
+  source: string,
+  options: CodexHttpServerOptions,
+  serverName: string = CODEX_MCP_SERVER_NAME
+): string {
+  return upsertCodexServerSection(
+    source,
+    buildCodexHttpServerSection(options, serverName),
+    serverName
+  );
+}
+
+async function installCodexSection(
+  configPath: string,
+  section: string,
+  serverName: string
 ): Promise<CodexInstallResult> {
   await mkdir(dirname(configPath), { recursive: true });
 
@@ -101,7 +156,7 @@ export async function installCodex(
     }
   }
 
-  const updated = upsertCodexServer(source, npxArgs, serverName);
+  const updated = upsertCodexServerSection(source, section, serverName);
   try {
     parse(updated);
   } catch (error) {
@@ -119,4 +174,28 @@ export async function installCodex(
 
   await writeTextFileAtomic(configPath, updated);
   return { configPath, backupPath, changed: true };
+}
+
+export async function installCodex(
+  configPath: string,
+  npxArgs: readonly string[],
+  serverName: string = CODEX_MCP_SERVER_NAME
+): Promise<CodexInstallResult> {
+  return installCodexSection(
+    configPath,
+    buildCodexServerSection(npxArgs, serverName),
+    serverName
+  );
+}
+
+export async function installCodexHttp(
+  configPath: string,
+  options: CodexHttpServerOptions,
+  serverName: string = CODEX_MCP_SERVER_NAME
+): Promise<CodexInstallResult> {
+  return installCodexSection(
+    configPath,
+    buildCodexHttpServerSection(options, serverName),
+    serverName
+  );
 }

@@ -44,12 +44,18 @@ describe('Streamable HTTP host', () => {
       host: '127.0.0.1',
       port: 0,
       bearerToken: 'test-token',
+      serverVersion: '1.2.3',
       createSession: () => new TestMcpSession(),
     });
 
     const response = await fetch(host.url.replace('/mcp', '/health'));
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ status: 'ok', activeSessions: 0 });
+    expect(await response.json()).toMatchObject({
+      status: 'ok',
+      service: 'mail-mcp',
+      version: '1.2.3',
+      activeSessions: 0,
+    });
   });
 
   it('rejects MCP calls without the bearer token', async () => {
@@ -313,5 +319,66 @@ describe('Streamable HTTP host', () => {
     releaseShutdown();
     await Promise.all([firstClose, secondClose]);
     expect(secondCloseFinished).toBe(true);
+  });
+
+  it('drains an in-flight request before shutting down its session', async () => {
+    const sessions: TestMcpSession[] = [];
+    host = await startHttpHost({
+      host: '127.0.0.1',
+      port: 0,
+      bearerToken: 'test-token',
+      createSession: () => {
+        const session = new TestMcpSession();
+        sessions.push(session);
+        return session;
+      },
+    });
+
+    const headers = {
+      accept: 'application/json, text/event-stream',
+      authorization: 'Bearer test-token',
+      'content-type': 'application/json',
+    };
+    const initialized = await fetch(host.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'shutdown-drain-test', version: '1.0.0' },
+        },
+      }),
+    });
+    const sessionId = initialized.headers.get('mcp-session-id');
+    const abortController = new AbortController();
+    const stalledBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{'));
+      },
+    });
+    const stalledRequest = fetch(host.url, {
+      method: 'POST',
+      headers: { ...headers, 'mcp-session-id': sessionId! },
+      body: stalledBody,
+      duplex: 'half',
+      signal: abortController.signal,
+    } as RequestInit & { duplex: 'half' }).catch(() => undefined);
+
+    await new Promise(resolve => setTimeout(resolve, 50));
+    let closeFinished = false;
+    const closePromise = host.close().then(() => { closeFinished = true; });
+    await new Promise(resolve => setTimeout(resolve, 50));
+
+    expect(closeFinished).toBe(false);
+    expect(sessions[0].shutdown).not.toHaveBeenCalled();
+
+    abortController.abort();
+    await stalledRequest;
+    await closePromise;
+    expect(sessions[0].shutdown).toHaveBeenCalledOnce();
   });
 });

@@ -6,6 +6,7 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_MAX_SESSIONS = 64;
+const SHUTDOWN_DRAIN_TIMEOUT_MS = 8_000;
 
 export interface HostedMcpSession {
   connect(transport: StreamableHTTPServerTransport): Promise<void>;
@@ -20,6 +21,7 @@ export interface HttpHostOptions {
   shutdownSharedResources?: () => Promise<void>;
   sessionIdleTimeoutMs?: number;
   maxSessions?: number;
+  serverVersion?: string;
 }
 
 export interface HttpHostController {
@@ -160,6 +162,8 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     if (pathname === '/health' && req.method === 'GET') {
       json(res, shuttingDown ? 503 : 200, {
         status: shuttingDown ? 'stopping' : 'ok',
+        service: 'mail-mcp',
+        ...(options.serverVersion ? { version: options.serverVersion } : {}),
         activeSessions: sessions.size,
         startedAt,
       });
@@ -303,6 +307,14 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     shuttingDown = true;
     closePromise = (async () => {
       clearInterval(cleanupTimer);
+
+      const drainDeadline = Date.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
+      while (
+        Array.from(sessions.values()).some(session => session.activeRequests > 0) &&
+        Date.now() < drainDeadline
+      ) {
+        await new Promise(resolve => setTimeout(resolve, 25));
+      }
 
       await Promise.allSettled(Array.from(sessions.values()).map(closeSession));
       await options.shutdownSharedResources?.();

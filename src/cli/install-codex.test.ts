@@ -3,7 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
-import { installCodex, upsertCodexServer } from './install-codex.js';
+import {
+  buildCodexHttpServerSection,
+  installCodex,
+  installCodexHttp,
+  upsertCodexServer,
+} from './install-codex.js';
 import { buildMailMcpNpxArgs } from './npm-runtime.js';
 
 describe('installCodex', () => {
@@ -70,6 +75,53 @@ describe('installCodex', () => {
     expect(updated).toContain('@1amsheldon/mail-mcp@latest');
     expect(updated).toContain('--prefer-online');
     expect(await readFile(result.backupPath!, 'utf8')).toBe(source);
+  });
+
+  it('installs a shared authenticated HTTP server without writing the token', async () => {
+    await mkdir(join(tempDir, '.codex'), { recursive: true });
+    const source = [
+      'model = "gpt-5"',
+      '',
+      '[mcp_servers.mail]',
+      'command = "npx"',
+      'args = ["-y", "@1amsheldon/mail-mcp@1.5.5"]',
+      '',
+    ].join('\n');
+    await writeFile(configPath, source, 'utf8');
+
+    const result = await installCodexHttp(configPath, {
+      url: 'http://127.0.0.1:8765/mcp',
+      bearerTokenEnvVar: 'MAIL_MCP_BEARER_TOKEN',
+    });
+
+    const parsed = parse(await readFile(configPath, 'utf8'));
+    expect(parsed).toMatchObject({
+      model: 'gpt-5',
+      mcp_servers: {
+        mail: {
+          url: 'http://127.0.0.1:8765/mcp',
+          bearer_token_env_var: 'MAIL_MCP_BEARER_TOKEN',
+          enabled: true,
+          required: true,
+          startup_timeout_sec: 15,
+          tool_timeout_sec: 300,
+        },
+      },
+    });
+    expect(JSON.stringify(parsed)).not.toContain('command');
+    expect(JSON.stringify(parsed)).not.toContain('actual-secret');
+    expect(await readFile(result.backupPath!, 'utf8')).toBe(source);
+  });
+
+  it('rejects unsafe HTTP config values', () => {
+    expect(() => buildCodexHttpServerSection({
+      url: 'file:///tmp/mail-mcp.sock',
+      bearerTokenEnvVar: 'MAIL_MCP_BEARER_TOKEN',
+    })).toThrow('Invalid Codex MCP server URL');
+    expect(() => buildCodexHttpServerSection({
+      url: 'http://127.0.0.1:8765/mcp',
+      bearerTokenEnvVar: 'MAIL-MCP-TOKEN',
+    })).toThrow('Invalid bearer token environment variable');
   });
 
   it('handles a quoted mail table name', () => {
