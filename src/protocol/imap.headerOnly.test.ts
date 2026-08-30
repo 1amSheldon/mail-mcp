@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ImapClient } from './imap.js';
-import type { EmailAccount } from '../types/index.js';
+import type { EmailAccount } from '../config.js';
 
 // Minimal stub account
 const stubAccount: EmailAccount = {
@@ -111,7 +111,7 @@ describe('ImapClient.listMessages — headerOnly flag', () => {
     expect(results[0].snippet).toBe('');
   });
 
-  it('backward compat: calling with 3 args works like headerOnly=false', async () => {
+  it('defaults headerOnly to false when omitted', async () => {
     const msg = makeMsg('Some body text here');
     await setupClient([msg]);
 

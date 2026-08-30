@@ -1,5 +1,5 @@
 /**
- * Tests for --confirm mode (Phase 29-01)
+ * Tests for --confirm mode
  *
  * Confirms that when MailMCPServer is constructed with confirmMode=true:
  * - First write tool call returns confirmationRequired + confirmationId

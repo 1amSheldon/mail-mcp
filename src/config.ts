@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import * as os from 'node:os';
+import type { FSWatcher } from 'node:fs';
+import { watchFileChanges } from './utils/file-watcher.js';
 
 export const ACCOUNTS_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'accounts.json');
 export const AUDIT_LOG_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'audit.log');
@@ -23,18 +25,20 @@ export const config = configSchema.parse({
 // Account schema and type
 // ---------------------------------------------------------------------------
 
+const portSchema = z.number().int().min(1).max(65535);
+
 export const emailAccountSchema = z.object({
   id: z.string().min(1),
   name: z.string().min(1),
   host: z.string().min(1),
-  port: z.number().int().positive(),
-  smtpHost: z.string().optional(),
-  smtpPort: z.number().int().positive().optional(),
+  port: portSchema,
+  smtpHost: z.string().min(1).optional(),
+  smtpPort: portSchema.optional(),
   user: z.string().min(1),
   authType: z.enum(['login', 'oauth2']),
   useTLS: z.boolean(),
   signature: z.string().optional(),
-  manageSievePort: z.number().int().positive().optional(),
+  manageSievePort: portSchema.optional(),
   allowedRecipients: z.array(z.string()).optional(),
   sentFolder: z.string().min(1).optional(),
 });
@@ -46,24 +50,26 @@ export type EmailAccount = z.infer<typeof emailAccountSchema>;
 // ---------------------------------------------------------------------------
 
 let cachedAccounts: EmailAccount[] | null = null;
-let watcherStarted = false;
+let accountsWatcher: FSWatcher | undefined;
 
 function startWatcher(): void {
-  if (watcherStarted) return;
-  watcherStarted = true;
-  try {
-    fs.watch(ACCOUNTS_PATH, () => {
+  if (accountsWatcher) return;
+  accountsWatcher = watchFileChanges(
+    ACCOUNTS_PATH,
+    () => {
       cachedAccounts = null;
-    });
-  } catch {
-    // File may not exist yet; cache stays null until next read.
-  }
+    },
+    () => {
+      accountsWatcher = undefined;
+    },
+  );
 }
 
 /** @internal Exposed for testing only. */
 export function resetConfigCache(): void {
+  accountsWatcher?.close();
+  accountsWatcher = undefined;
   cachedAccounts = null;
-  watcherStarted = false;
 }
 
 // ---------------------------------------------------------------------------
@@ -107,8 +113,13 @@ export async function getAccounts(): Promise<EmailAccount[]> {
   try {
     const loaded = await loadAccountsFromDisk();
     cachedAccounts = loaded;
+    startWatcher();
     return loaded;
-  } catch {
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(`Unable to load accounts.json: ${message}`);
+    }
     return [];
   }
 }
@@ -120,8 +131,11 @@ export async function getAccounts(): Promise<EmailAccount[]> {
  * The fs.watch callback will invalidate the cache after this write.
  */
 export function saveAccounts(accounts: EmailAccount[]): void {
+  const validated = z.array(emailAccountSchema).parse(accounts);
   const configPath = ACCOUNTS_PATH;
   const dir = path.dirname(configPath);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(accounts, null, 2), 'utf-8');
+  fs.writeFileSync(configPath, JSON.stringify(validated, null, 2), 'utf-8');
+  cachedAccounts = validated;
+  startWatcher();
 }

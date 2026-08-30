@@ -98,13 +98,6 @@ describe('MailService SMTP connection behavior', () => {
     expect(mockSmtpConnect).not.toHaveBeenCalled();
   });
 
-  it('connect() does NOT call smtpClient.connect() when readOnly=true', async () => {
-    const account = { id: 'test', name: 'Test', user: 'test@example.com', imap: {} as any, smtp: {} as any };
-    const service = new MailService(account, true);
-    await service.connect();
-    expect(mockSmtpConnect).not.toHaveBeenCalled();
-  });
-
   it('SMTP connects lazily on first sendEmail', async () => {
     const account = { id: 'test', name: 'Test', user: 'test@example.com', imap: {} as any, smtp: {} as any };
     const service = new MailService(account, false);

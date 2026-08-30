@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ImapClient } from './imap.js';
-import { EmailAccount } from '../types/index.js';
+import type { EmailAccount } from '../config.js';
 
 vi.mock('../security/keychain.js', () => ({
   loadCredentials: vi.fn(() => Promise.resolve('test-password'))
@@ -298,7 +298,7 @@ describe('ImapClient', () => {
   });
 
   describe('pagination', () => {
-    it('listMessages with offset=0 returns normal results (backward compat)', async () => {
+    it('listMessages with offset=0 returns the newest results', async () => {
       const { ImapFlow } = await import('imapflow');
       const MockImapFlow = ImapFlow as any;
       const fetchMock = vi.fn().mockImplementation(async function* () {
@@ -386,7 +386,7 @@ describe('ImapClient', () => {
       expect(fetchMock).toHaveBeenCalledWith('1:2', expect.any(Object));
     });
 
-    it('searchMessages with offset=0 returns normal results (backward compat)', async () => {
+    it('searchMessages with offset=0 returns the newest results', async () => {
       const { ImapFlow } = await import('imapflow');
       const MockImapFlow = ImapFlow as any;
       const fetchMock = vi.fn().mockImplementation(async function* () {

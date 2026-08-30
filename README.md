@@ -38,6 +38,18 @@ For read-only access:
 npx -y @1amsheldon/mail-mcp@latest --install-codex --read-only
 ```
 
+## Install in Claude Desktop
+
+After adding an account, run:
+
+```bash
+npx -y @1amsheldon/mail-mcp@latest --install-claude
+```
+
+The installer writes a pinned `npx` command to the Claude Desktop config, preserves other MCP servers, and creates `claude_desktop_config.json.mail-mcp.bak` before replacing an existing file. Restart Claude Desktop after installation.
+
+Use `--install-claude --read-only` to expose only read tools.
+
 ## Gmail and Google Workspace
 
 For a personal Google account, the shortest setup uses a [Google app password](https://support.google.com/accounts/answer/185833). App passwords require 2-Step Verification and are not available for every managed or Advanced Protection account.

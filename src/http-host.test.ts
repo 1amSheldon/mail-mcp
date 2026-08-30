@@ -95,6 +95,48 @@ describe('Streamable HTTP host', () => {
     expect(health.activeSessions).toBe(0);
   });
 
+  it('returns 400 for malformed JSON on an existing session', async () => {
+    host = await startHttpHost({
+      host: '127.0.0.1',
+      port: 0,
+      bearerToken: 'test-token',
+      createSession: () => new TestMcpSession(),
+    });
+
+    const headers = {
+      accept: 'application/json, text/event-stream',
+      authorization: 'Bearer test-token',
+      'content-type': 'application/json',
+    };
+    const initialized = await fetch(host.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'invalid-json-test', version: '1.0.0' },
+        },
+      }),
+    });
+    const sessionId = initialized.headers.get('mcp-session-id');
+    expect(sessionId).toBeTruthy();
+
+    const response = await fetch(host.url, {
+      method: 'POST',
+      headers: { ...headers, 'mcp-session-id': sessionId! },
+      body: '{',
+    });
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({
+      error: { message: 'Invalid JSON body' },
+    });
+  });
+
   it('brackets an IPv6 bind address in generated URLs', async () => {
     host = await startHttpHost({
       host: '::1',

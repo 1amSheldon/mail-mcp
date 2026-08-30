@@ -1,7 +1,25 @@
 import { createInterface } from 'node:readline/promises';
-import { getAccounts, saveAccounts, ACCOUNTS_PATH } from '../config.js';
+import { getAccounts, saveAccounts, ACCOUNTS_PATH, type EmailAccount } from '../config.js';
 import { saveCredentials, removeCredentials } from '../security/keychain.js';
-import type { EmailAccount, AuthType } from '../types/index.js';
+
+interface QuestionPrompt {
+  question(query: string): Promise<string>;
+}
+
+async function askPort(
+  prompt: QuestionPrompt,
+  label: string,
+  defaultPort: number,
+): Promise<number> {
+  while (true) {
+    const raw = (await prompt.question(`${label} [${defaultPort}]: `)).trim();
+    if (raw === '') return defaultPort;
+
+    const port = Number(raw);
+    if (Number.isInteger(port) && port >= 1 && port <= 65535) return port;
+    console.log('  Port must be an integer from 1 to 65535.');
+  }
+}
 
 /**
  * Handle `mail-mcp accounts <subcommand>` CLI commands.
@@ -135,8 +153,7 @@ async function addAccount(): Promise<void> {
     }
 
     // port
-    const portRaw = await rl.question('IMAP port [993]: ');
-    const port = parseInt(portRaw.trim(), 10) || 993;
+    const port = await askPort(rl, 'IMAP port', 993);
 
     // user
     let user = '';
@@ -151,8 +168,17 @@ async function addAccount(): Promise<void> {
     }
 
     // authType
-    const authTypeRaw = await rl.question('Auth type (login/oauth2) [login]: ');
-    const authType: AuthType = authTypeRaw.trim() === 'oauth2' ? 'oauth2' : 'login';
+    let authType: EmailAccount['authType'] | undefined;
+    while (!authType) {
+      const raw = (await rl.question('Auth type (login/oauth2) [login]: ')).trim();
+      if (raw === '' || raw === 'login') {
+        authType = 'login';
+      } else if (raw === 'oauth2') {
+        authType = 'oauth2';
+      } else {
+        console.log('  Auth type must be login or oauth2.');
+      }
+    }
 
     // useTLS
     const tlsRaw = await rl.question('Use TLS? (y/n) [y]: ');
@@ -168,17 +194,18 @@ async function addAccount(): Promise<void> {
     // smtpPort
     let smtpPort: number | undefined;
     if (smtpHost) {
-      const smtpPortRaw = await rl.question('SMTP port [587]: ');
-      smtpPort = parseInt(smtpPortRaw.trim(), 10) || 587;
+      smtpPort = await askPort(rl, 'SMTP port', 587);
     }
 
     // password (only for login auth)
     let password: string | undefined;
     if (authType === 'login') {
-      const passwordRaw = await rl.question(
-        'Password or app password (stored in the system credential store, not accounts.json): '
-      );
-      password = passwordRaw || undefined;
+      while (!password) {
+        password = await rl.question(
+          'Password or app password (stored in the system credential store, not accounts.json): '
+        );
+        if (!password) console.log('  Password is required for login authentication.');
+      }
     }
 
     const account: EmailAccount = {
@@ -193,13 +220,17 @@ async function addAccount(): Promise<void> {
       ...(smtpPort !== undefined ? { smtpPort } : {}),
     };
 
-    existingAccounts.push(account);
-    saveAccounts(existingAccounts);
-
     if (authType === 'login' && password) {
       await saveCredentials(id, password);
+      try {
+        saveAccounts([...existingAccounts, account]);
+      } catch (error) {
+        await removeCredentials(id).catch(() => undefined);
+        throw error;
+      }
       console.log(`Account '${id}' added. Credential stored in the system credential store.`);
     } else {
+      saveAccounts([...existingAccounts, account]);
       console.log(`Account '${id}' added.`);
     }
   } finally {

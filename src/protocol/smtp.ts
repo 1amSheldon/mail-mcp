@@ -1,5 +1,5 @@
 import nodemailer from 'nodemailer';
-import { EmailAccount } from '../types/index.js';
+import type { EmailAccount } from '../config.js';
 import { loadCredentials } from '../security/keychain.js';
 import { getValidAccessToken } from '../security/oauth2.js';
 

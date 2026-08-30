@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { SmtpClient, SmtpRecipientRejectedError } from './smtp.js';
-import { EmailAccount } from '../types/index.js';
+import type { EmailAccount } from '../config.js';
 
 const mocks = vi.hoisted(() => ({
   compose: vi.fn(),

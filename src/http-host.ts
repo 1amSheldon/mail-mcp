@@ -97,6 +97,14 @@ async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return JSON.parse(Buffer.concat(chunks).toString('utf8'));
 }
 
+function respondToBodyError(res: ServerResponse, error: unknown): void {
+  if (error instanceof Error && error.message === 'REQUEST_TOO_LARGE') {
+    rpcError(res, 413, 'Request body is too large');
+    return;
+  }
+  rpcError(res, 400, 'Invalid JSON body');
+}
+
 export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostController> {
   if (!options.bearerToken) {
     throw new Error('HTTP bearer token is required');
@@ -167,11 +175,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         try {
           body = await readJsonBody(req);
         } catch (error) {
-          if (error instanceof Error && error.message === 'REQUEST_TOO_LARGE') {
-            rpcError(res, 413, 'Request body is too large');
-          } else {
-            rpcError(res, 400, 'Invalid JSON body');
-          }
+          respondToBodyError(res, error);
           return;
         }
 
@@ -233,7 +237,15 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         return;
       }
 
-      const body = req.method === 'POST' ? await readJsonBody(req) : undefined;
+      let body: unknown;
+      if (req.method === 'POST') {
+        try {
+          body = await readJsonBody(req);
+        } catch (error) {
+          respondToBodyError(res, error);
+          return;
+        }
+      }
       record.activeRequests++;
       record.lastUsedAt = Date.now();
       try {

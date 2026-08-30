@@ -37,6 +37,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: English-only repository text
+        run: npm run check:english
+
       - name: Test
         run: npm test
 

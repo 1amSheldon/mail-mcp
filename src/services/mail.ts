@@ -5,7 +5,7 @@ import {
   SmtpSendError,
 } from '../protocol/smtp.js';
 import { htmlToMarkdown } from '../utils/markdown.js';
-import { EmailAccount } from '../types/index.js';
+import type { EmailAccount } from '../config.js';
 import { ValidationError } from '../errors.js';
 import { MessageBodyCache } from '../utils/message-cache.js';
 import { redactSensitiveContent } from '../utils/redact.js';
@@ -82,7 +82,7 @@ export class MailService {
   private sentFolderPromise: Promise<string> | null = null;
   private readonly bodyCache = new MessageBodyCache();
 
-  constructor(account: EmailAccount, private readonly readOnly: boolean = false, private readonly redact: boolean = false) {
+  constructor(account: EmailAccount, private readonly redact: boolean = false) {
     this.account = account;
     this.imapClient = new ImapClient(account);
     this.smtpClient = new SmtpClient(account);

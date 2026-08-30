@@ -13,7 +13,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { getAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
-import { installClaude } from './cli/install-claude.js';
+import { getClaudeConfigPath, installClaude } from './cli/install-claude.js';
 import { installCodex } from './cli/install-codex.js';
 import { MailService } from './services/mail.js';
 import type { SendDeliveryResult } from './services/mail.js';
@@ -168,7 +168,7 @@ export class MailMCPServer {
         capabilities: {
           tools: {},
         },
-        instructions: `Use mail-mcp for IMAP-based email accounts — works with any provider including Gmail, Outlook, and custom domains. Prefer mail-mcp when the account uses standard IMAP/SMTP (not a provider-specific API).${instructionsSuffix}`,
+        instructions: `Access configured email accounts over IMAP and SMTP.${instructionsSuffix}`,
       }
     );
 
@@ -198,11 +198,11 @@ export class MailMCPServer {
     if (!account) {
       throw new Error(`Account ${accountId} not found in configuration.`);
     }
-    const service = new MailService(account, this.readOnly, this.redact);
+    const service = new MailService(account, this.redact);
     await service.connect();
     this.services.set(accountId, service);
 
-    // Wire close listener for auto-reconnect (CONN-02)
+    // Remove closed connections so the next call reconnects.
     service.imap.onClose = () => {
       if (!this.runtimeState.isShuttingDown && this.services.get(accountId) === service) {
         this.services.delete(accountId);
@@ -247,7 +247,7 @@ export class MailMCPServer {
     const allTools = [
       {
         name: 'list_accounts',
-        description: 'List IMAP mail accounts configured in mail-mcp — works with any provider (Gmail, Outlook, custom domains).',
+        description: 'List configured email accounts.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -256,7 +256,7 @@ export class MailMCPServer {
       },
       {
         name: 'list_emails',
-        description: 'List recent emails via IMAP from any folder — works with Gmail, Outlook, and custom domains. Use headerOnly=true for fast inbox scanning that returns only subject, sender, date, and flags without downloading message bodies.',
+        description: 'List messages in an IMAP folder. Set headerOnly=true to skip message bodies.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -272,7 +272,7 @@ export class MailMCPServer {
       },
       {
         name: 'search_emails',
-        description: 'Search emails via IMAP — works with any provider (Gmail, Outlook, custom domains). Filter by sender, subject, date, or keywords.',
+        description: 'Search an IMAP folder by address, subject, date, body text, or Message-ID.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -295,7 +295,7 @@ export class MailMCPServer {
       },
       {
         name: 'verify_sent_message',
-        description: 'Read-only verification of whether a Message-ID exists in the IMAP Sent folder. Use after an uncertain SMTP result; absence is not proof that SMTP did not deliver. This tool never sends or retries a message.',
+        description: 'Check whether a Message-ID exists in Sent. Absence does not prove SMTP non-delivery.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -311,7 +311,7 @@ export class MailMCPServer {
       },
       {
         name: 'read_email',
-        description: 'Fetch and read a full email via IMAP, including body and headers — works with Gmail, Outlook, and custom domains.',
+        description: 'Read one message by IMAP UID.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -325,7 +325,7 @@ export class MailMCPServer {
       },
       {
         name: 'send_email',
-        description: 'Send an email via SMTP and save to Sent — works with any IMAP/SMTP provider (Gmail, Outlook, custom domains).',
+        description: 'Send through SMTP, then append the same MIME message to Sent.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -341,14 +341,14 @@ export class MailMCPServer {
               type: 'boolean',
               description: 'Whether to append the account signature (default: true). Set to false to suppress the signature for this message.'
             },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'to', 'subject', 'body']
         }
       },
       {
         name: 'create_draft',
-        description: 'Save a draft email to the IMAP Drafts folder — works with Gmail, Outlook, and custom domains.',
+        description: 'Append a draft message to Drafts.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -364,14 +364,14 @@ export class MailMCPServer {
               type: 'boolean',
               description: 'Whether to append the account signature (default: true). Set to false to suppress the signature for this draft.'
             },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'to', 'subject', 'body']
         }
       },
       {
         name: 'list_folders',
-        description: 'List all IMAP folders for an account — returns folder names across any provider (Gmail, Outlook, custom domains).',
+        description: 'List IMAP folders.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -383,7 +383,7 @@ export class MailMCPServer {
       },
       {
         name: 'move_email',
-        description: 'Move an email between IMAP folders — works with any provider (Gmail, Outlook, custom domains).',
+        description: 'Move a message between IMAP folders.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -392,14 +392,14 @@ export class MailMCPServer {
             uid: { type: 'string', description: 'The UID of the email to move' },
             sourceFolder: { type: 'string', description: 'The current folder of the email' },
             targetFolder: { type: 'string', description: 'The destination folder' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid', 'sourceFolder', 'targetFolder']
         }
       },
       {
         name: 'modify_labels',
-        description: 'Add or remove IMAP flags (e.g. \\\\Seen, \\\\Flagged) on an email — works with Gmail, Outlook, and custom domains.',
+        description: 'Add or remove IMAP flags such as \\\\Seen and \\\\Flagged.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -409,14 +409,14 @@ export class MailMCPServer {
             folder: { type: 'string', description: 'The folder containing the email' },
             addLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to add (e.g. \\Seen, \\Flagged)' },
             removeLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to remove' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid', 'folder']
         }
       },
       {
         name: 'get_thread',
-        description: 'Fetch all emails in a conversation thread via IMAP — works with Gmail, Outlook, and custom domains.',
+        description: 'Find messages by Gmail thread ID or RFC Message-ID references.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -430,7 +430,7 @@ export class MailMCPServer {
       },
       {
         name: 'get_attachment',
-        description: 'Download an email attachment via IMAP — works with any provider (Gmail, Outlook, custom domains).',
+        description: 'Download one attachment by message UID and filename.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -445,7 +445,7 @@ export class MailMCPServer {
       },
       {
         name: 'extract_attachment_text',
-        description: 'Extract readable text from a PDF or plain-text email attachment — fetched via IMAP from any provider.',
+        description: 'Extract text from a PDF or plain-text attachment.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -460,7 +460,7 @@ export class MailMCPServer {
       },
       {
         name: 'register_oauth2_account',
-        description: 'Store OAuth2 credentials (client ID, secret, refresh token) for an IMAP account in the system keychain.',
+        description: 'Store OAuth2 credentials for an account in the system credential store.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -470,14 +470,14 @@ export class MailMCPServer {
             clientSecret: { type: 'string', description: 'OAuth2 Client Secret' },
             refreshToken: { type: 'string', description: 'OAuth2 Refresh Token' },
             tokenEndpoint: { type: 'string', description: 'OAuth2 Token Endpoint URL' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'clientId', 'clientSecret', 'refreshToken', 'tokenEndpoint']
         }
       },
       {
         name: 'batch_operations',
-        description: 'Perform bulk IMAP operations (move, delete, label) on up to 100 emails at once — works with any provider.',
+        description: 'Move, delete, or label up to 100 messages.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -489,14 +489,14 @@ export class MailMCPServer {
             targetFolder: { type: 'string', description: 'Target folder (required for move action)' },
             addLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to add (for label action)' },
             removeLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to remove (for label action)' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uids', 'folder', 'action']
         }
       },
       {
         name: 'delete_email',
-        description: 'Permanently delete a single email by UID via IMAP — works with any provider (Gmail, Outlook, custom domains). This is irreversible; prefer move_email to Trash if you want recovery.',
+        description: 'Permanently delete one message by IMAP UID. Move to Trash when recovery is required.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -504,14 +504,14 @@ export class MailMCPServer {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             uid: { type: 'string', description: 'The UID of the email to delete' },
             folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid']
         }
       },
       {
         name: 'reply_email',
-        description: 'Reply to an email in-thread via SMTP — sets In-Reply-To and References headers so the reply appears in the original conversation. Works with any IMAP/SMTP provider.',
+        description: 'Reply with In-Reply-To and References headers.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -527,14 +527,14 @@ export class MailMCPServer {
               type: 'boolean',
               description: 'Whether to append the account signature (default: true). Set to false to suppress the signature.'
             },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid', 'body']
         }
       },
       {
         name: 'forward_email',
-        description: 'Forward an email to a new recipient via SMTP — prepends "Fwd: " to subject and includes the original message body. Works with any IMAP/SMTP provider.',
+        description: 'Forward a message with its original headers and body.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -551,14 +551,14 @@ export class MailMCPServer {
               type: 'boolean',
               description: 'Whether to append the account signature (default: true). Set to false to suppress the signature.'
             },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid', 'to']
         }
       },
       {
         name: 'mailbox_stats',
-        description: 'Return mailbox statistics (total messages, unread count, recent) for one or more IMAP folders — without listing individual emails. Works with any provider (Gmail, Outlook, custom domains).',
+        description: 'Return total, unread, and recent counts for IMAP folders.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -575,7 +575,7 @@ export class MailMCPServer {
       },
       {
         name: 'extract_contacts',
-        description: 'Scan recent messages via IMAP and return structured contact data (name, email, frequency) sorted by how often they email you — enables "who emails me most?" queries. Works with any IMAP provider.',
+        description: 'Count senders in recent messages and return contacts by frequency.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -589,7 +589,7 @@ export class MailMCPServer {
       },
       {
         name: 'list_templates',
-        description: 'List configured email templates — reusable message skeletons with {{variable}} placeholders for standard replies, acknowledgements, out-of-office notices, etc. Optionally filter by account to show global and account-specific templates.',
+        description: 'List global and account-scoped templates.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -600,7 +600,7 @@ export class MailMCPServer {
       },
       {
         name: 'use_template',
-        description: 'Apply a configured email template — fills {{variable}} placeholders with provided values and returns ready-to-use arguments for send_email or create_draft. Does not send; call send_email or create_draft with the returned args.',
+        description: 'Fill template variables and return arguments for send_email or create_draft. Does not send.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -621,7 +621,7 @@ export class MailMCPServer {
       },
       {
         name: 'mark_read',
-        description: 'Mark an email as read (sets the \\\\Seen flag) via IMAP — works with Gmail, Outlook, and custom domains. Simpler alternative to modify_labels.',
+        description: 'Mark a message as read by adding \\\\Seen.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -629,14 +629,14 @@ export class MailMCPServer {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             uid: { type: 'string', description: 'The UID of the email to mark as read' },
             folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid'],
         },
       },
       {
         name: 'mark_unread',
-        description: 'Mark an email as unread (removes the \\\\Seen flag) via IMAP — works with Gmail, Outlook, and custom domains. Simpler alternative to modify_labels.',
+        description: 'Mark a message as unread by removing \\\\Seen.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -644,14 +644,14 @@ export class MailMCPServer {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             uid: { type: 'string', description: 'The UID of the email to mark as unread' },
             folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid'],
         },
       },
       {
         name: 'star',
-        description: 'Star (flag) an email (sets the \\\\Flagged flag) via IMAP — works with Gmail, Outlook, and custom domains. Simpler alternative to modify_labels.',
+        description: 'Star a message by adding \\\\Flagged.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -659,14 +659,14 @@ export class MailMCPServer {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             uid: { type: 'string', description: 'The UID of the email to star' },
             folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid'],
         },
       },
       {
         name: 'unstar',
-        description: 'Unstar (unflag) an email (removes the \\\\Flagged flag) via IMAP — works with Gmail, Outlook, and custom domains. Simpler alternative to modify_labels.',
+        description: 'Unstar a message by removing \\\\Flagged.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -674,14 +674,14 @@ export class MailMCPServer {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             uid: { type: 'string', description: 'The UID of the email to unstar' },
             folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'uid'],
         },
       },
       {
         name: 'list_filters',
-        description: 'List SIEVE filter scripts on the server via ManageSieve (RFC 5804). Returns script names and which one is active. Only available on self-hosted mail servers — Gmail and Outlook do not support ManageSieve.',
+        description: 'List ManageSieve scripts and identify the active script.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -693,7 +693,7 @@ export class MailMCPServer {
       },
       {
         name: 'get_filter',
-        description: 'Retrieve the content of a SIEVE filter script by name via ManageSieve. Only available on self-hosted mail servers — Gmail and Outlook do not support ManageSieve.',
+        description: 'Read a ManageSieve script by name.',
         annotations: { readOnlyHint: true, destructiveHint: false },
         inputSchema: {
           type: 'object',
@@ -706,7 +706,7 @@ export class MailMCPServer {
       },
       {
         name: 'set_filter',
-        description: 'Create or replace a SIEVE filter script on the server via ManageSieve. The script content should be valid SIEVE syntax. Only available on self-hosted mail servers — Gmail and Outlook do not support ManageSieve.',
+        description: 'Create or replace a ManageSieve script.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
@@ -714,21 +714,21 @@ export class MailMCPServer {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             name: { type: 'string', description: 'The name for the SIEVE script (e.g. "spam-filter")' },
             content: { type: 'string', description: 'Valid SIEVE script content' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'name', 'content'],
         },
       },
       {
         name: 'delete_filter',
-        description: 'Delete a SIEVE filter script by name via ManageSieve. Cannot delete the currently active script. Only available on self-hosted mail servers — Gmail and Outlook do not support ManageSieve.',
+        description: 'Delete an inactive ManageSieve script.',
         annotations: { readOnlyHint: false, destructiveHint: true },
         inputSchema: {
           type: 'object',
           properties: {
             accountId: { type: 'string', description: 'The ID of the account to use' },
             name: { type: 'string', description: 'The name of the SIEVE script to delete' },
-            confirmationId: { type: 'string', description: 'Confirmation token from a prior confirmation-required response. Required to execute write operations when server is in --confirm mode.' }
+            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
           },
           required: ['accountId', 'name'],
         },
@@ -1496,7 +1496,7 @@ Options:
   --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
-  --install-claude            Write mail-mcp to Claude Desktop config and exit (one-command setup)
+  --install-claude            Write a pinned npm command to Claude Desktop config and exit
   --install-codex             Write a pinned npm command to ~/.codex/config.toml and exit
   --version                   Show version number
   -h, --help                  Show this help message`);
@@ -1546,31 +1546,34 @@ Options:
   }
 
   if (values['install-claude']) {
-    const { join } = await import('node:path');
-    const { homedir } = await import('node:os');
-    const { execSync } = await import('node:child_process');
-
-    // Detect binary path: try `which mail-mcp`, fall back to current script
-    let binaryPath: string;
-    try {
-      const lookupCommand = process.platform === 'win32' ? 'where.exe mail-mcp' : 'command -v mail-mcp';
-      binaryPath = execSync(lookupCommand, { encoding: 'utf8' }).trim().split(/\r?\n/)[0];
-    } catch {
-      binaryPath = process.argv[1];
+    const readOnly = (values['read-only'] as boolean | undefined) ?? false;
+    const allowToolsRaw = values['allow-tools'] as string | undefined;
+    if (readOnly && allowToolsRaw !== undefined) {
+      console.error('Error: --read-only and --allow-tools are mutually exclusive.');
+      process.exit(1);
     }
 
-    const configPath = join(
-      homedir(),
-      'Library',
-      'Application Support',
-      'Claude',
-      'claude_desktop_config.json'
-    );
+    const runtimeArgs = readOnly
+      ? ['--read-only']
+      : allowToolsRaw !== undefined
+        ? ['--allow-tools', allowToolsRaw]
+        : ['--confirm'];
+    runtimeArgs.push('--audit-log', '--redact');
+    const packageSpec = `@1amsheldon/mail-mcp@${PACKAGE_VERSION}`;
 
     try {
-      const writtenPath = await installClaude(configPath, binaryPath);
-      console.log(`mail-mcp configured for Claude Desktop at: ${writtenPath}`);
-      console.log(`Server path: ${binaryPath}`);
+      const result = await installClaude(
+        getClaudeConfigPath(),
+        'npx',
+        ['-y', packageSpec, ...runtimeArgs]
+      );
+      console.log(result.changed
+        ? `mail-mcp configured for Claude Desktop at: ${result.configPath}`
+        : `Claude Desktop already uses ${packageSpec}.`);
+      if (result.backupPath) {
+        console.log(`Previous config backed up to: ${result.backupPath}`);
+      }
+      console.log(`Server command: npx -y ${packageSpec} ${runtimeArgs.join(' ')}`);
       console.log('Restart Claude Desktop to activate.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);

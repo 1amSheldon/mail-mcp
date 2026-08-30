@@ -107,6 +107,12 @@ describe('emailAccountSchema', () => {
     // With invalid smtpPort (negative) — should fail
     const withBadPort = emailAccountSchema.safeParse({ ...VALID_ACCOUNT, smtpPort: -1 });
     expect(withBadPort.success).toBe(false);
+
+    const withOutOfRangePort = emailAccountSchema.safeParse({
+      ...VALID_ACCOUNT,
+      smtpPort: 65536,
+    });
+    expect(withOutOfRangePort.success).toBe(false);
   });
 });
 
@@ -114,7 +120,7 @@ describe('getAccounts (async with cache)', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     mockedOs.homedir.mockReturnValue('/home/testuser');
-    mockedFs.watch.mockImplementation(() => ({ close: vi.fn() }) as any);
+    mockedFs.watch.mockImplementation(() => ({ close: vi.fn(), once: vi.fn() }) as any);
 
     // Re-import config module with fresh state for each test by resetting cache
     const { resetConfigCache } = await import('./config.js');
@@ -128,6 +134,20 @@ describe('getAccounts (async with cache)', () => {
     const { getAccounts } = await import('./config.js');
     const result = await getAccounts();
     expect(result).toEqual([]);
+  });
+
+  it('reports malformed JSON instead of silently hiding the config error', async () => {
+    mockedFsPromises.readFile.mockResolvedValue('{not-json' as any);
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const { getAccounts } = await import('./config.js');
+    const result = await getAccounts();
+
+    expect(result).toEqual([]);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unable to load accounts.json')
+    );
+    consoleErrorSpy.mockRestore();
   });
 
   it('one invalid account in array does not prevent valid accounts from loading — returns only valid ones', async () => {
@@ -191,7 +211,7 @@ describe('getAccounts (async with cache)', () => {
     let watchCallback: (() => void) | undefined;
     mockedFs.watch.mockImplementation((_path: any, cb: any) => {
       watchCallback = cb;
-      return { close: vi.fn() } as any;
+      return { close: vi.fn(), once: vi.fn() } as any;
     });
 
     const { getAccounts } = await import('./config.js');
@@ -207,5 +227,35 @@ describe('getAccounts (async with cache)', () => {
     // Second call after invalidation — should re-read disk
     await getAccounts();
     expect(mockedFsPromises.readFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries the watcher after the config directory appears', async () => {
+    mockedFs.watch
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      })
+      .mockImplementationOnce(() => ({ close: vi.fn(), once: vi.fn() }) as any);
+    mockedFsPromises.readFile.mockResolvedValue(JSON.stringify([VALID_ACCOUNT]) as any);
+
+    const { getAccounts } = await import('./config.js');
+    await getAccounts();
+
+    expect(mockedFs.watch).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('saveAccounts', () => {
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    mockedFs.watch.mockImplementation(() => ({ close: vi.fn(), once: vi.fn() }) as any);
+    const { resetConfigCache } = await import('./config.js');
+    resetConfigCache();
+  });
+
+  it('rejects invalid account data before writing the file', async () => {
+    const { saveAccounts } = await import('./config.js');
+
+    expect(() => saveAccounts([{ ...VALID_ACCOUNT, port: 70000 }])).toThrow();
+    expect(mockedFs.writeFileSync).not.toHaveBeenCalled();
   });
 });

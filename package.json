@@ -1,6 +1,6 @@
 {
   "name": "@1amsheldon/mail-mcp",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "MCP server for IMAP and SMTP email with guarded writes and explicit delivery states",
   "keywords": [
     "mcp",
@@ -36,22 +36,23 @@
     "dist/**/*.js"
   ],
   "scripts": {
-    "build": "tsc",
+    "clean": "node scripts/clean.mjs",
+    "build": "npm run clean && tsc",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "check:english": "node scripts/check-english.mjs",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "smoke:stdio": "node scripts/smoke-stdio.mjs",
     "smoke:http": "node scripts/smoke-http.mjs",
     "probe:mail-read": "node scripts/probe-mail-read.mjs",
     "smoke:import": "node -e \"import('./dist/index.js')\"",
-    "release:check": "npm run build && npm test && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
+    "release:check": "npm run build && npm run check:english && npm test && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
     "prepack": "npm run build",
     "prepublishOnly": "npm run release:check"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "cross-keychain": "^1.1.0",
-    "dotenv": "^17.4.2",
     "imapflow": "^1.6.5",
     "mailparser": "^3.9.15",
     "nodemailer": "^9.0.5",
