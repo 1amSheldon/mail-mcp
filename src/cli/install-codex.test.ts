@@ -7,7 +7,7 @@ import { installCodex, upsertCodexServer } from './install-codex.js';
 describe('installCodex', () => {
   let tempDir: string;
   let configPath: string;
-  const packageSpec = '@1amsheldon/mail-mcp@1.5.3';
+  const packageSpec = '@1amsheldon/mail-mcp@latest';
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'install-codex-test-'));
@@ -18,7 +18,7 @@ describe('installCodex', () => {
     await rm(tempDir, { recursive: true, force: true });
   });
 
-  it('creates a Codex config with a pinned npm package', async () => {
+  it('creates a Codex config that checks for the latest npm release', async () => {
     const result = await installCodex(
       configPath,
       packageSpec,
@@ -27,7 +27,7 @@ describe('installCodex', () => {
 
     expect(result).toEqual({ configPath, changed: true });
     expect(await readFile(configPath, 'utf8')).toContain(
-      'args = ["-y", "@1amsheldon/mail-mcp@1.5.3", "--confirm", "--audit-log", "--redact"]'
+      'args = ["-y", "--prefer-online", "@1amsheldon/mail-mcp@latest", "--confirm", "--audit-log", "--redact"]'
     );
   });
 
@@ -37,8 +37,8 @@ describe('installCodex', () => {
       'model = "gpt-5"',
       '',
       '[mcp_servers.mail]',
-      'command = "node"',
-      'args = ["old.js"]',
+      'command = "npx"',
+      'args = ["-y", "@1amsheldon/mail-mcp@1.5.3", "--confirm"]',
       '',
       '[mcp_servers.mail.env]',
       'OLD_VALUE = "kept only in backup"',
@@ -60,8 +60,10 @@ describe('installCodex', () => {
     const updated = await readFile(configPath, 'utf8');
     expect(updated).toContain('model = "gpt-5"');
     expect(updated).toContain('[mcp_servers.context7]');
-    expect(updated).not.toContain('old.js');
+    expect(updated).not.toContain('@1amsheldon/mail-mcp@1.5.3');
     expect(updated).not.toContain('OLD_VALUE');
+    expect(updated).toContain('@1amsheldon/mail-mcp@latest');
+    expect(updated).toContain('--prefer-online');
     expect(await readFile(result.backupPath!, 'utf8')).toBe(source);
   });
 
