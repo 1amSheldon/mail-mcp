@@ -52,7 +52,7 @@ Use `--install-claude --read-only` to expose only read tools.
 
 ## Automatic updates
 
-Codex and Claude Desktop entries created by the installers run `@1amsheldon/mail-mcp@latest` with npm's `--prefer-online` option. Restarting the client checks the registry before starting mail-mcp. Downloaded releases remain in npm's cache.
+Codex and Claude Desktop entries created by the installers run `@1amsheldon/mail-mcp@latest` with npm's `--prefer-online` option. The command uses a dedicated npm prefix, so an older global installation or a project-local binary cannot override the selected release. Restarting the client checks the registry before starting mail-mcp. Downloaded releases remain in npm's cache.
 
 Accounts, signatures, allowlists, and provider settings stay in `~/.config/mail-mcp/accounts.json`. Passwords and OAuth2 credentials stay in the operating-system credential store. Package updates do not rewrite either location.
 

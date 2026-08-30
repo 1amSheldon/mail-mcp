@@ -101,7 +101,7 @@ describe('installClaude', () => {
 
     const backup = JSON.parse(await readFile(installResult.backupPath!, 'utf8'));
     expect(backup.mcpServers.mail.args).toContain('@1amsheldon/mail-mcp@1.5.3');
-    expect(result.mcpServers.mail.args).toContain('@1amsheldon/mail-mcp@latest');
+    expect(result.mcpServers.mail.args).toContain('--package=@1amsheldon/mail-mcp@latest');
     expect(result.mcpServers.mail.args).toContain('--prefer-online');
   });
 

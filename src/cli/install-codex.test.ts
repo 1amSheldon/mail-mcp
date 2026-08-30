@@ -3,11 +3,12 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { installCodex, upsertCodexServer } from './install-codex.js';
+import { buildMailMcpNpxArgs } from './npm-runtime.js';
 
 describe('installCodex', () => {
   let tempDir: string;
   let configPath: string;
-  const packageSpec = '@1amsheldon/mail-mcp@latest';
+  const runtimeArgs = ['--confirm', '--audit-log', '--redact'];
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'install-codex-test-'));
@@ -21,13 +22,12 @@ describe('installCodex', () => {
   it('creates a Codex config that checks for the latest npm release', async () => {
     const result = await installCodex(
       configPath,
-      packageSpec,
-      ['--confirm', '--audit-log', '--redact']
+      buildMailMcpNpxArgs(runtimeArgs, tempDir)
     );
 
     expect(result).toEqual({ configPath, changed: true });
     expect(await readFile(configPath, 'utf8')).toContain(
-      'args = ["-y", "--prefer-online", "@1amsheldon/mail-mcp@latest", "--confirm", "--audit-log", "--redact"]'
+      `args = ["-y", "--prefer-online", "--prefix", "${tempDir.replace(/\\/g, '\\\\')}\\\\.cache\\\\mail-mcp\\\\npm-runtime", "--package=@1amsheldon/mail-mcp@latest", "mail-mcp", "--confirm", "--audit-log", "--redact"]`
     );
   });
 
@@ -53,8 +53,7 @@ describe('installCodex', () => {
 
     const result = await installCodex(
       configPath,
-      packageSpec,
-      ['--read-only', '--audit-log', '--redact']
+      buildMailMcpNpxArgs(['--read-only', '--audit-log', '--redact'], tempDir)
     );
 
     const updated = await readFile(configPath, 'utf8');
@@ -69,7 +68,7 @@ describe('installCodex', () => {
 
   it('handles a quoted mail table name', () => {
     const source = '[mcp_servers."mail"]\r\ncommand = "old"\r\n\r\n[features]\r\nfoo = true\r\n';
-    const updated = upsertCodexServer(source, packageSpec, ['--confirm']);
+    const updated = upsertCodexServer(source, buildMailMcpNpxArgs(['--confirm'], tempDir));
 
     expect(updated).not.toContain('command = "old"');
     expect(updated).toContain('[features]\r\nfoo = true');
@@ -77,8 +76,9 @@ describe('installCodex', () => {
   });
 
   it('does not rewrite an unchanged config', async () => {
-    await installCodex(configPath, packageSpec, ['--confirm']);
-    const result = await installCodex(configPath, packageSpec, ['--confirm']);
+    const npxArgs = buildMailMcpNpxArgs(['--confirm'], tempDir);
+    await installCodex(configPath, npxArgs);
+    const result = await installCodex(configPath, npxArgs);
 
     expect(result).toEqual({ configPath, changed: false });
   });
@@ -89,7 +89,7 @@ describe('installCodex', () => {
     await writeFile(configPath, source, 'utf8');
 
     await expect(
-      installCodex(configPath, packageSpec, ['--confirm'])
+      installCodex(configPath, buildMailMcpNpxArgs(['--confirm'], tempDir))
     ).rejects.toThrow(/Invalid existing Codex config/);
     expect(await readFile(configPath, 'utf8')).toBe(source);
   });

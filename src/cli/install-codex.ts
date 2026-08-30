@@ -2,7 +2,6 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { parse } from 'smol-toml';
 import { writeTextFileAtomic } from '../utils/atomic-write.js';
-import { NPX_RESOLUTION_ARGS } from './npm-runtime.js';
 
 export const CODEX_MCP_SERVER_NAME = 'mail';
 
@@ -31,18 +30,17 @@ function isServerTable(name: string, serverName: string): boolean {
 }
 
 export function buildCodexServerSection(
-  packageSpec: string,
-  runtimeArgs: readonly string[],
+  npxArgs: readonly string[],
   serverName: string = CODEX_MCP_SERVER_NAME
 ): string {
   if (!/^[A-Za-z0-9_-]+$/.test(serverName)) {
     throw new Error(`Invalid Codex MCP server name: ${serverName}`);
   }
-  if (packageSpec.trim() === '') {
-    throw new Error('The npm package spec must not be empty.');
+  if (npxArgs.length === 0) {
+    throw new Error('The npx argument list must not be empty.');
   }
 
-  const args = [...NPX_RESOLUTION_ARGS, packageSpec, ...runtimeArgs].map(tomlString).join(', ');
+  const args = npxArgs.map(tomlString).join(', ');
   return [
     `[mcp_servers.${serverName}]`,
     'command = "npx"',
@@ -55,8 +53,7 @@ export function buildCodexServerSection(
 
 export function upsertCodexServer(
   source: string,
-  packageSpec: string,
-  runtimeArgs: readonly string[],
+  npxArgs: readonly string[],
   serverName: string = CODEX_MCP_SERVER_NAME
 ): string {
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
@@ -74,14 +71,13 @@ export function upsertCodexServer(
   }
 
   const base = kept.join(newline).trimEnd();
-  const section = buildCodexServerSection(packageSpec, runtimeArgs, serverName).replace(/\n/g, newline);
+  const section = buildCodexServerSection(npxArgs, serverName).replace(/\n/g, newline);
   return `${base}${base === '' ? '' : `${newline}${newline}`}${section}${newline}`;
 }
 
 export async function installCodex(
   configPath: string,
-  packageSpec: string,
-  runtimeArgs: readonly string[],
+  npxArgs: readonly string[],
   serverName: string = CODEX_MCP_SERVER_NAME
 ): Promise<CodexInstallResult> {
   await mkdir(dirname(configPath), { recursive: true });
@@ -105,7 +101,7 @@ export async function installCodex(
     }
   }
 
-  const updated = upsertCodexServer(source, packageSpec, runtimeArgs, serverName);
+  const updated = upsertCodexServer(source, npxArgs, serverName);
   try {
     parse(updated);
   } catch (error) {
