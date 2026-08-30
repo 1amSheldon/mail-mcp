@@ -176,7 +176,7 @@ async function addAccount(): Promise<void> {
     let password: string | undefined;
     if (authType === 'login') {
       const passwordRaw = await rl.question(
-        'Password (will be stored in macOS Keychain, NOT in config file): '
+        'Password or app password (stored in the system credential store, not accounts.json): '
       );
       password = passwordRaw || undefined;
     }
@@ -198,7 +198,7 @@ async function addAccount(): Promise<void> {
 
     if (authType === 'login' && password) {
       await saveCredentials(id, password);
-      console.log(`Account '${id}' added. Password stored in macOS Keychain.`);
+      console.log(`Account '${id}' added. Credential stored in the system credential store.`);
     } else {
       console.log(`Account '${id}' added.`);
     }
