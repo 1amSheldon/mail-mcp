@@ -2,6 +2,7 @@ import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { parse } from 'smol-toml';
 import { writeTextFileAtomic } from '../utils/atomic-write.js';
+import { NPX_RESOLUTION_ARGS } from './npm-runtime.js';
 
 export const CODEX_MCP_SERVER_NAME = 'mail';
 
@@ -41,7 +42,7 @@ export function buildCodexServerSection(
     throw new Error('The npm package spec must not be empty.');
   }
 
-  const args = ['-y', packageSpec, ...runtimeArgs].map(tomlString).join(', ');
+  const args = [...NPX_RESOLUTION_ARGS, packageSpec, ...runtimeArgs].map(tomlString).join(', ');
   return [
     `[mcp_servers.${serverName}]`,
     'command = "npx"',

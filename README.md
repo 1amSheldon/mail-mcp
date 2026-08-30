@@ -15,27 +15,27 @@ Requirements:
 Add an account:
 
 ```bash
-npx -y @1amsheldon/mail-mcp@latest accounts add
+npx -y --prefer-online @1amsheldon/mail-mcp@latest accounts add
 ```
 
 Check the connection without sending mail:
 
 ```bash
-npx -y @1amsheldon/mail-mcp@latest --validate-accounts
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --validate-accounts
 ```
 
-Install a pinned MCP entry in Codex:
+Install an automatically updating MCP entry in Codex:
 
 ```bash
-npx -y @1amsheldon/mail-mcp@latest --install-codex
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex
 ```
 
-Restart Codex. The installer changes only `[mcp_servers.mail]`, saves the previous file as `config.toml.mail-mcp.bak`, and enables confirmation tokens, audit logging, and response redaction.
+Restart Codex. The installer changes only `[mcp_servers.mail]`, saves the previous file as `config.toml.mail-mcp.bak`, and enables confirmation tokens, audit logging, and response redaction. The saved command uses `@latest` with `--prefer-online`, so every new Codex process checks npm for the current release.
 
 For read-only access:
 
 ```bash
-npx -y @1amsheldon/mail-mcp@latest --install-codex --read-only
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex --read-only
 ```
 
 ## Install in Claude Desktop
@@ -43,12 +43,27 @@ npx -y @1amsheldon/mail-mcp@latest --install-codex --read-only
 After adding an account, run:
 
 ```bash
-npx -y @1amsheldon/mail-mcp@latest --install-claude
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-claude
 ```
 
-The installer writes a pinned `npx` command to the Claude Desktop config, preserves other MCP servers, and creates `claude_desktop_config.json.mail-mcp.bak` before replacing an existing file. Restart Claude Desktop after installation.
+The installer writes an automatically updating `npx` command to the Claude Desktop config, preserves other MCP servers, and creates `claude_desktop_config.json.mail-mcp.bak` before replacing an existing file. Restart Claude Desktop after installation.
 
 Use `--install-claude --read-only` to expose only read tools.
+
+## Automatic updates
+
+Codex and Claude Desktop entries created by the installers run `@1amsheldon/mail-mcp@latest` with npm's `--prefer-online` option. Restarting the client checks the registry before starting mail-mcp. Downloaded releases remain in npm's cache.
+
+Accounts, signatures, allowlists, and provider settings stay in `~/.config/mail-mcp/accounts.json`. Passwords and OAuth2 credentials stay in the operating-system credential store. Package updates do not rewrite either location.
+
+If an older installer wrote an exact version such as `@1amsheldon/mail-mcp@1.5.3`, run one of these commands once to replace that entry:
+
+```bash
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-claude
+```
+
+Future releases will then be picked up on restart.
 
 ## Gmail and Google Workspace
 
@@ -106,7 +121,7 @@ mail-mcp --validate-accounts
 Or configure the client to run:
 
 ```text
-npx -y @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
 ```
 
 Manual Codex configuration:
@@ -114,7 +129,7 @@ Manual Codex configuration:
 ```toml
 [mcp_servers.mail]
 command = "npx"
-args = ["-y", "@1amsheldon/mail-mcp@latest", "--confirm", "--audit-log", "--redact"]
+args = ["-y", "--prefer-online", "@1amsheldon/mail-mcp@latest", "--confirm", "--audit-log", "--redact"]
 enabled = true
 startup_timeout_sec = 30.0
 tool_timeout_sec = 300.0
@@ -177,7 +192,7 @@ Stdio is the simplest setup. If several MCP clients need one shared process, run
 
 ```powershell
 $env:MAIL_MCP_BEARER_TOKEN = '<random-token>'
-npx -y @1amsheldon/mail-mcp@latest --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
 ```
 
 `GET /health` reports process health and active session count. `POST /mcp` requires the bearer token.
@@ -193,6 +208,8 @@ npm pack --dry-run
 ```
 
 The default tests and smoke checks do not connect to a mailbox or send mail. `--validate-accounts` opens IMAP and SMTP connections but does not send a message.
+
+Publishing is handled by `.github/workflows/publish.yml`. Publishing a GitHub Release whose tag matches `v` plus the version in `package.json` runs the full release gate and publishes to npm through OIDC trusted publishing. The workflow has no npm token or long-lived publishing credential.
 
 ## Common problems
 

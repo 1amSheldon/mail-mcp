@@ -15,6 +15,7 @@ import { getAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
 import { getClaudeConfigPath, installClaude } from './cli/install-claude.js';
 import { installCodex } from './cli/install-codex.js';
+import { buildMailMcpNpxArgs, MAIL_MCP_LATEST_SPEC } from './cli/npm-runtime.js';
 import { MailService } from './services/mail.js';
 import type { SendDeliveryResult } from './services/mail.js';
 import { MailMCPError, NetworkError } from './errors.js';
@@ -1520,8 +1521,8 @@ Options:
   --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
-  --install-claude            Write a pinned npm command to Claude Desktop config and exit
-  --install-codex             Write a pinned npm command to ~/.codex/config.toml and exit
+  --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
+  --install-codex             Write an auto-updating npm command to ~/.codex/config.toml and exit
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);
@@ -1560,16 +1561,15 @@ Options:
     const { homedir } = await import('node:os');
 
     const configPath = join(homedir(), '.codex', 'config.toml');
-    const packageSpec = `@1amsheldon/mail-mcp@${PACKAGE_VERSION}`;
     try {
-      const result = await installCodex(configPath, packageSpec, installRuntimeArgs);
+      const result = await installCodex(configPath, MAIL_MCP_LATEST_SPEC, installRuntimeArgs);
       console.log(result.changed
         ? `mail-mcp configured for Codex at: ${result.configPath}`
-        : `Codex already uses ${packageSpec}.`);
+        : `Codex already tracks ${MAIL_MCP_LATEST_SPEC}.`);
       if (result.backupPath) {
         console.log(`Previous config backed up to: ${result.backupPath}`);
       }
-      console.log(`Server command: npx -y ${packageSpec} ${installRuntimeArgs.join(' ')}`);
+      console.log(`Server command: npx ${buildMailMcpNpxArgs(installRuntimeArgs).join(' ')}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1579,21 +1579,19 @@ Options:
   }
 
   if (values['install-claude']) {
-    const packageSpec = `@1amsheldon/mail-mcp@${PACKAGE_VERSION}`;
-
     try {
       const result = await installClaude(
         getClaudeConfigPath(),
         'npx',
-        ['-y', packageSpec, ...installRuntimeArgs]
+        buildMailMcpNpxArgs(installRuntimeArgs)
       );
       console.log(result.changed
         ? `mail-mcp configured for Claude Desktop at: ${result.configPath}`
-        : `Claude Desktop already uses ${packageSpec}.`);
+        : `Claude Desktop already tracks ${MAIL_MCP_LATEST_SPEC}.`);
       if (result.backupPath) {
         console.log(`Previous config backed up to: ${result.backupPath}`);
       }
-      console.log(`Server command: npx -y ${packageSpec} ${installRuntimeArgs.join(' ')}`);
+      console.log(`Server command: npx ${buildMailMcpNpxArgs(installRuntimeArgs).join(' ')}`);
       console.log('Restart Claude Desktop to activate.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);

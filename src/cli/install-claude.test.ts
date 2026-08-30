@@ -4,12 +4,12 @@ import { mkdtemp, rm, mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import { getClaudeConfigPath, installClaude } from './install-claude.js';
+import { buildMailMcpNpxArgs } from './npm-runtime.js';
 
 describe('installClaude', () => {
   let tmpDir: string;
   let configPath: string;
-  const packageSpec = '@1amsheldon/mail-mcp@1.5.3';
-  const runtimeArgs = ['-y', packageSpec, '--confirm', '--audit-log', '--redact'];
+  const runtimeArgs = buildMailMcpNpxArgs(['--confirm', '--audit-log', '--redact']);
 
   beforeEach(async () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'install-claude-test-'));
@@ -83,7 +83,10 @@ describe('installClaude', () => {
   it('updates an existing mail entry and creates a backup', async () => {
     const existingConfig = {
       mcpServers: {
-        mail: { command: '/old/path/to/mail-mcp' },
+        mail: {
+          command: 'npx',
+          args: ['-y', '@1amsheldon/mail-mcp@1.5.3', '--confirm'],
+        },
       },
     };
     await writeFile(configPath, JSON.stringify(existingConfig, null, 2), 'utf8');
@@ -97,7 +100,9 @@ describe('installClaude', () => {
     expect(installResult.backupPath).toBe(`${configPath}.mail-mcp.bak`);
 
     const backup = JSON.parse(await readFile(installResult.backupPath!, 'utf8'));
-    expect(backup.mcpServers.mail).toEqual({ command: '/old/path/to/mail-mcp' });
+    expect(backup.mcpServers.mail.args).toContain('@1amsheldon/mail-mcp@1.5.3');
+    expect(result.mcpServers.mail.args).toContain('@1amsheldon/mail-mcp@latest');
+    expect(result.mcpServers.mail.args).toContain('--prefer-online');
   });
 
   it('writes config with 2-space indentation', async () => {
