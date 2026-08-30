@@ -1,5 +1,3 @@
-// Created by RxGroup on 13.08.2026. Copyright (c) 2026 RX Group. All rights reserved.
-
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';

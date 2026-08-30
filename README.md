@@ -1,53 +1,103 @@
 # mail-mcp
 
-An MCP server for email accounts that expose IMAP and SMTP. It runs over stdio or an authenticated loopback HTTP endpoint.
+`mail-mcp` connects MCP clients to email accounts over IMAP and SMTP. It works with Gmail, Google Workspace, Mail.ru, iCloud, Fastmail, and other providers that expose standard mail protocols.
 
-The server treats SMTP delivery and the Sent-folder copy as separate events. Its result states distinguish acceptance, partial recipient rejection, failed persistence, and an unknown SMTP outcome where an automatic retry could send the same message twice.
+The package runs locally over stdio by default. Credentials stay in the operating-system credential store, not in the repository or MCP configuration.
 
-## Install and connect to Codex
+## Quick start with Codex
 
-Requirements: Node.js 20.19 or newer, an IMAP/SMTP account, and an operating-system credential store supported by `cross-keychain`.
+Requirements:
 
-Add the email account:
+- Node.js 20.19 or newer
+- an IMAP/SMTP account
+- an operating-system credential store supported by `cross-keychain`
+
+Add an account:
 
 ```bash
 npx -y @1amsheldon/mail-mcp@latest accounts add
 ```
 
-Then add a pinned server entry to `~/.codex/config.toml`:
+Check the connection without sending mail:
+
+```bash
+npx -y @1amsheldon/mail-mcp@latest --validate-accounts
+```
+
+Install a pinned MCP entry in Codex:
 
 ```bash
 npx -y @1amsheldon/mail-mcp@latest --install-codex
 ```
 
-The installer enables confirmation tokens, audit logging, and response redaction. It replaces only `[mcp_servers.mail]`, saves the previous file as `config.toml.mail-mcp.bak`, and pins the package version it was run from. Restart Codex after it finishes.
+Restart Codex. The installer changes only `[mcp_servers.mail]`, saves the previous file as `config.toml.mail-mcp.bak`, and enables confirmation tokens, audit logging, and response redaction.
 
-To expose read-only tools instead:
+For read-only access:
 
 ```bash
 npx -y @1amsheldon/mail-mcp@latest --install-codex --read-only
 ```
 
-To update later, rerun the `@latest --install-codex` command. Account settings and credentials stay in place.
+## Gmail and Google Workspace
 
-## Other install paths
+For a personal Google account, the shortest setup uses a [Google app password](https://support.google.com/accounts/answer/185833). App passwords require 2-Step Verification and are not available for every managed or Advanced Protection account.
 
-Global command:
+Use these values in `accounts add`:
+
+| Setting | Value |
+| --- | --- |
+| IMAP host | `imap.gmail.com` |
+| IMAP port | `993` |
+| Email address | full Gmail or Workspace address |
+| Auth type | `login` |
+| TLS | `y` |
+| SMTP host | `smtp.gmail.com` |
+| SMTP port | `465` or `587` |
+| Password | Google app password, not the normal account password |
+
+Port 465 uses implicit TLS. Port 587 upgrades the connection with STARTTLS.
+
+Google recommends OAuth2 for public or centrally managed applications. The runtime supports [XOAUTH2 for Gmail IMAP and SMTP](https://developers.google.com/workspace/gmail/imap/xoauth2-protocol) and can refresh pre-provisioned credentials, but this package does not run a Google consent flow or create an OAuth client for you.
+
+## Other providers
+
+Run the same account wizard with the provider's IMAP host, SMTP host, ports, and authentication method. Account metadata is stored in:
+
+```text
+~/.config/mail-mcp/accounts.json
+```
+
+Passwords and OAuth2 token sets are stored under the `com.1amsheldon.mail-mcp` service in the system credential store.
+
+```bash
+mail-mcp accounts list
+mail-mcp accounts remove ACCOUNT_ID
+```
+
+Optional account fields in `accounts.json`:
+
+- `signature` adds a signature to sends and drafts.
+- `allowedRecipients` accepts exact addresses or domain entries such as `@example.org`.
+- `sentFolder` overrides Sent-folder discovery for providers with non-standard folder names.
+- `manageSievePort` enables server-side filter tools when the provider supports ManageSieve.
+
+## Use with another MCP client
+
+Install globally:
 
 ```bash
 npm install --global @1amsheldon/mail-mcp
 mail-mcp accounts add
-mail-mcp --install-codex
+mail-mcp --validate-accounts
 ```
 
-Codex CLI, without the built-in installer:
+Or configure the client to run:
 
-```bash
-codex mcp add mail -- npx -y @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
-codex mcp list
+```text
+npx -y @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
 ```
 
-Equivalent manual config:
+Manual Codex configuration:
 
 ```toml
 [mcp_servers.mail]
@@ -58,73 +108,28 @@ startup_timeout_sec = 30.0
 tool_timeout_sec = 300.0
 ```
 
-Do not put passwords, OAuth secrets, or bearer tokens in the repository or MCP configuration.
-
-## Account commands
-
-Account metadata is stored in `~/.config/mail-mcp/accounts.json`. Credentials go to the operating-system keychain.
-
-```bash
-mail-mcp accounts add
-mail-mcp accounts list
-mail-mcp accounts remove ACCOUNT_ID
-```
-
-The account wizard accepts IMAP/SMTP hosts and ports, password or OAuth2 authentication, TLS, a signature, a recipient allowlist, a ManageSieve port, and an optional `sentFolder` override.
-
-## What this fork changes
-
-- Routes all 30 advertised tools through one tested dispatcher.
-- Reuses one MIME message and its exact `Message-ID` for SMTP and the Sent copy.
-- Never retries automatically after an uncertain SMTP outcome.
-- Verifies Sent-folder persistence by exact `Message-ID` without modifying the mailbox.
-- Runs one shared loopback HTTP process with bearer authentication and bounded sessions.
-- Applies read-only mode, tool allowlists, confirmation tokens, audit logging, and response redaction at the MCP boundary.
-
-## Reliable delivery contract
-
-Send, reply, and forward return structured JSON.
-
-| Field | Meaning |
-| --- | --- |
-| `status` | Delivery state listed below |
-| `smtpAccepted` | `true`, `false`, or `null` when the outcome is unknown |
-| `accepted`, `rejected` | Per-recipient SMTP result |
-| `messageId` | Correlation ID shared by SMTP and the Sent copy |
-| `sentFolderSaved` | Whether IMAP confirmed persistence |
-| `sentFolderUid` | UID returned by IMAP append, when available |
-| `retrySafe` | Whether another send attempt is safe |
-| `nextAction` | Next check for the caller |
-
-| Status | Meaning |
-| --- | --- |
-| `sent_and_saved` | SMTP accepted the message and IMAP confirmed the Sent copy |
-| `partially_sent_and_saved` | Some recipients were rejected; accepted recipients were sent and Sent was saved |
-| `smtp_accepted_sent_not_confirmed` | SMTP accepted the message, but the Sent copy was not confirmed |
-| `smtp_partially_accepted_sent_not_confirmed` | Partial SMTP acceptance without confirmed Sent persistence |
-| `smtp_rejected` | SMTP rejected every recipient |
-| `smtp_connection_failed` | The connection failed before a confirmed delivery result |
-| `smtp_outcome_unknown` | Delivery may have happened; do not retry automatically |
-
-Absence from Sent is not proof that SMTP delivery failed. Check `retrySafe` and verify with `messageId`.
+Do not put passwords, refresh tokens, client secrets, or HTTP bearer tokens in MCP configuration.
 
 ## Tools
 
-Read-only:
+Read-only tools:
 
-- `list_accounts`, `list_emails`, `search_emails`, `verify_sent_message`
-- `read_email`, `get_thread`, `get_attachment`, `extract_attachment_text`
+- `list_accounts`, `list_emails`, `search_emails`, `read_email`, `get_thread`
+- `get_attachment`, `extract_attachment_text`
 - `list_folders`, `mailbox_stats`, `extract_contacts`
+- `verify_sent_message`
 - `list_templates`, `use_template`, `list_filters`, `get_filter`
 
-Writes:
+Write tools:
 
 - `send_email`, `reply_email`, `forward_email`, `create_draft`
 - `move_email`, `modify_labels`, `batch_operations`, `delete_email`
 - `mark_read`, `mark_unread`, `star`, `unstar`
 - `register_oauth2_account`, `set_filter`, `delete_filter`
 
-## Safety modes
+PDF attachments are parsed with `pdf-parse` v2. Text extraction does not perform OCR; scanned image-only PDFs may return little or no text.
+
+## Guard write operations
 
 ```bash
 mail-mcp --read-only
@@ -134,63 +139,58 @@ mail-mcp --confirm --audit-log --redact
 
 - `--read-only` removes write tools.
 - `--allow-tools` exposes only the named write tools.
-- `--confirm` binds a short-lived confirmation token to one tool and its original arguments.
-- `--audit-log` appends JSONL diagnostics to `~/.config/mail-mcp/audit.log`.
-- `--redact` masks selected sensitive content before it reaches the MCP client.
+- `--confirm` requires a short-lived token tied to the original tool arguments.
+- `--audit-log` writes JSONL diagnostics to `~/.config/mail-mcp/audit.log`.
+- `--redact` masks selected sensitive patterns before content reaches the MCP client.
 
-## Shared HTTP service
+## Delivery results
 
-For several concurrent MCP clients, one loopback-only Streamable HTTP process can share the connection pool.
+SMTP acceptance and the Sent-folder copy are separate events. Send, reply, and forward return structured JSON so callers do not guess whether retrying is safe.
+
+| Status | Meaning |
+| --- | --- |
+| `sent_and_saved` | SMTP accepted every recipient and IMAP confirmed the Sent copy |
+| `partially_sent_and_saved` | SMTP accepted some recipients and IMAP confirmed the Sent copy |
+| `smtp_accepted_sent_not_confirmed` | SMTP accepted the message, but the Sent copy was not confirmed |
+| `smtp_partially_accepted_sent_not_confirmed` | Partial SMTP acceptance without a confirmed Sent copy |
+| `smtp_rejected` | SMTP rejected every recipient |
+| `smtp_connection_failed` | The connection failed before a confirmed delivery attempt |
+| `smtp_outcome_unknown` | Delivery may have happened; do not retry automatically |
+
+Use `retrySafe`, `messageId`, and `verify_sent_message`. Absence from Sent is not proof that SMTP delivery failed.
+
+## Shared local HTTP service
+
+Stdio is the simplest setup. If several MCP clients need one shared process, run the authenticated Streamable HTTP transport on loopback:
 
 ```powershell
 $env:MAIL_MCP_BEARER_TOKEN = '<random-token>'
 npx -y @1amsheldon/mail-mcp@latest --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
 ```
 
-Codex config:
+`GET /health` reports process health and active session count. `POST /mcp` requires the bearer token.
 
-```toml
-[mcp_servers.mail]
-url = "http://127.0.0.1:8765/mcp"
-bearer_token_env_var = "MAIL_MCP_BEARER_TOKEN"
-enabled = true
-startup_timeout_sec = 15.0
-tool_timeout_sec = 300.0
-```
-
-`GET http://127.0.0.1:8765/health` reports process health and active MCP session count. It does not expose account or mailbox data. The MCP endpoint requires the bearer token and binds to localhost by default.
-
-## Build from source
+## Develop and verify
 
 ```bash
 git clone https://github.com/1amSheldon/mail-mcp.git
 cd mail-mcp
 npm ci
 npm run release:check
+npm pack --dry-run
 ```
 
-Safe smoke tests perform MCP initialization and inspect the tool list without connecting to IMAP or SMTP:
+The default tests and smoke checks do not connect to a mailbox or send mail. `--validate-accounts` opens IMAP and SMTP connections but does not send a message.
 
-```bash
-npm run smoke:stdio
-npm run smoke:http
-npm run smoke:import
-```
+## Common problems
 
-Live account validation connects to configured IMAP and SMTP servers but does not send a message:
-
-```bash
-mail-mcp --validate-accounts
-```
-
-## Documentation
-
-- [Architecture and delivery states](docs/ARCHITECTURE.md)
-- [Deployment, rollback, and diagnostics](docs/OPERATIONS.md)
-- [Publishing a release](docs/RELEASING.md)
+- Gmail `535` or `Invalid credentials`: use the full email address and an app password, not the normal account password.
+- `Transport closed`: check Node.js, run the exact configured command with `--version`, then reinstall the Codex entry.
+- `pdfParser is not a function`: upgrade to 1.5.1 or newer.
+- `smtp_outcome_unknown`: do not retry automatically; verify the returned `messageId` first.
 
 ## License
 
-MIT. See [LICENSE](LICENSE) for retained copyright and license notices.
+MIT. See [LICENSE](LICENSE).
 
-Originally based on [honest-magic/mail-mcp](https://github.com/honest-magic/mail-mcp). Fork-specific behavior is documented here.
+Originally based on [honest-magic/mail-mcp](https://github.com/honest-magic/mail-mcp).

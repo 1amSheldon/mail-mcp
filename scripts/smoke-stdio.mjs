@@ -1,4 +1,3 @@
-// Created by RxGroup on 02.08.2026. Copyright (c) 2026 RX Group. All rights reserved.
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync } from 'node:fs';

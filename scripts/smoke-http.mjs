@@ -1,5 +1,3 @@
-// Created by RxGroup on 13.08.2026. Copyright (c) 2026 RX Group. All rights reserved.
-
 import { randomBytes } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';

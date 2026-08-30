@@ -1,5 +1,3 @@
-// Created by RxGroup on 13.08.2026. Copyright (c) 2026 RX Group. All rights reserved.
-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const mocks = vi.hoisted(() => ({

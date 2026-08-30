@@ -1,13 +1,16 @@
 {
   "name": "@1amsheldon/mail-mcp",
-  "version": "1.5.0",
-  "description": "Reliable IMAP and SMTP MCP server with explicit delivery states",
+  "version": "1.5.1",
+  "description": "MCP server for IMAP and SMTP email with guarded writes and explicit delivery states",
   "keywords": [
     "mcp",
     "email",
     "imap",
     "smtp",
-    "model-context-protocol"
+    "model-context-protocol",
+    "gmail",
+    "codex",
+    "claude"
   ],
   "author": "1amSheldon",
   "license": "MIT",
@@ -30,10 +33,7 @@
     "mail-mcp": "dist/index.js"
   },
   "files": [
-    "dist",
-    "docs",
-    "README.md",
-    "LICENSE"
+    "dist/**/*.js"
   ],
   "scripts": {
     "build": "tsc",
@@ -65,7 +65,6 @@
     "@types/mailparser": "^3.4.6",
     "@types/node": "^20.19.43",
     "@types/nodemailer": "^8.0.1",
-    "@types/pdf-parse": "^1.1.5",
     "@types/smtp-server": "^3.5.13",
     "@types/turndown": "^5.0.6",
     "smtp-server": "^3.18.1",

@@ -1,5 +1,3 @@
-// Copyright (c) RX Group
-
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { parse } from 'smol-toml';
