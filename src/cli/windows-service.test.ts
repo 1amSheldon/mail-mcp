@@ -36,7 +36,7 @@ describe('managed Windows HTTP service', () => {
 
     expect(launcher).toContain("'MAIL_MCP_BEARER_TOKEN'");
     expect(launcher).toContain("'C:\\Program Files\\nodejs\\node.exe'");
-    expect(launcher).toContain("'C:\\Users\\test\\.config\\mail-mcp\\service\\supervisor.cjs'");
+    expect(launcher).toContain(`'${paths.supervisorPath}'`);
   });
 
   it('builds a self-healing loopback supervisor that resolves the latest npm release', () => {
