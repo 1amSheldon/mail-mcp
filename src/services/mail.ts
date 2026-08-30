@@ -505,11 +505,17 @@ export class MailService {
   async extractAttachmentText(uid: string, filename: string, folder: string = 'INBOX'): Promise<string> {
     const { content, contentType } = await this.downloadAttachment(uid, filename, folder);
     if (contentType === 'application/pdf') {
-      const pdf = await import('pdf-parse');
-      // Some modules have a .default property when imported via dynamic import in ESM
-      const pdfParser = (pdf as any).default || pdf;
-      const data = await pdfParser(content);
-      return data.text;
+      // pdf-parse v2 exports the PDFParse class and no default function, so the
+      // v1 call shape (`pdf.default || pdf`) resolves to the module namespace
+      // and throws "pdfParser is not a function".
+      const { PDFParse } = await import('pdf-parse');
+      const parser = new PDFParse({ data: content });
+      try {
+        const result = await parser.getText();
+        return result.text;
+      } finally {
+        await parser.destroy();
+      }
     } else if (contentType.startsWith('text/')) {
       return content.toString('utf-8');
     } else {

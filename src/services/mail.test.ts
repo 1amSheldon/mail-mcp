@@ -1028,3 +1028,58 @@ describe('STATS-01: MailService.getMailboxStats', () => {
     expect(result[1]).toMatchObject({ name: 'Sent', total: 200, unread: 0, recent: 0 });
   });
 });
+
+describe('MailService.extractAttachmentText', () => {
+  const account = { id: 'test', name: 'Test', user: 'test@example.com', imap: {} as any, smtp: {} as any };
+
+  // A minimal one-page PDF with a known text run, built inline so the suite
+  // needs no binary fixture.
+  function buildPdf(text: string): Buffer {
+    const stream = `BT /F1 12 Tf 20 100 Td (${text}) Tj ET`;
+    const objects = [
+      '<< /Type /Catalog /Pages 2 0 R >>',
+      '<< /Type /Pages /Kids [3 0 R] /Count 1 >>',
+      '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>',
+      `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`,
+      '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>',
+    ];
+
+    let pdf = '%PDF-1.4\n';
+    const offsets: number[] = [];
+    objects.forEach((body, i) => {
+      offsets.push(pdf.length);
+      pdf += `${i + 1} 0 obj\n${body}\nendobj\n`;
+    });
+
+    const xref = pdf.length;
+    pdf += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+    for (const offset of offsets) pdf += `${String(offset).padStart(10, '0')} 00000 n \n`;
+    pdf += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`;
+
+    return Buffer.from(pdf, 'latin1');
+  }
+
+  function serviceReturning(content: Buffer, contentType: string): MailService {
+    const service = new MailService(account, false);
+    vi.spyOn(service as any, 'downloadAttachment').mockResolvedValue({ content, contentType });
+    return service;
+  }
+
+  it('extracts text from a PDF attachment', async () => {
+    const service = serviceReturning(buildPdf('Invoice 39A total 1234.56'), 'application/pdf');
+    const text = await service.extractAttachmentText('1', 'invoice.pdf');
+    expect(text).toContain('Invoice 39A total 1234.56');
+  });
+
+  it('returns text/* attachments as UTF-8', async () => {
+    const service = serviceReturning(Buffer.from('plain body'), 'text/plain');
+    await expect(service.extractAttachmentText('1', 'note.txt')).resolves.toBe('plain body');
+  });
+
+  it('rejects unsupported content types', async () => {
+    const service = serviceReturning(Buffer.from([0]), 'image/png');
+    await expect(service.extractAttachmentText('1', 'photo.png')).rejects.toThrow(
+      /Extraction not supported/
+    );
+  });
+});
