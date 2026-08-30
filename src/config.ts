@@ -5,6 +5,7 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import type { FSWatcher } from 'node:fs';
 import { watchFileChanges } from './utils/file-watcher.js';
+import { writeTextFileAtomicSync } from './utils/atomic-write.js';
 
 export const ACCOUNTS_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'accounts.json');
 export const AUDIT_LOG_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'audit.log');
@@ -85,9 +86,15 @@ async function loadAccountsFromDisk(): Promise<EmailAccount[]> {
   }
 
   const valid: EmailAccount[] = [];
+  const seenIds = new Set<string>();
   for (const item of parsed) {
     const result = emailAccountSchema.safeParse(item);
     if (result.success) {
+      if (seenIds.has(result.data.id)) {
+        console.error(`accounts.json: duplicate account ID "${result.data.id}" skipped`);
+        continue;
+      }
+      seenIds.add(result.data.id);
       valid.push(result.data);
     } else {
       const id = typeof item?.id === 'string' ? item.id : '(unknown)';
@@ -132,10 +139,16 @@ export async function getAccounts(): Promise<EmailAccount[]> {
  */
 export function saveAccounts(accounts: EmailAccount[]): void {
   const validated = z.array(emailAccountSchema).parse(accounts);
+  const duplicateIds = validated
+    .map(account => account.id)
+    .filter((id, index, ids) => ids.indexOf(id) !== index);
+  if (duplicateIds.length > 0) {
+    throw new Error(`Duplicate account ID(s): ${[...new Set(duplicateIds)].join(', ')}`);
+  }
   const configPath = ACCOUNTS_PATH;
   const dir = path.dirname(configPath);
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(configPath, JSON.stringify(validated, null, 2), 'utf-8');
+  writeTextFileAtomicSync(configPath, `${JSON.stringify(validated, null, 2)}\n`);
   cachedAccounts = validated;
   startWatcher();
 }

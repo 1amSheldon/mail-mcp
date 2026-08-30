@@ -75,7 +75,7 @@ vi.mock('./services/mail.js', () => {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { MailMCPServer } from './index.js';
+import { MailMCPServer, parseAllowedTools, parseCliArgs } from './index.js';
 import { MailService } from './services/mail.js';
 import { getAccounts } from './config.js';
 import { AuditLogger } from './utils/audit-logger.js';
@@ -128,6 +128,29 @@ const READ_TOOL_NAMES = [
   'list_filters',
   'get_filter',
 ];
+
+describe('CLI argument validation', () => {
+  it('rejects unknown options instead of silently starting with different permissions', () => {
+    expect(() => parseCliArgs(['--read-onl'])).toThrow(/Unknown option/);
+  });
+
+  it('parses supported options in strict mode', () => {
+    expect(parseCliArgs(['--read-only'])['read-only']).toBe(true);
+  });
+
+  it('rejects misspelled write tools', () => {
+    expect(() => parseAllowedTools('send_emial')).toThrow(
+      /Unknown write tool\(s\): send_emial/
+    );
+  });
+
+  it('normalizes an allowed write-tool list', () => {
+    expect([...parseAllowedTools(' send_email,create_draft,send_email ')!]).toEqual([
+      'send_email',
+      'create_draft',
+    ]);
+  });
+});
 
 describe('ROM-01: readOnly constructor field', () => {
   it('Test A: MailMCPServer constructed with readOnly=false has this.readOnly === false', () => {
@@ -755,6 +778,32 @@ describe('CONN-01: graceful shutdown', () => {
     expect((server as any).services.size).toBe(0);
   });
 
+  it('makes concurrent shutdown calls wait for the same disconnect operation', async () => {
+    const server = new MailMCPServer(false);
+    let releaseDisconnect!: () => void;
+    let markDisconnectStarted!: () => void;
+    const disconnectGate = new Promise<void>(resolve => { releaseDisconnect = resolve; });
+    const disconnectStarted = new Promise<void>(resolve => { markDisconnectStarted = resolve; });
+    const disconnect = vi.fn(async () => {
+      markDisconnectStarted();
+      await disconnectGate;
+    });
+    (server as any).services.set('account1', { disconnect });
+
+    const first = server.shutdown();
+    await disconnectStarted;
+    let secondFinished = false;
+    const second = server.shutdown().then(() => { secondFinished = true; });
+    await Promise.resolve();
+
+    expect(secondFinished).toBe(false);
+    expect(disconnect).toHaveBeenCalledOnce();
+
+    releaseDisconnect();
+    await Promise.all([first, second]);
+    expect(secondFinished).toBe(true);
+  });
+
   it('when shuttingDown is true, shuttingDown flag is set on the server', () => {
     const server = new MailMCPServer(false);
     (server as any).shuttingDown = true;
@@ -969,6 +1018,7 @@ vi.mock('./protocol/smtp.js', () => ({
   SmtpClient: vi.fn().mockImplementation(function() {
     return {
       connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
     };
   }),
 }));
@@ -988,12 +1038,20 @@ describe('CONN-03: --validate-accounts health check', () => {
     vi.mocked(MockSmtpClientCtor).mockImplementation(function() {
       return {
         connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn(),
       } as any;
     });
   });
 
   it('prints [PASS] for successful IMAP + SMTP probe', async () => {
     const { runValidateAccounts } = await import('./index.js');
+    const smtpDisconnect = vi.fn();
+    vi.mocked(MockSmtpClientCtor).mockImplementation(function() {
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        disconnect: smtpDisconnect,
+      } as any;
+    });
     vi.mocked(getAccounts).mockResolvedValue([
       { id: 'acc1', name: 'Test', user: 'test@test.com', host: 'imap.test.com', port: 993, useTLS: true, authType: 'password', smtpHost: 'smtp.test.com' } as any,
     ]);
@@ -1005,6 +1063,7 @@ describe('CONN-03: --validate-accounts health check', () => {
     consoleSpy.mockRestore();
     expect(output).toContain('[PASS] acc1 IMAP');
     expect(output).toContain('[PASS] acc1 SMTP');
+    expect(smtpDisconnect).toHaveBeenCalledTimes(1);
   });
 
   it('prints [FAIL] for failed IMAP with error message', async () => {
@@ -1105,13 +1164,13 @@ describe('MARK-01: mark_read/unread/star/unstar tool registration', () => {
     }
   });
 
-  it('getTools(false) now returns 25 tools (was 25, +4 mark/star tools)', () => {
+  it('getTools(false) returns all 30 tools', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
     expect(tools).toHaveLength(30);
   });
 
-  it('getTools(true) now returns 16 tools (now 14, write tools hidden)', () => {
+  it('getTools(true) returns the 15 read-only tools', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
     expect(tools).toHaveLength(15);

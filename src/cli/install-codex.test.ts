@@ -7,6 +7,7 @@ import { installCodex, upsertCodexServer } from './install-codex.js';
 describe('installCodex', () => {
   let tempDir: string;
   let configPath: string;
+  const packageSpec = '@1amsheldon/mail-mcp@1.5.3';
 
   beforeEach(async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'install-codex-test-'));
@@ -20,13 +21,13 @@ describe('installCodex', () => {
   it('creates a Codex config with a pinned npm package', async () => {
     const result = await installCodex(
       configPath,
-      '@1amsheldon/mail-mcp@1.5.0',
+      packageSpec,
       ['--confirm', '--audit-log', '--redact']
     );
 
     expect(result).toEqual({ configPath, changed: true });
     expect(await readFile(configPath, 'utf8')).toContain(
-      'args = ["-y", "@1amsheldon/mail-mcp@1.5.0", "--confirm", "--audit-log", "--redact"]'
+      'args = ["-y", "@1amsheldon/mail-mcp@1.5.3", "--confirm", "--audit-log", "--redact"]'
     );
   });
 
@@ -52,7 +53,7 @@ describe('installCodex', () => {
 
     const result = await installCodex(
       configPath,
-      '@1amsheldon/mail-mcp@1.5.0',
+      packageSpec,
       ['--read-only', '--audit-log', '--redact']
     );
 
@@ -66,7 +67,7 @@ describe('installCodex', () => {
 
   it('handles a quoted mail table name', () => {
     const source = '[mcp_servers."mail"]\r\ncommand = "old"\r\n\r\n[features]\r\nfoo = true\r\n';
-    const updated = upsertCodexServer(source, '@1amsheldon/mail-mcp@1.5.0', ['--confirm']);
+    const updated = upsertCodexServer(source, packageSpec, ['--confirm']);
 
     expect(updated).not.toContain('command = "old"');
     expect(updated).toContain('[features]\r\nfoo = true');
@@ -74,8 +75,8 @@ describe('installCodex', () => {
   });
 
   it('does not rewrite an unchanged config', async () => {
-    await installCodex(configPath, '@1amsheldon/mail-mcp@1.5.0', ['--confirm']);
-    const result = await installCodex(configPath, '@1amsheldon/mail-mcp@1.5.0', ['--confirm']);
+    await installCodex(configPath, packageSpec, ['--confirm']);
+    const result = await installCodex(configPath, packageSpec, ['--confirm']);
 
     expect(result).toEqual({ configPath, changed: false });
   });
@@ -86,7 +87,7 @@ describe('installCodex', () => {
     await writeFile(configPath, source, 'utf8');
 
     await expect(
-      installCodex(configPath, '@1amsheldon/mail-mcp@1.5.0', ['--confirm'])
+      installCodex(configPath, packageSpec, ['--confirm'])
     ).rejects.toThrow(/Invalid existing Codex config/);
     expect(await readFile(configPath, 'utf8')).toBe(source);
   });

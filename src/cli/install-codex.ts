@@ -1,6 +1,7 @@
-import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { parse } from 'smol-toml';
+import { writeTextFileAtomic } from '../utils/atomic-write.js';
 
 export const CODEX_MCP_SERVER_NAME = 'mail';
 
@@ -119,6 +120,6 @@ export async function installCodex(
     await copyFile(configPath, backupPath);
   }
 
-  await writeFile(configPath, updated, 'utf8');
+  await writeTextFileAtomic(configPath, updated);
   return { configPath, backupPath, changed: true };
 }

@@ -487,6 +487,56 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     expect(result).toContain('**Unsubscribe:** https://example.com/unsub');
     expect(result).toContain('**Unsubscribe (one-click):** yes');
   });
+
+  it('shares one IMAP body fetch between concurrent reads', async () => {
+    let resolveBody!: (value: any) => void;
+    const body = new Promise<any>(resolve => {
+      resolveBody = resolve;
+    });
+    mockFetchMessageBody.mockReturnValue(body);
+    const service = new MailService(account, false);
+    await service.connect();
+
+    const firstRead = service.readEmail('shared');
+    const secondRead = service.readEmail('shared');
+
+    expect(mockFetchMessageBody).toHaveBeenCalledTimes(1);
+    resolveBody(makeParsedMail({}));
+    await expect(Promise.all([firstRead, secondRead])).resolves.toHaveLength(2);
+  });
+
+  it('retries an IMAP body fetch after a failed request', async () => {
+    mockFetchMessageBody
+      .mockRejectedValueOnce(new Error('temporary IMAP failure'))
+      .mockResolvedValueOnce(makeParsedMail({}));
+    const service = new MailService(account, false);
+    await service.connect();
+
+    await expect(service.readEmail('retry')).rejects.toThrow('temporary IMAP failure');
+    await expect(service.readEmail('retry')).resolves.toContain('Test Email');
+    expect(mockFetchMessageBody).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not restore stale body data after cache invalidation', async () => {
+    let resolveOldBody!: (value: any) => void;
+    const oldBody = new Promise<any>(resolve => {
+      resolveOldBody = resolve;
+    });
+    mockFetchMessageBody
+      .mockReturnValueOnce(oldBody)
+      .mockResolvedValueOnce(makeParsedMail({}, { subject: 'Current subject' }));
+    const service = new MailService(account, false);
+    await service.connect();
+
+    const staleRead = service.readEmail('changed');
+    service.invalidateBodyCache('INBOX', 'changed');
+    await expect(service.readEmail('changed')).resolves.toContain('Current subject');
+
+    resolveOldBody(makeParsedMail({}, { subject: 'Stale subject' }));
+    await expect(staleRead).resolves.toContain('Stale subject');
+    await expect(service.readEmail('changed')).resolves.toContain('Current subject');
+    expect(mockFetchMessageBody).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('readEmail inline image handling', () => {

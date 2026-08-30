@@ -51,6 +51,42 @@ const WRITE_TOOLS = new Set<string>([
   'delete_filter',
 ]);
 
+export function parseCliArgs(args: string[]) {
+  return parseArgs({
+    args,
+    options: {
+      'read-only': { type: 'boolean', default: false },
+      'allow-tools': { type: 'string' },
+      'confirm': { type: 'boolean', default: false },
+      'audit-log': { type: 'boolean', default: false },
+      'redact': { type: 'boolean', default: false },
+      'http': { type: 'boolean', default: false },
+      'host': { type: 'string', default: '127.0.0.1' },
+      'port': { type: 'string', default: '8765' },
+      'bearer-token-env': { type: 'string', default: 'MAIL_MCP_BEARER_TOKEN' },
+      'validate-accounts': { type: 'boolean', default: false },
+      'install-claude': { type: 'boolean', default: false },
+      'install-codex': { type: 'boolean', default: false },
+      'version': { type: 'boolean', default: false },
+      'help': { type: 'boolean', short: 'h', default: false },
+    },
+    strict: true,
+  }).values;
+}
+
+export function parseAllowedTools(raw: string | undefined): Set<string> | undefined {
+  if (raw === undefined) return undefined;
+
+  const allowedTools = new Set(raw.split(',').map(tool => tool.trim()).filter(Boolean));
+  const unknownTools = [...allowedTools].filter(tool => !WRITE_TOOLS.has(tool));
+  if (unknownTools.length > 0) {
+    throw new Error(
+      `Unknown write tool(s): ${unknownTools.join(', ')}. Available write tools: ${[...WRITE_TOOLS].join(', ')}.`
+    );
+  }
+  return allowedTools;
+}
+
 function formatDeliveryResult(result: SendDeliveryResult) {
   const isError = result.status === 'smtp_rejected' ||
     result.status === 'smtp_connection_failed' ||
@@ -110,6 +146,7 @@ export class MailMCPServer {
   private services: Map<string, MailService>;
   private serviceCreations: Map<string, Promise<MailService>>;
   private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
   private inFlightCount = 0;
   private readonly rateLimiter: TieredRateLimiter;
   private readonly allowedTools?: Set<string>;
@@ -177,19 +214,23 @@ export class MailMCPServer {
     this.server.onerror = (error) => console.error('[MCP Error]', error);
   }
 
-  async shutdown(): Promise<void> {
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shuttingDown = true;
 
-    // Wait for in-flight requests to drain (max 10s)
-    const deadline = Date.now() + 10_000;
-    while (this.inFlightCount > 0 && Date.now() < deadline) {
-      await new Promise(resolve => setTimeout(resolve, 50));
-    }
+    this.shutdownPromise = (async () => {
+      // Wait for in-flight requests to drain (max 10s).
+      const deadline = Date.now() + 10_000;
+      while (this.inFlightCount > 0 && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 50));
+      }
 
-    if (this.ownsRuntimeState) {
-      await this.runtimeState.shutdown();
-    }
-    await this.server.close();
+      if (this.ownsRuntimeState) {
+        await this.runtimeState.shutdown();
+      }
+      await this.server.close();
+    })();
+    return this.shutdownPromise;
   }
 
   private async _createAndCacheService(accountId: string): Promise<MailService> {
@@ -594,7 +635,7 @@ export class MailMCPServer {
         inputSchema: {
           type: 'object',
           properties: {
-            accountId: { type: 'string', description: 'Optional account ID — returns global templates plus templates scoped to this account. Omit to return all templates.' },
+            accountId: { type: 'string', description: 'Optional account ID. Returns global templates and templates scoped to this account. Omit to return all templates.' },
           },
         },
       },
@@ -1426,12 +1467,14 @@ export async function runValidateAccounts(): Promise<void> {
 
     // SMTP probe
     if (account.smtpHost) {
+      const smtp = new SmtpClient(account);
       try {
-        const smtp = new SmtpClient(account);
         await smtp.connect();
         console.log(`[PASS] ${account.id} SMTP`);
       } catch (e) {
         console.log(`[FAIL] ${account.id} SMTP - ${(e as Error).message}`);
+      } finally {
+        smtp.disconnect();
       }
     } else {
       console.log(`[SKIP] ${account.id} SMTP - no smtpHost configured`);
@@ -1448,27 +1491,8 @@ async function main() {
     process.exit(0);
   }
 
-  // No CLI subcommand — start MCP server
-  const { values } = parseArgs({
-    args,
-    options: {
-      'read-only': { type: 'boolean', default: false },
-      'allow-tools': { type: 'string' },
-      'confirm': { type: 'boolean', default: false },
-      'audit-log': { type: 'boolean', default: false },
-      'redact': { type: 'boolean', default: false },
-      'http': { type: 'boolean', default: false },
-      'host': { type: 'string', default: '127.0.0.1' },
-      'port': { type: 'string', default: '8765' },
-      'bearer-token-env': { type: 'string', default: 'MAIL_MCP_BEARER_TOKEN' },
-      'validate-accounts': { type: 'boolean', default: false },
-      'install-claude': { type: 'boolean', default: false },
-      'install-codex': { type: 'boolean', default: false },
-      'version': { type: 'boolean', default: false },
-      'help': { type: 'boolean', short: 'h', default: false },
-    },
-    strict: false,
-  });
+  // No CLI subcommand: start MCP server.
+  const values = parseCliArgs(args);
 
   if (values['version']) {
     console.log(PACKAGE_VERSION);
@@ -1508,35 +1532,44 @@ Options:
     process.exit(0);
   }
 
+  const readOnly = (values['read-only'] as boolean | undefined) ?? false;
+  const allowToolsRaw = values['allow-tools'] as string | undefined;
+
+  if (readOnly && allowToolsRaw !== undefined) {
+    console.error('Error: --read-only and --allow-tools are mutually exclusive.');
+    process.exit(1);
+  }
+
+  let allowedTools: Set<string> | undefined;
+  try {
+    allowedTools = parseAllowedTools(allowToolsRaw);
+  } catch (error) {
+    console.error(`Error: ${(error as Error).message}`);
+    process.exit(1);
+  }
+
+  const installRuntimeArgs = readOnly
+    ? ['--read-only']
+    : allowedTools !== undefined
+      ? ['--allow-tools', [...allowedTools].join(',')]
+      : ['--confirm'];
+  installRuntimeArgs.push('--audit-log', '--redact');
+
   if (values['install-codex']) {
     const { join } = await import('node:path');
     const { homedir } = await import('node:os');
-    const readOnly = (values['read-only'] as boolean | undefined) ?? false;
-    const allowToolsRaw = values['allow-tools'] as string | undefined;
-
-    if (readOnly && allowToolsRaw !== undefined) {
-      console.error('Error: --read-only and --allow-tools are mutually exclusive.');
-      process.exit(1);
-    }
-
-    const runtimeArgs = readOnly
-      ? ['--read-only']
-      : allowToolsRaw !== undefined
-        ? ['--allow-tools', allowToolsRaw]
-        : ['--confirm'];
-    runtimeArgs.push('--audit-log', '--redact');
 
     const configPath = join(homedir(), '.codex', 'config.toml');
     const packageSpec = `@1amsheldon/mail-mcp@${PACKAGE_VERSION}`;
     try {
-      const result = await installCodex(configPath, packageSpec, runtimeArgs);
+      const result = await installCodex(configPath, packageSpec, installRuntimeArgs);
       console.log(result.changed
         ? `mail-mcp configured for Codex at: ${result.configPath}`
         : `Codex already uses ${packageSpec}.`);
       if (result.backupPath) {
         console.log(`Previous config backed up to: ${result.backupPath}`);
       }
-      console.log(`Server command: npx -y ${packageSpec} ${runtimeArgs.join(' ')}`);
+      console.log(`Server command: npx -y ${packageSpec} ${installRuntimeArgs.join(' ')}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1546,26 +1579,13 @@ Options:
   }
 
   if (values['install-claude']) {
-    const readOnly = (values['read-only'] as boolean | undefined) ?? false;
-    const allowToolsRaw = values['allow-tools'] as string | undefined;
-    if (readOnly && allowToolsRaw !== undefined) {
-      console.error('Error: --read-only and --allow-tools are mutually exclusive.');
-      process.exit(1);
-    }
-
-    const runtimeArgs = readOnly
-      ? ['--read-only']
-      : allowToolsRaw !== undefined
-        ? ['--allow-tools', allowToolsRaw]
-        : ['--confirm'];
-    runtimeArgs.push('--audit-log', '--redact');
     const packageSpec = `@1amsheldon/mail-mcp@${PACKAGE_VERSION}`;
 
     try {
       const result = await installClaude(
         getClaudeConfigPath(),
         'npx',
-        ['-y', packageSpec, ...runtimeArgs]
+        ['-y', packageSpec, ...installRuntimeArgs]
       );
       console.log(result.changed
         ? `mail-mcp configured for Claude Desktop at: ${result.configPath}`
@@ -1573,7 +1593,7 @@ Options:
       if (result.backupPath) {
         console.log(`Previous config backed up to: ${result.backupPath}`);
       }
-      console.log(`Server command: npx -y ${packageSpec} ${runtimeArgs.join(' ')}`);
+      console.log(`Server command: npx -y ${packageSpec} ${installRuntimeArgs.join(' ')}`);
       console.log('Restart Claude Desktop to activate.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1581,18 +1601,6 @@ Options:
     }
     process.exit(0);
   }
-
-  const readOnly = (values['read-only'] as boolean | undefined) ?? false;
-  const allowToolsRaw = values['allow-tools'] as string | undefined;
-
-  if (readOnly && allowToolsRaw !== undefined) {
-    console.error('Error: --read-only and --allow-tools are mutually exclusive.');
-    process.exit(1);
-  }
-
-  const allowedTools = allowToolsRaw !== undefined
-    ? new Set(allowToolsRaw.split(',').map(t => t.trim()).filter(t => t.length > 0))
-    : undefined;
 
   const confirmMode = (values['confirm'] as boolean | undefined) ?? false;
 
@@ -1661,7 +1669,7 @@ Options:
 const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
 if (isDirectRun) {
   main().catch((err) => {
-    console.error(err);
+    console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
   });
 }

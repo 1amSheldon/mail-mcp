@@ -54,6 +54,7 @@ describe('OAuth2 access token refresh', () => {
     ])).resolves.toEqual(['fresh-token', 'fresh-token', 'fresh-token']);
 
     expect(fetchMock).toHaveBeenCalledOnce();
+    expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
     expect(keychain.saveCredentials).toHaveBeenCalledOnce();
   });
 
@@ -75,6 +76,29 @@ describe('OAuth2 access token refresh', () => {
 
     await expect(getValidAccessToken('work')).rejects.toThrow(
       'OAuth2 credentials for account work are not valid JSON'
+    );
+  });
+
+  it('rejects an invalid token endpoint before making a request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify({
+      ...tokenSet,
+      tokenEndpoint: 'file:///tmp/token',
+    }));
+
+    await expect(getValidAccessToken('work')).rejects.toThrow(
+      'OAuth2 credentials for account work contain an invalid tokenEndpoint'
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('adds context when the token endpoint cannot be reached', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connection reset')));
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify(tokenSet));
+
+    await expect(getValidAccessToken('work')).rejects.toThrow(
+      'OAuth2 token refresh request failed: connection reset'
     );
   });
 });

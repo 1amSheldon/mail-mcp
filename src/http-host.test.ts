@@ -137,6 +137,68 @@ describe('Streamable HTTP host', () => {
     });
   });
 
+  it('does not evict a session while reading an active request body', async () => {
+    host = await startHttpHost({
+      host: '127.0.0.1',
+      port: 0,
+      bearerToken: 'test-token',
+      maxSessions: 1,
+      createSession: () => new TestMcpSession(),
+    });
+
+    const headers = {
+      accept: 'application/json, text/event-stream',
+      authorization: 'Bearer test-token',
+      'content-type': 'application/json',
+    };
+    const initializeBody = JSON.stringify({
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'initialize',
+      params: {
+        protocolVersion: '2025-11-25',
+        capabilities: {},
+        clientInfo: { name: 'active-body-test', version: '1.0.0' },
+      },
+    });
+    const initialized = await fetch(host.url, {
+      method: 'POST',
+      headers,
+      body: initializeBody,
+    });
+    const sessionId = initialized.headers.get('mcp-session-id');
+    expect(sessionId).toBeTruthy();
+
+    const abortController = new AbortController();
+    const stalledBody = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode('{'));
+      },
+    });
+    const stalledRequest = fetch(host.url, {
+      method: 'POST',
+      headers: { ...headers, 'mcp-session-id': sessionId! },
+      body: stalledBody,
+      duplex: 'half',
+      signal: abortController.signal,
+    } as RequestInit & { duplex: 'half' }).catch(() => undefined);
+
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const secondInitialize = await fetch(host.url, {
+      method: 'POST',
+      headers,
+      body: initializeBody,
+    });
+
+    expect(secondInitialize.status).toBe(503);
+    expect(await secondInitialize.json()).toMatchObject({
+      error: { message: 'Too many active MCP sessions' },
+    });
+
+    abortController.abort();
+    await stalledRequest;
+  });
+
   it('brackets an IPv6 bind address in generated URLs', async () => {
     host = await startHttpHost({
       host: '::1',
@@ -203,5 +265,53 @@ describe('Streamable HTTP host', () => {
 
     releaseConnect();
     expect((await first).status).toBe(200);
+  });
+
+  it('rejects invalid session lifecycle options', async () => {
+    const baseOptions = {
+      host: '127.0.0.1',
+      port: 0,
+      bearerToken: 'test-token',
+      createSession: () => new TestMcpSession(),
+    };
+
+    await expect(startHttpHost({ ...baseOptions, sessionIdleTimeoutMs: 0 })).rejects.toThrow(
+      'idle timeout must be greater than zero'
+    );
+    await expect(startHttpHost({ ...baseOptions, maxSessions: 1.5 })).rejects.toThrow(
+      'max sessions must be a positive integer'
+    );
+  });
+
+  it('makes concurrent close calls wait for the same shutdown', async () => {
+    let releaseShutdown!: () => void;
+    let markShutdownStarted!: () => void;
+    const shutdownGate = new Promise<void>(resolve => { releaseShutdown = resolve; });
+    const shutdownStarted = new Promise<void>(resolve => { markShutdownStarted = resolve; });
+    const shutdownSharedResources = vi.fn(async () => {
+      markShutdownStarted();
+      await shutdownGate;
+    });
+
+    host = await startHttpHost({
+      host: '127.0.0.1',
+      port: 0,
+      bearerToken: 'test-token',
+      createSession: () => new TestMcpSession(),
+      shutdownSharedResources,
+    });
+
+    const firstClose = host.close();
+    await shutdownStarted;
+    let secondCloseFinished = false;
+    const secondClose = host.close().then(() => { secondCloseFinished = true; });
+    await Promise.resolve();
+
+    expect(secondCloseFinished).toBe(false);
+    expect(shutdownSharedResources).toHaveBeenCalledOnce();
+
+    releaseShutdown();
+    await Promise.all([firstClose, secondClose]);
+    expect(secondCloseFinished).toBe(true);
   });
 });

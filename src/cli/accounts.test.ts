@@ -12,7 +12,7 @@ vi.mock('../security/keychain.js', () => ({
   removeCredentials: vi.fn(),
 }));
 
-import { handleAccountsCommand } from './accounts.js';
+import { handleAccountsCommand, inferSmtpHost } from './accounts.js';
 import { getAccounts, saveAccounts } from '../config.js';
 import { removeCredentials } from '../security/keychain.js';
 
@@ -29,6 +29,17 @@ const TEST_ACCOUNT = {
   authType: 'login' as const,
   useTLS: true,
 };
+
+describe('inferSmtpHost', () => {
+  it('replaces an IMAP hostname prefix', () => {
+    expect(inferSmtpHost('imap.gmail.com')).toBe('smtp.gmail.com');
+    expect(inferSmtpHost('IMAP.example.com')).toBe('smtp.example.com');
+  });
+
+  it('does not rewrite imap text in the middle of a hostname', () => {
+    expect(inferSmtpHost('mail.imaple.example')).toBe('');
+  });
+});
 
 describe('handleAccountsCommand', () => {
   let consoleSpy: ReturnType<typeof vi.spyOn>;

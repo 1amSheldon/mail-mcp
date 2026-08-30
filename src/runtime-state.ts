@@ -7,19 +7,24 @@ export class MailMCPRuntimeState {
   readonly rateLimiter = new TieredRateLimiter();
 
   private shuttingDown = false;
+  private shutdownPromise: Promise<void> | undefined;
 
   get isShuttingDown(): boolean {
     return this.shuttingDown;
   }
 
-  async shutdown(): Promise<void> {
-    if (this.shuttingDown) return;
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     this.shuttingDown = true;
 
-    await Promise.allSettled(
-      Array.from(this.services.values()).map(service => service.disconnect())
-    );
-    this.services.clear();
-    this.serviceCreations.clear();
+    this.shutdownPromise = (async () => {
+      await Promise.allSettled(Array.from(this.serviceCreations.values()));
+      await Promise.allSettled(
+        Array.from(this.services.values()).map(service => service.disconnect())
+      );
+      this.services.clear();
+      this.serviceCreations.clear();
+    })();
+    return this.shutdownPromise;
   }
 }
