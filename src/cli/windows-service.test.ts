@@ -76,7 +76,9 @@ describe('managed Windows HTTP service', () => {
     expect(script).toContain('RepetitionInterval (New-TimeSpan -Minutes 5)');
     expect(script).toContain('-MultipleInstances IgnoreNew');
     expect(script).toContain("$health.service -eq 'mail-mcp'");
-    expect(script).toContain('Stop-Process -Id $_ -Force');
+    expect(script).toContain("$owner.CommandLine -match '(?i)mail-mcp'");
+    expect(script).toContain('Stop-Process -Id $listenerPid -Force');
+    expect(script).toContain('could not be verified as Mail MCP');
     expect(script).toContain('Start-ScheduledTask');
   });
 
