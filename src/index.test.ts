@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 vi.mock('./config.js', () => ({
   getAccounts: vi.fn().mockResolvedValue([]),
+  getConfiguredAccounts: vi.fn().mockResolvedValue([]),
 }));
 
 vi.mock('./utils/templates.js', () => ({
@@ -47,9 +48,15 @@ vi.mock('./services/mail.js', () => {
       connect: vi.fn().mockResolvedValue(undefined),
       disconnect,
       listEmails: vi.fn().mockResolvedValue([]),
+      listEmailsPage: vi.fn().mockResolvedValue({ items: [], nextCursor: null, total: 0 }),
       searchEmails: vi.fn().mockResolvedValue([
         { id: '42', uid: 42, subject: 'Found Email', from: 'sender@example.com' },
       ]),
+      searchEmailsPage: vi.fn().mockResolvedValue({
+        items: [{ id: '42', uid: 42, subject: 'Found Email', from: 'sender@example.com' }],
+        nextCursor: null,
+        total: 1,
+      }),
       sendEmail: vi.fn().mockResolvedValue({
         status: 'sent_and_saved',
         smtpAccepted: true,
@@ -59,7 +66,18 @@ vi.mock('./services/mail.js', () => {
         retrySafe: false,
         nextAction: 'Do not resend this message.',
       }),
+      sendMessage: vi.fn().mockResolvedValue({
+        status: 'sent_and_saved',
+        smtpAccepted: true,
+        accepted: ['recipient@example.com'],
+        rejected: [],
+        sentFolderSaved: true,
+        retrySafe: false,
+        nextAction: 'Do not resend this message.',
+      }),
+      createDraftMessage: vi.fn().mockResolvedValue({ folder: 'Drafts' }),
       listFolders: vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts', 'Trash']),
+      listMailboxMetadata: vi.fn().mockResolvedValue([]),
       moveMessage: vi.fn().mockResolvedValue(undefined),
       modifyLabels: vi.fn().mockResolvedValue(undefined),
       extractContacts: vi.fn().mockResolvedValue([
@@ -77,7 +95,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { MailMCPServer, parseAllowedTools, parseCliArgs } from './index.js';
 import { MailService } from './services/mail.js';
-import { getAccounts } from './config.js';
+import { getAccounts, getConfiguredAccounts } from './config.js';
 import { AuditLogger } from './utils/audit-logger.js';
 
 const successfulDelivery = () => ({
@@ -93,41 +111,15 @@ const successfulDelivery = () => ({
   nextAction: 'Do not resend this message.',
 });
 
-const WRITE_TOOL_NAMES = [
-  'send_email',
-  'create_draft',
-  'move_email',
-  'modify_labels',
-  'register_oauth2_account',
-  'batch_operations',
-  'reply_email',
-  'forward_email',
-  'mark_read',
-  'mark_unread',
-  'star',
-  'unstar',
-  'delete_email',
-  'set_filter',
-  'delete_filter',
-];
+const WRITE_TOOL_NAMES = ['mail_mutate'];
 
-const READ_TOOL_NAMES = [
-  'list_accounts',
-  'list_emails',
-  'search_emails',
-  'verify_sent_message',
-  'read_email',
-  'list_folders',
-  'get_thread',
-  'get_attachment',
-  'extract_attachment_text',
-  'extract_contacts',
-  'mailbox_stats',
-  'list_templates',
-  'use_template',
-  'list_filters',
-  'get_filter',
-];
+const READ_TOOL_NAMES = ['list_accounts', 'mail_query'];
+
+function expectPublicOperation(server: MailMCPServer, toolName: 'mail_query' | 'mail_mutate', operation: string) {
+  const tool = (server as any).getTools(false).find((candidate: any) => candidate.name === toolName);
+  expect(tool).toBeDefined();
+  expect(tool.inputSchema.properties.operation.enum).toContain(operation);
+}
 
 describe('CLI argument validation', () => {
   it('rejects unknown options instead of silently starting with different permissions', () => {
@@ -138,6 +130,7 @@ describe('CLI argument validation', () => {
     expect(parseCliArgs(['--read-only'])['read-only']).toBe(true);
     expect(parseCliArgs(['--install-codex'])['install-codex']).toBe(true);
     expect(parseCliArgs(['--install-codex-stdio'])['install-codex-stdio']).toBe(true);
+    expect(parseCliArgs(['--install-claude-code'])['install-claude-code']).toBe(true);
     expect(parseCliArgs(['--http', '--auto-update-seconds', '21600'])).toMatchObject({
       http: true,
       'auto-update-seconds': '21600',
@@ -146,7 +139,7 @@ describe('CLI argument validation', () => {
 
   it('rejects misspelled write tools', () => {
     expect(() => parseAllowedTools('send_emial')).toThrow(
-      /Unknown write tool\(s\): send_emial/
+      /Unknown write selector\(s\): send_emial/
     );
   });
 
@@ -171,26 +164,26 @@ describe('ROM-01: readOnly constructor field', () => {
 });
 
 describe('ROM-05: list-time filtering', () => {
-  it('Test C: getTools(false) returns array of length 30', () => {
+  it('Test C: getTools(false) returns the complete catalog', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
-    expect(tools).toHaveLength(30);
+    expect(tools).toHaveLength(3);
   });
 
-  it('Test D: getTools(true) returns array of length 15', () => {
+  it('Test D: getTools(true) returns the read-only catalog', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
-    expect(tools).toHaveLength(15);
+    expect(tools).toHaveLength(2);
   });
 
-  it('Test E: getTools(true) does NOT include send_email', () => {
+  it('Test E: getTools(true) does NOT include mail_mutate', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
     const names = tools.map((t: any) => t.name);
-    expect(names).not.toContain('send_email');
+    expect(names).not.toContain('mail_mutate');
   });
 
-  it('Test F: getTools(true) does NOT include any of the 15 write tools', () => {
+  it('Test F: getTools(true) does not include the write router', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
     const names: string[] = tools.map((t: any) => t.name);
@@ -213,7 +206,7 @@ describe('ROM-02: call-time guard for write tools', () => {
     expect(result.content[0].text).toContain("Tool 'send_email' is not available");
   });
 
-  it('Test I: all 15 write tool names return isError: true in read-only mode', async () => {
+  it('Test I: all write tool names return isError: true in read-only mode', async () => {
     const server = new MailMCPServer(true);
     for (const toolName of WRITE_TOOL_NAMES) {
       const result = await (server as any).dispatchTool(toolName, true, {});
@@ -248,6 +241,34 @@ describe('MCP runtime dispatch', () => {
     expect(dispatch).toHaveBeenCalledWith('list_accounts', false, {});
   });
 
+  it('rejects hidden version 1 tool names at the MCP boundary', async () => {
+    const server = new MailMCPServer(false);
+    const dispatch = vi.spyOn(server, 'dispatchTool');
+    const handler = (server as any).server._requestHandlers.get('tools/call');
+
+    await expect(handler({
+      jsonrpc: '2.0',
+      id: 2,
+      method: 'tools/call',
+      params: { name: 'send_email', arguments: {} },
+    }, {})).rejects.toThrow('Unknown tool: send_email');
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('routes a public query call to the existing operation handler', async () => {
+    const server = new MailMCPServer(false);
+    const listMailboxMetadata = vi.fn().mockResolvedValue([{ path: 'INBOX' }]);
+    vi.spyOn(server as any, 'getService').mockResolvedValue({ listMailboxMetadata });
+
+    const result = await server.dispatchTool('mail_query', false, {
+      accountId: 'test',
+      operation: 'listFolders',
+      input: {},
+    });
+    expect(result.isError).not.toBe(true);
+    expect(listMailboxMetadata).toHaveBeenCalledOnce();
+  });
+
   it('marks an unknown SMTP outcome as a tool error with no success claim', async () => {
     const server = new MailMCPServer(false);
     vi.spyOn(server as any, 'getService').mockResolvedValue({
@@ -276,10 +297,10 @@ describe('MCP runtime dispatch', () => {
 });
 
 describe('ROM-06: tool annotations', () => {
-  it('Test J: all 30 tools have annotations.readOnlyHint defined', () => {
+  it('Test J: all tools have annotations.readOnlyHint defined', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
-    expect(tools).toHaveLength(30);
+    expect(tools).toHaveLength(3);
     for (const tool of tools) {
       expect(tool.annotations?.readOnlyHint).toBeDefined();
     }
@@ -293,14 +314,13 @@ describe('ROM-06: tool annotations', () => {
     }
   });
 
-  it('Test L: write tools have readOnlyHint === false and destructiveHint === true', () => {
+  it('Test L: write tools have readOnlyHint === false', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
     const writeTools = tools.filter((t: any) => WRITE_TOOL_NAMES.includes(t.name));
     expect(writeTools).toHaveLength(WRITE_TOOL_NAMES.length);
     for (const tool of writeTools) {
       expect(tool.annotations.readOnlyHint).toBe(false);
-      expect(tool.annotations.destructiveHint).toBe(true);
     }
   });
 
@@ -308,7 +328,7 @@ describe('ROM-06: tool annotations', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
     const readTools = tools.filter((t: any) => READ_TOOL_NAMES.includes(t.name));
-    expect(readTools).toHaveLength(15);
+    expect(readTools).toHaveLength(2);
     for (const tool of readTools) {
       expect(tool.annotations.readOnlyHint).toBe(true);
       expect(tool.annotations.destructiveHint).toBe(false);
@@ -317,26 +337,10 @@ describe('ROM-06: tool annotations', () => {
 });
 
 describe('CE-03: extract_contacts MCP tool', () => {
-  it('extract_contacts appears in getTools(false) output as a read-only tool', () => {
+  it('advertises extractContacts through the read router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'extract_contacts');
-    expect(tool).toBeDefined();
-    expect(tool.annotations.readOnlyHint).toBe(true);
-  });
-
-  it('extract_contacts appears in getTools(true) output (read-only server also shows it)', () => {
-    const server = new MailMCPServer(true);
-    const tools = (server as any).getTools(true);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('extract_contacts');
-  });
-
-  it('extract_contacts tool has accountId as required parameter', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'extract_contacts');
-    expect(tool.inputSchema.required).toContain('accountId');
+    expectPublicOperation(server, 'mail_query', 'extractContacts');
+    expect((server as any).getTools(true).map((tool: any) => tool.name)).toContain('mail_query');
   });
 });
 
@@ -348,7 +352,7 @@ describe('ROM-04: instructions field in Server options', () => {
       internalServer._options?.instructions ??
       internalServer.options?.instructions ??
       internalServer.serverInfo?.instructions;
-    expect(instructions).toContain('Access configured email accounts over IMAP and SMTP');
+    expect(instructions).toContain('Use mail_query for reads and mail_mutate for writes');
     expect(instructions).toContain('read-only mode');
     expect(instructions).toContain('Write operations');
   });
@@ -360,62 +364,38 @@ describe('ROM-04: instructions field in Server options', () => {
       internalServer._options?.instructions ??
       internalServer.options?.instructions ??
       internalServer.serverInfo?.instructions;
-    expect(instructions).toContain('Access configured email accounts over IMAP and SMTP');
-    expect(instructions).not.toContain('read-only mode');
+    expect(instructions).toContain('Use mail_query for reads and mail_mutate for writes');
+    expect(instructions).not.toContain('This server is running in read-only mode.');
   });
 });
 
-describe('IMAP-03: search_emails tool', () => {
+describe('IMAP-03: search operation', () => {
   beforeEach(() => {
     mockSearchEmails.mockClear();
   });
 
-  it('search_emails tool is listed among available tools', () => {
+  it('advertises searchMessages through the read router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('search_emails');
-  });
-
-  it('search_emails tool schema includes from, subject, since, before, keywords fields', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const searchTool = tools.find((t: any) => t.name === 'search_emails');
-    expect(searchTool).toBeDefined();
-    const props = searchTool.inputSchema.properties;
-    expect(props.from).toBeDefined();
-    expect(props.to).toBeDefined();
-    expect(props.cc).toBeDefined();
-    expect(props.messageId).toBeDefined();
-    expect(props.subject).toBeDefined();
-    expect(props.since).toBeDefined();
-    expect(props.before).toBeDefined();
-    expect(props.keywords).toBeDefined();
-  });
-
-  it('search_emails tool has readOnlyHint=true (non-destructive)', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const searchTool = tools.find((t: any) => t.name === 'search_emails');
-    expect(searchTool.annotations.readOnlyHint).toBe(true);
-    expect(searchTool.annotations.destructiveHint).toBe(false);
+    expectPublicOperation(server, 'mail_query', 'searchMessages');
   });
 });
 
 describe('DELIVERY-VERIFY: verify_sent_message tool', () => {
-  it('is read-only and requires accountId plus messageId', () => {
+  it('is advertised through the read router', () => {
     const server = new MailMCPServer(false);
-    const tool = (server as any).getTools(false).find((item: any) => item.name === 'verify_sent_message');
-    expect(tool.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
-    expect(tool.inputSchema.required).toEqual(['accountId', 'messageId']);
+    expectPublicOperation(server, 'mail_query', 'verifySentMessage');
   });
 
   it('searches the resolved Sent folder by exact Message-ID', async () => {
     const server = new MailMCPServer(false);
-    const searchEmails = vi.fn().mockResolvedValue([{ uid: 77, subject: 'Found' }]);
+    const searchEmailsPage = vi.fn().mockResolvedValue({
+      items: [{ uid: 77, subject: 'Found' }],
+      nextCursor: null,
+      total: 1,
+    });
     vi.spyOn(server as any, 'getService').mockResolvedValue({
       resolveSentFolder: vi.fn().mockResolvedValue('Sent Items'),
-      searchEmails,
+      searchEmailsPage,
     });
 
     const result = await server.dispatchTool('verify_sent_message', false, {
@@ -425,11 +405,9 @@ describe('DELIVERY-VERIFY: verify_sent_message tool', () => {
     const payload = JSON.parse(result.content[0].text);
     expect(payload.status).toBe('found_in_sent');
     expect(payload.sentFolder).toBe('Sent Items');
-    expect(searchEmails).toHaveBeenCalledWith(
+    expect(searchEmailsPage).toHaveBeenCalledWith(
       { messageId: '<delivery@example.com>' },
-      'Sent Items',
-      10,
-      0
+      { folder: 'Sent Items', limit: 10 },
     );
   });
 
@@ -437,7 +415,7 @@ describe('DELIVERY-VERIFY: verify_sent_message tool', () => {
     const server = new MailMCPServer(false);
     vi.spyOn(server as any, 'getService').mockResolvedValue({
       resolveSentFolder: vi.fn().mockResolvedValue('Sent'),
-      searchEmails: vi.fn().mockResolvedValue([]),
+      searchEmailsPage: vi.fn().mockResolvedValue({ items: [], nextCursor: null, total: 0 }),
     });
     const result = await server.dispatchTool('verify_sent_message', false, {
       accountId: 'test',
@@ -449,54 +427,17 @@ describe('DELIVERY-VERIFY: verify_sent_message tool', () => {
   });
 });
 
-describe('IMAP-04: list_folders tool', () => {
-  it('list_folders tool is listed among available tools', () => {
+describe('IMAP-04: list folders operation', () => {
+  it('is advertised through the read router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('list_folders');
-  });
-
-  it('list_folders tool has readOnlyHint=true (non-destructive)', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'list_folders');
-    expect(tool.annotations.readOnlyHint).toBe(true);
-    expect(tool.annotations.destructiveHint).toBe(false);
-  });
-
-  it('list_folders tool requires accountId', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'list_folders');
-    expect(tool.inputSchema.required).toContain('accountId');
+    expectPublicOperation(server, 'mail_query', 'listFolders');
   });
 });
 
 describe('ORG-01: move_email tool', () => {
-  it('move_email tool is listed among available tools', () => {
+  it('moveMessage is advertised through the write router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('move_email');
-  });
-
-  it('move_email tool has readOnlyHint=false and destructiveHint=true', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'move_email');
-    expect(tool.annotations.readOnlyHint).toBe(false);
-    expect(tool.annotations.destructiveHint).toBe(true);
-  });
-
-  it('move_email tool schema includes uid, sourceFolder, targetFolder', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'move_email');
-    const props = tool.inputSchema.properties;
-    expect(props.uid).toBeDefined();
-    expect(props.sourceFolder).toBeDefined();
-    expect(props.targetFolder).toBeDefined();
+    expectPublicOperation(server, 'mail_mutate', 'moveMessage');
   });
 
   it('move_email is blocked in read-only mode', async () => {
@@ -507,30 +448,9 @@ describe('ORG-01: move_email tool', () => {
 });
 
 describe('ORG-02: modify_labels tool', () => {
-  it('modify_labels tool is listed among available tools', () => {
+  it('modifyLabels is advertised through the write router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('modify_labels');
-  });
-
-  it('modify_labels tool has readOnlyHint=false and destructiveHint=true', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'modify_labels');
-    expect(tool.annotations.readOnlyHint).toBe(false);
-    expect(tool.annotations.destructiveHint).toBe(true);
-  });
-
-  it('modify_labels tool schema includes uid, folder, addLabels, removeLabels', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'modify_labels');
-    const props = tool.inputSchema.properties;
-    expect(props.uid).toBeDefined();
-    expect(props.folder).toBeDefined();
-    expect(props.addLabels).toBeDefined();
-    expect(props.removeLabels).toBeDefined();
+    expectPublicOperation(server, 'mail_mutate', 'modifyLabels');
   });
 
   it('modify_labels is blocked in read-only mode', async () => {
@@ -541,24 +461,10 @@ describe('ORG-02: modify_labels tool', () => {
 });
 
 describe('SMTP-02: send_email CC/BCC support', () => {
-  it('send_email tool schema includes cc and bcc fields', () => {
+  it('advertises send and draft operations through the write router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const sendTool = tools.find((t: any) => t.name === 'send_email');
-    expect(sendTool).toBeDefined();
-    const props = sendTool.inputSchema.properties;
-    expect(props.cc).toBeDefined();
-    expect(props.bcc).toBeDefined();
-  });
-
-  it('create_draft tool schema includes cc and bcc fields', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const draftTool = tools.find((t: any) => t.name === 'create_draft');
-    expect(draftTool).toBeDefined();
-    const props = draftTool.inputSchema.properties;
-    expect(props.cc).toBeDefined();
-    expect(props.bcc).toBeDefined();
+    expectPublicOperation(server, 'mail_mutate', 'sendMessage');
+    expectPublicOperation(server, 'mail_mutate', 'createDraft');
   });
 });
 
@@ -960,52 +866,48 @@ describe('CONN-02: IMAP reconnect via close-event + getService retry', () => {
   });
 });
 
-describe('QUAL-01: pagination offset parameter', () => {
-  it('list_emails tool schema includes offset property', () => {
+describe('QUAL-01: cursor-only pagination', () => {
+  it('advertises cursor-based list and search operations without an offset field', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'list_emails');
-    expect(tool).toBeDefined();
-    expect(tool.inputSchema.properties.offset).toBeDefined();
+    expectPublicOperation(server, 'mail_query', 'listMessages');
+    expectPublicOperation(server, 'mail_query', 'searchMessages');
+    expect(JSON.stringify((server as any).getTools(false))).not.toContain('offset');
   });
 
-  it('search_emails tool schema includes offset property', () => {
+  it('dispatchTool list_emails rejects offset pagination', async () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'search_emails');
-    expect(tool).toBeDefined();
-    expect(tool.inputSchema.properties.offset).toBeDefined();
-  });
-
-  it('dispatchTool list_emails passes offset to service.listEmails', async () => {
-    const server = new MailMCPServer(false);
-    const listEmailsMock = vi.fn().mockResolvedValue([]);
-    vi.spyOn(server as any, 'getService').mockResolvedValue({ listEmails: listEmailsMock });
-    await (server as any).dispatchTool('list_emails', false, {
+    const listEmailsPage = vi.fn().mockResolvedValue({ items: [], nextCursor: null, total: 0 });
+    vi.spyOn(server as any, 'getService').mockResolvedValue({ listEmailsPage });
+    const result = await (server as any).dispatchTool('list_emails', false, {
       accountId: 'test',
       folder: 'INBOX',
-      count: 5,
+      limit: 5,
+      cursor: 'page:v1:opaque',
       offset: 10,
     });
-    expect(listEmailsMock).toHaveBeenCalledWith('INBOX', 5, 10, false);
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ text: expect.stringContaining('Pagination is cursor-only') }],
+    });
+    expect(listEmailsPage).not.toHaveBeenCalled();
   });
 
-  it('dispatchTool search_emails passes offset to service.searchEmails', async () => {
+  it('dispatchTool search_emails rejects offset pagination', async () => {
     const server = new MailMCPServer(false);
-    const searchEmailsMock = vi.fn().mockResolvedValue([]);
-    vi.spyOn(server as any, 'getService').mockResolvedValue({ searchEmails: searchEmailsMock });
-    await (server as any).dispatchTool('search_emails', false, {
+    const searchEmailsPage = vi.fn().mockResolvedValue({ items: [], nextCursor: null, total: 0 });
+    vi.spyOn(server as any, 'getService').mockResolvedValue({ searchEmailsPage });
+    const result = await (server as any).dispatchTool('search_emails', false, {
       accountId: 'test',
       folder: 'INBOX',
-      count: 5,
+      limit: 5,
+      cursor: 'page:v1:opaque',
       offset: 3,
     });
-    expect(searchEmailsMock).toHaveBeenCalledWith(
-      expect.any(Object),
-      'INBOX',
-      5,
-      3,
-    );
+    expect(result).toMatchObject({
+      isError: true,
+      content: [{ text: expect.stringContaining('Pagination is cursor-only') }],
+    });
+    expect(searchEmailsPage).not.toHaveBeenCalled();
   });
 });
 
@@ -1143,53 +1045,29 @@ const ALL_WRITE_TOOL_NAMES_20 = [
 const MARK_TOOL_NAMES = ['mark_read', 'mark_unread', 'star', 'unstar'];
 
 describe('MARK-01: mark_read/unread/star/unstar tool registration', () => {
-  it('getTools(false) includes mark_read, mark_unread, star, unstar', () => {
+  it('advertises all four flag operations through mail_mutate', () => {
     const server = new MailMCPServer(false);
-    const names = (server as any).getTools(false).map((t: any) => t.name);
-    for (const name of MARK_TOOL_NAMES) {
-      expect(names).toContain(name);
+    for (const operation of ['markRead', 'markUnread', 'star', 'unstar']) {
+      expectPublicOperation(server, 'mail_mutate', operation);
     }
   });
 
-  it('getTools(true) excludes all 4 mark/star tools (write tools filtered)', () => {
+  it('read-only mode removes the mutation router', () => {
     const server = new MailMCPServer(true);
     const names = (server as any).getTools(true).map((t: any) => t.name);
-    for (const name of MARK_TOOL_NAMES) {
-      expect(names).not.toContain(name);
-    }
+    expect(names).not.toContain('mail_mutate');
   });
 
-  it('all 4 tools have readOnlyHint=false and destructiveHint=true', () => {
+  it('getTools(false) returns the complete catalog', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
-    for (const name of MARK_TOOL_NAMES) {
-      const tool = tools.find((t: any) => t.name === name);
-      expect(tool).toBeDefined();
-      expect(tool.annotations.readOnlyHint).toBe(false);
-      expect(tool.annotations.destructiveHint).toBe(true);
-    }
+    expect(tools).toHaveLength(3);
   });
 
-  it('getTools(false) returns all 30 tools', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    expect(tools).toHaveLength(30);
-  });
-
-  it('getTools(true) returns the 15 read-only tools', () => {
+  it('getTools(true) returns the two read-only tools', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
-    expect(tools).toHaveLength(15);
-  });
-
-  it('each mark/star tool requires accountId and uid', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    for (const name of MARK_TOOL_NAMES) {
-      const tool = tools.find((t: any) => t.name === name);
-      expect(tool.inputSchema.required).toContain('accountId');
-      expect(tool.inputSchema.required).toContain('uid');
-    }
+    expect(tools).toHaveLength(2);
   });
 });
 
@@ -1251,45 +1129,32 @@ describe('MARK-03: mark_read/unread/star/unstar dispatch — correct flags', () 
     const result = await (server as any).dispatchTool('mark_read', false, { accountId: 'test', uid: '42', folder: 'INBOX' });
     expect(result.content[0].text).toContain('42');
   });
+
+  it('mark_read resolves a stable locator before changing flags', async () => {
+    const server = new MailMCPServer(false);
+    const modifyLocatedLabelsMock = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(server as any, 'getService').mockResolvedValue({ modifyLocatedLabels: modifyLocatedLabelsMock });
+
+    await (server as any).dispatchTool('mark_read', false, {
+      accountId: 'test',
+      locator: 'imap:v1:message',
+    });
+
+    expect(modifyLocatedLabelsMock).toHaveBeenCalledWith('imap:v1:message', ['\\Seen'], []);
+  });
 });
 
 describe('THREAD-01: reply_email and forward_email in tool list', () => {
-  it('getTools(false) includes reply_email and forward_email', () => {
+  it('advertises reply and forward through mail_mutate', () => {
     const server = new MailMCPServer(false);
-    const names = (server as any).getTools(false).map((t: any) => t.name);
-    expect(names).toContain('reply_email');
-    expect(names).toContain('forward_email');
+    expectPublicOperation(server, 'mail_mutate', 'reply');
+    expectPublicOperation(server, 'mail_mutate', 'forward');
   });
 
-  it('getTools(true) still excludes reply_email and forward_email (write tools filtered)', () => {
+  it('read-only mode excludes mail_mutate', () => {
     const server = new MailMCPServer(true);
     const names = (server as any).getTools(true).map((t: any) => t.name);
-    expect(names).not.toContain('reply_email');
-    expect(names).not.toContain('forward_email');
-  });
-
-  it('reply_email is in getTools(false) output', () => {
-    const server = new MailMCPServer(false);
-    const names = (server as any).getTools(false).map((t: any) => t.name);
-    expect(names).toContain('reply_email');
-  });
-
-  it('forward_email is in getTools(false) output', () => {
-    const server = new MailMCPServer(false);
-    const names = (server as any).getTools(false).map((t: any) => t.name);
-    expect(names).toContain('forward_email');
-  });
-
-  it('reply_email is NOT in getTools(true) output', () => {
-    const server = new MailMCPServer(true);
-    const names = (server as any).getTools(true).map((t: any) => t.name);
-    expect(names).not.toContain('reply_email');
-  });
-
-  it('forward_email is NOT in getTools(true) output', () => {
-    const server = new MailMCPServer(true);
-    const names = (server as any).getTools(true).map((t: any) => t.name);
-    expect(names).not.toContain('forward_email');
+    expect(names).not.toContain('mail_mutate');
   });
 });
 
@@ -1317,60 +1182,23 @@ describe('THREAD-02: reply_email and forward_email are WRITE tools', () => {
   });
 });
 
-describe('THREAD-03: reply_email tool schema', () => {
-  it('reply_email schema has readOnlyHint=false and destructiveHint=true', () => {
+describe('THREAD-03: reply operation schema', () => {
+  it('is part of the destructive mutation router', () => {
     const server = new MailMCPServer(false);
-    const tool = (server as any).getTools(false).find((t: any) => t.name === 'reply_email');
+    const tool = (server as any).getTools(false).find((t: any) => t.name === 'mail_mutate');
     expect(tool.annotations.readOnlyHint).toBe(false);
     expect(tool.annotations.destructiveHint).toBe(true);
-  });
-
-  it('reply_email schema requires accountId, uid, body', () => {
-    const server = new MailMCPServer(false);
-    const tool = (server as any).getTools(false).find((t: any) => t.name === 'reply_email');
-    expect(tool.inputSchema.required).toContain('accountId');
-    expect(tool.inputSchema.required).toContain('uid');
-    expect(tool.inputSchema.required).toContain('body');
-  });
-
-  it('reply_email schema has optional folder, cc, bcc, isHtml, includeSignature properties', () => {
-    const server = new MailMCPServer(false);
-    const tool = (server as any).getTools(false).find((t: any) => t.name === 'reply_email');
-    const props = tool.inputSchema.properties;
-    expect(props.folder).toBeDefined();
-    expect(props.cc).toBeDefined();
-    expect(props.bcc).toBeDefined();
-    expect(props.isHtml).toBeDefined();
-    expect(props.includeSignature).toBeDefined();
+    expect(tool.inputSchema.properties.operation.enum).toContain('reply');
   });
 });
 
-describe('THREAD-04: forward_email tool schema', () => {
-  it('forward_email schema has readOnlyHint=false and destructiveHint=true', () => {
+describe('THREAD-04: forward operation schema', () => {
+  it('is part of the destructive mutation router', () => {
     const server = new MailMCPServer(false);
-    const tool = (server as any).getTools(false).find((t: any) => t.name === 'forward_email');
+    const tool = (server as any).getTools(false).find((t: any) => t.name === 'mail_mutate');
     expect(tool.annotations.readOnlyHint).toBe(false);
     expect(tool.annotations.destructiveHint).toBe(true);
-  });
-
-  it('forward_email schema requires accountId, uid, to', () => {
-    const server = new MailMCPServer(false);
-    const tool = (server as any).getTools(false).find((t: any) => t.name === 'forward_email');
-    expect(tool.inputSchema.required).toContain('accountId');
-    expect(tool.inputSchema.required).toContain('uid');
-    expect(tool.inputSchema.required).toContain('to');
-  });
-
-  it('forward_email schema has optional folder, body, cc, bcc, isHtml, includeSignature properties', () => {
-    const server = new MailMCPServer(false);
-    const tool = (server as any).getTools(false).find((t: any) => t.name === 'forward_email');
-    const props = tool.inputSchema.properties;
-    expect(props.folder).toBeDefined();
-    expect(props.body).toBeDefined();
-    expect(props.cc).toBeDefined();
-    expect(props.bcc).toBeDefined();
-    expect(props.isHtml).toBeDefined();
-    expect(props.includeSignature).toBeDefined();
+    expect(tool.inputSchema.properties.operation.enum).toContain('forward');
   });
 });
 
@@ -1406,6 +1234,48 @@ describe('THREAD-05: reply_email and forward_email handler dispatch', () => {
     expect(JSON.parse(result.content[0].text).status).toBe('sent_and_saved');
   });
 
+  it('reply_email and forward_email pass cursor locators to the service', async () => {
+    const server = new MailMCPServer(false);
+    const replyLocatedEmailMock = vi.fn().mockResolvedValue(successfulDelivery());
+    const forwardLocatedEmailMock = vi.fn().mockResolvedValue(successfulDelivery());
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      replyLocatedEmail: replyLocatedEmailMock,
+      forwardLocatedEmail: forwardLocatedEmailMock,
+    });
+
+    await (server as any).dispatchTool('reply_email', false, {
+      accountId: 'test',
+      locator: 'imap:v1:message',
+      body: 'Thanks',
+    });
+    await (server as any).dispatchTool('forward_email', false, {
+      accountId: 'test',
+      locator: 'imap:v1:message',
+      to: 'friend@example.com',
+    });
+
+    expect(replyLocatedEmailMock).toHaveBeenCalledWith(
+      'imap:v1:message',
+      'Thanks',
+      undefined,
+      undefined,
+      undefined,
+      true,
+      undefined,
+    );
+    expect(forwardLocatedEmailMock).toHaveBeenCalledWith(
+      'imap:v1:message',
+      'friend@example.com',
+      '',
+      undefined,
+      undefined,
+      undefined,
+      true,
+      undefined,
+      false,
+    );
+  });
+
   it('forward_email with invalid to returns [ValidationError]', async () => {
     const server = new MailMCPServer(false);
     const result = await (server as any).dispatchTool('forward_email', false, {
@@ -1417,30 +1287,56 @@ describe('THREAD-05: reply_email and forward_email handler dispatch', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('[ValidationError]');
   });
+
+  it('attachment tools and batch operations consume cursor locators', async () => {
+    const server = new MailMCPServer(false);
+    const downloadLocatedAttachmentMock = vi.fn().mockResolvedValue({
+      content: Buffer.from('attachment'),
+      contentType: 'text/plain',
+    });
+    const extractLocatedAttachmentTextMock = vi.fn().mockResolvedValue('attachment text');
+    const batchLocatedOperationsMock = vi.fn().mockResolvedValue({
+      processed: 1,
+      succeeded: 1,
+      failed: 0,
+      items: [{ locator: 'imap:v1:message', success: true }],
+    });
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      downloadLocatedAttachment: downloadLocatedAttachmentMock,
+      extractLocatedAttachmentText: extractLocatedAttachmentTextMock,
+      batchLocatedOperations: batchLocatedOperationsMock,
+    });
+
+    await (server as any).dispatchTool('get_attachment', false, {
+      accountId: 'test',
+      locator: 'imap:v1:message',
+      filename: 'report.txt',
+    });
+    await (server as any).dispatchTool('extract_attachment_text', false, {
+      accountId: 'test',
+      locator: 'imap:v1:message',
+      filename: 'report.txt',
+    });
+    await (server as any).dispatchTool('batch_operations', false, {
+      accountId: 'test',
+      locators: ['imap:v1:message'],
+      action: 'delete',
+    });
+
+    expect(downloadLocatedAttachmentMock).toHaveBeenCalledWith('imap:v1:message', 'report.txt');
+    expect(extractLocatedAttachmentTextMock).toHaveBeenCalledWith('imap:v1:message', 'report.txt');
+    expect(batchLocatedOperationsMock).toHaveBeenCalledWith(
+      ['imap:v1:message'],
+      { type: 'delete' },
+    );
+  });
 });
 
 describe('STATS-01: mailbox_stats tool', () => {
-  it('mailbox_stats is in getTools(false) list', () => {
+  it('mailboxStats is advertised through the read router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('mailbox_stats');
-  });
-
-  it('mailbox_stats has readOnlyHint: true and destructiveHint: false', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'mailbox_stats');
-    expect(tool).toBeDefined();
-    expect(tool.annotations.readOnlyHint).toBe(true);
-    expect(tool.annotations.destructiveHint).toBe(false);
-  });
-
-  it('mailbox_stats is also present in getTools(true) (read-only mode)', () => {
-    const server = new MailMCPServer(true);
-    const tools = (server as any).getTools(true);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('mailbox_stats');
+    expectPublicOperation(server, 'mail_query', 'mailboxStats');
+    expect((server as any).getTools(true).map((tool: any) => tool.name)).toContain('mail_query');
   });
 
   it('dispatchTool mailbox_stats calls service.getMailboxStats and returns formatted output', async () => {
@@ -1472,20 +1368,9 @@ describe('STATS-01: mailbox_stats tool', () => {
 });
 
 describe('TPL-01: list_templates MCP tool', () => {
-  it('list_templates appears in getTools(false) as a read-only tool', () => {
+  it('listTemplates is advertised through the read router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'list_templates');
-    expect(tool).toBeDefined();
-    expect(tool.annotations.readOnlyHint).toBe(true);
-    expect(tool.annotations.destructiveHint).toBe(false);
-  });
-
-  it('list_templates appears in getTools(true) (read-only server includes it)', () => {
-    const server = new MailMCPServer(true);
-    const tools = (server as any).getTools(true);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('list_templates');
+    expectPublicOperation(server, 'mail_query', 'listTemplates');
   });
 
   it('list_templates is NOT in WRITE_TOOLS set (not blocked in read-only mode)', async () => {
@@ -1533,20 +1418,9 @@ describe('TPL-01: list_templates MCP tool', () => {
 });
 
 describe('TPL-02: use_template MCP tool', () => {
-  it('use_template appears in getTools(false) as a read-only tool', () => {
+  it('renderTemplate is advertised through the read router', () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'use_template');
-    expect(tool).toBeDefined();
-    expect(tool.annotations.readOnlyHint).toBe(true);
-    expect(tool.annotations.destructiveHint).toBe(false);
-  });
-
-  it('use_template appears in getTools(true) (read-only server includes it)', () => {
-    const server = new MailMCPServer(true);
-    const tools = (server as any).getTools(true);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('use_template');
+    expectPublicOperation(server, 'mail_query', 'renderTemplate');
   });
 
   it('use_template is NOT in WRITE_TOOLS set (not blocked in read-only mode)', async () => {
@@ -1607,17 +1481,80 @@ describe('TPL-02: use_template MCP tool', () => {
     expect(parsed.accountId).toBe('work');
   });
 
-  it('use_template tool schema requires templateId', () => {
+  it('dispatchTool use_template does not cross an explicit account scope', async () => {
     const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'use_template');
-    expect(tool.inputSchema.required).toContain('templateId');
+    const result = await (server as any).dispatchTool('use_template', false, {
+      templateId: 'oof',
+      variables: { subject: 'Hello', date: 'Monday' },
+      accountId: 'personal',
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('Template not found');
+    expect(result.content[0].text).not.toContain('I am away until Monday.');
   });
+
 });
 
 // ---------------------------------------------------------------------------
 // Audit logging integration
 // ---------------------------------------------------------------------------
+
+describe('Provider MCP dispatch', () => {
+  it('lists provider backend and capabilities without credentials', async () => {
+    vi.mocked(getConfiguredAccounts).mockResolvedValueOnce([{
+      id: 'native',
+      name: 'Local Mail',
+      backend: 'apple-mail',
+      nativeAccountName: 'iCloud',
+    }]);
+    const server = new MailMCPServer(false);
+
+    const result = await server.dispatchTool('list_accounts', false, {});
+    const accounts = JSON.parse(result.content[0].text);
+
+    expect(accounts).toEqual([expect.objectContaining({
+      id: 'native',
+      backend: 'apple-mail',
+      capabilities: expect.objectContaining({ readMail: true, sendMail: true }),
+    })]);
+    expect(result.content[0].text).not.toContain('token');
+  });
+
+  it('routes Apple read operations through ProviderRuntime', async () => {
+    const server = new MailMCPServer(false);
+    const execute = vi.spyOn((server as any).providerRuntime, 'executeAppleRead')
+      .mockResolvedValue([{ name: 'iCloud', uuid: 'uuid-1' }]);
+
+    const result = await server.dispatchTool('apple_mail_query', false, {
+      accountId: 'native',
+      operation: 'listAccounts',
+      input: {},
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(execute).toHaveBeenCalledWith('native', 'listAccounts', {});
+    expect(JSON.parse(result.content[0].text)).toEqual([{ name: 'iCloud', uuid: 'uuid-1' }]);
+  });
+
+  it('returns binary Mailtrap results as an embedded resource', async () => {
+    const server = new MailMCPServer(false);
+    vi.spyOn((server as any).providerRuntime, 'executeMailtrapRead')
+      .mockResolvedValue(new Uint8Array([1, 2, 3]));
+
+    const result = await server.dispatchTool('mailtrap_query', false, {
+      accountId: 'mailtrap',
+      action: 'sandbox',
+      input: { operation: 'body', bodyType: 'eml' },
+    });
+
+    expect(result.isError).not.toBe(true);
+    expect(result.content[1]).toMatchObject({
+      type: 'resource',
+      resource: { mimeType: 'application/octet-stream', blob: 'AQID' },
+    });
+  });
+});
 
 describe('Audit logging integration', () => {
   const tmpLog = path.join(os.tmpdir(), `audit-integration-test-${Date.now()}.log`);

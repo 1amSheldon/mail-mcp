@@ -14,13 +14,20 @@ function temporaryPath(filePath: string): string {
   return join(dirname(filePath), `.${basename(filePath)}.${process.pid}.${randomUUID()}.tmp`);
 }
 
-export async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {
+export async function writeFileAtomic(
+  filePath: string,
+  content: string | Uint8Array
+): Promise<void> {
   const tempPath = temporaryPath(filePath);
   let handle: Awaited<ReturnType<typeof open>> | undefined;
 
   try {
     handle = await open(tempPath, 'wx', 0o600);
-    await handle.writeFile(content, 'utf8');
+    if (typeof content === 'string') {
+      await handle.writeFile(content, 'utf8');
+    } else {
+      await handle.writeFile(content);
+    }
     await handle.sync();
     await handle.close();
     handle = undefined;
@@ -30,6 +37,10 @@ export async function writeTextFileAtomic(filePath: string, content: string): Pr
     await rm(tempPath, { force: true }).catch(() => undefined);
     throw error;
   }
+}
+
+export async function writeTextFileAtomic(filePath: string, content: string): Promise<void> {
+  await writeFileAtomic(filePath, content);
 }
 
 export function writeTextFileAtomicSync(filePath: string, content: string): void {

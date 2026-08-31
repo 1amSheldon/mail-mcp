@@ -34,6 +34,15 @@ describe('AuditLogger.sanitizeArgs', () => {
     expect(result).not.toHaveProperty('clientSecret');
   });
 
+  it('strips confirmation tokens', () => {
+    const logger = new AuditLogger(tmpPath());
+    const result = logger.sanitizeArgs({
+      accountId: 'acc1',
+      confirmationId: 'secret-confirmation-id',
+    });
+    expect(result).toEqual({ accountId: 'acc1' });
+  });
+
   it('strips fields matching sensitive pattern case-insensitively', () => {
     const logger = new AuditLogger(tmpPath());
     const result = logger.sanitizeArgs({ Password: 'x', TOKEN: 'y', apiKey: 'z', subject: 'hello' });
@@ -48,6 +57,31 @@ describe('AuditLogger.sanitizeArgs', () => {
     const original = { password: 'secret', accountId: 'acc1' };
     logger.sanitizeArgs(original);
     expect(original).toHaveProperty('password', 'secret');
+  });
+
+  it('strips provider secrets and payloads recursively and summarizes binary values', () => {
+    const logger = new AuditLogger(tmpPath());
+    const result = logger.sanitizeArgs({
+      accountId: 'mailtrap',
+      input: {
+        message: {
+          subject: 'Hello',
+          authorization: 'Bearer hidden',
+          access_token: 'also hidden',
+        },
+        nested: [{ apiKey: 'hidden', content: 'mail body must not be logged' }],
+        attachment: new Uint8Array([1, 2, 3]),
+      },
+    });
+
+    expect(result).toEqual({
+      accountId: 'mailtrap',
+      input: {
+        message: { subject: 'Hello' },
+        nested: [{ content: '[omitted sensitive payload]' }],
+        attachment: '[omitted sensitive payload]',
+      },
+    });
   });
 });
 
@@ -119,6 +153,71 @@ describe('AuditLogger.log (enabled)', () => {
     expect(content).not.toContain('cs_SENSITIVE');
     expect(content).not.toContain('rt_SENSITIVE');
     expect(content).toContain('acc1');
+  });
+
+  it('never writes body, HTML, raw RFC822, base64, or attachment payloads', async () => {
+    const entry: AuditEntry = {
+      timestamp: '2026-01-01T00:00:00Z',
+      tool: 'send_email',
+      args: {
+        subject: 'password: hunter2',
+        body: 'FULL_SECRET_BODY',
+        nested: {
+          html: '<html>FULL_SECRET_HTML</html>',
+          text_body: 'FULL_TEXT_BODY',
+          htmlBody: 'FULL_HTML_BODY',
+          rawMessage: 'From: x@example.com\r\n\r\nFULL_RAW_EMAIL',
+          contentBase64: Buffer.from('FULL_ATTACHMENT').toString('base64'),
+          attachments: [{ content: 'FULL_NESTED_ATTACHMENT' }],
+        },
+      },
+      success: true,
+      durationMs: 10,
+    };
+    await logger.log(entry);
+    const content = fs.readFileSync(logPath, 'utf-8');
+    expect(content).not.toContain('hunter2');
+    expect(content).not.toContain('FULL_SECRET_BODY');
+    expect(content).not.toContain('FULL_SECRET_HTML');
+    expect(content).not.toContain('FULL_TEXT_BODY');
+    expect(content).not.toContain('FULL_HTML_BODY');
+    expect(content).not.toContain('FULL_RAW_EMAIL');
+    expect(content).not.toContain('FULL_ATTACHMENT');
+    expect(content).not.toContain('FULL_NESTED_ATTACHMENT');
+    expect(content).toContain('[omitted sensitive payload]');
+  });
+
+  it('bounds oversized records without leaking omitted content', async () => {
+    const entry: AuditEntry = {
+      timestamp: '2026-01-01T00:00:00Z',
+      tool: 'provider_query',
+      args: Object.fromEntries(
+        Array.from({ length: 100 }, (_, index) => [`field${index}`, `safe-${index}-${'x'.repeat(1_000)}`]),
+      ),
+      success: true,
+      durationMs: 1,
+    };
+    await logger.log(entry);
+    const content = fs.readFileSync(logPath, 'utf-8');
+    expect(Buffer.byteLength(content, 'utf8')).toBeLessThanOrEqual(32 * 1_024);
+    expect(content).toContain('audit arguments exceeded');
+    expect(content).not.toContain('safe-99-');
+  });
+
+  it('rotates the active log before it exceeds the configured cap', async () => {
+    fs.writeFileSync(logPath, 'previous audit data'.repeat(20), 'utf-8');
+    const cappedLogger = new AuditLogger(logPath, true, 400);
+    await cappedLogger.log({
+      timestamp: '2026-01-01T00:00:00Z',
+      tool: 'list_accounts',
+      args: {},
+      success: true,
+      durationMs: 1,
+    });
+
+    expect(fs.readFileSync(`${logPath}.1`, 'utf-8')).toContain('previous audit data');
+    expect(JSON.parse(fs.readFileSync(logPath, 'utf-8').trim()).tool).toBe('list_accounts');
+    fs.unlinkSync(`${logPath}.1`);
   });
 
   it('includes error field when success=false', async () => {

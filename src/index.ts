@@ -5,23 +5,28 @@ import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/se
 import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
+  ListResourcesRequestSchema,
+  ReadResourceRequestSchema,
+  ListPromptsRequestSchema,
+  GetPromptRequestSchema,
   ErrorCode,
   McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parseArgs } from 'node:util';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
-import { getAccounts } from './config.js';
+import { getAccounts, getConfiguredAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
 import { getClaudeConfigPath, installClaude } from './cli/install-claude.js';
-import { installCodex, installCodexHttp } from './cli/install-codex.js';
+import { installClaudeCode } from './cli/install-claude-code.js';
+import { installCodexBundle } from './cli/install-codex.js';
 import {
   buildMailMcpNpxArgs,
   MAIL_MCP_LATEST_SPEC,
   prepareMailMcpNpxRuntime,
 } from './cli/npm-runtime.js';
 import { MailService } from './services/mail.js';
-import type { SendDeliveryResult } from './services/mail.js';
+import type { MailSendMessage, SendDeliveryResult } from './services/mail.js';
 import { MailMCPError, NetworkError } from './errors.js';
 import { TieredRateLimiter } from './utils/rate-limiter.js';
 import { ImapClient } from './protocol/imap.js';
@@ -30,33 +35,49 @@ import { validateEmailAddresses, validateRecipients } from './utils/validation.j
 import { getTemplates, applyVariables } from './utils/templates.js';
 import { SieveClient } from './protocol/sieve.js';
 import { AuditLogger } from './utils/audit-logger.js';
-import { ConfirmationStore } from './utils/confirmation-store.js';
+import { ConfirmationStore, confirmationArgsHash } from './utils/confirmation-store.js';
 import { AUDIT_LOG_PATH } from './config.js';
 import { MailMCPRuntimeState } from './runtime-state.js';
 import { startHttpHost } from './http-host.js';
 import { startAutoUpdateMonitor, type AutoUpdateMonitor } from './auto-update.js';
-import { installWindowsHttpService } from './cli/windows-service.js';
+import {
+  HTTP_BEARER_TOKEN_ENV,
+  installWindowsHttpService,
+  SHARED_HTTP_HOST,
+  SHARED_HTTP_PORT,
+} from './cli/windows-service.js';
+import {
+  filterToolCatalog,
+  isWriteCall,
+  isWriteCallAllowed,
+  routeMailToolCall,
+  WRITE_SELECTORS,
+} from './mcp/tool-catalog.js';
+import { getAccountCapabilities } from './providers/account-types.js';
+import {
+  ProviderRuntime,
+  ProviderRuntimeError,
+  type AppleReadOperation,
+  type AppleWriteOperation,
+  type MicrosoftReadOperation,
+  type MicrosoftWriteOperation,
+} from './providers/runtime.js';
+import type { MailtrapAction } from './providers/mailtrap/types.js';
+import { AppleMailError } from './providers/apple-mail/errors.js';
+import { MailtrapHttpError } from './providers/mailtrap/client.js';
+import { MicrosoftProviderError } from './providers/microsoft/common.js';
+import type { OutgoingAttachment } from './domain/outgoing-message.js';
+import { validateOAuth2TokenEndpoint } from './security/oauth2.js';
+import {
+  getMailAgentGuidePrompt,
+  MAIL_SERVER_INSTRUCTIONS,
+  MAIL_AGENT_GUIDE_PROMPT,
+  MAIL_AGENT_GUIDE_RESOURCE,
+  readMailAgentGuideResource,
+} from './mcp/agent-guide.js';
 
 const require = createRequire(import.meta.url);
 const PACKAGE_VERSION = (require('../package.json') as { version: string }).version;
-
-const WRITE_TOOLS = new Set<string>([
-  'send_email',
-  'create_draft',
-  'move_email',
-  'modify_labels',
-  'register_oauth2_account',
-  'batch_operations',
-  'reply_email',
-  'forward_email',
-  'delete_email',
-  'mark_read',
-  'mark_unread',
-  'star',
-  'unstar',
-  'set_filter',
-  'delete_filter',
-]);
 
 export function parseCliArgs(args: string[]) {
   return parseArgs({
@@ -73,6 +94,7 @@ export function parseCliArgs(args: string[]) {
       'bearer-token-env': { type: 'string', default: 'MAIL_MCP_BEARER_TOKEN' },
       'validate-accounts': { type: 'boolean', default: false },
       'install-claude': { type: 'boolean', default: false },
+      'install-claude-code': { type: 'boolean', default: false },
       'install-codex': { type: 'boolean', default: false },
       'install-codex-stdio': { type: 'boolean', default: false },
       'auto-update-seconds': { type: 'string' },
@@ -87,10 +109,10 @@ export function parseAllowedTools(raw: string | undefined): Set<string> | undefi
   if (raw === undefined) return undefined;
 
   const allowedTools = new Set(raw.split(',').map(tool => tool.trim()).filter(Boolean));
-  const unknownTools = [...allowedTools].filter(tool => !WRITE_TOOLS.has(tool));
+  const unknownTools = [...allowedTools].filter(tool => !WRITE_SELECTORS.has(tool));
   if (unknownTools.length > 0) {
     throw new Error(
-      `Unknown write tool(s): ${unknownTools.join(', ')}. Available write tools: ${[...WRITE_TOOLS].join(', ')}.`
+      `Unknown write selector(s): ${unknownTools.join(', ')}. Available write selectors: ${[...WRITE_SELECTORS].join(', ')}.`
     );
   }
   return allowedTools;
@@ -106,10 +128,103 @@ function formatDeliveryResult(result: SendDeliveryResult) {
   };
 }
 
+function requireObject(value: unknown, field: string): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${field} must be an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function outgoingMessageFromArgs(args: Record<string, unknown>): MailSendMessage {
+  const body = args.body as string | undefined;
+  const isHtml = args.isHtml === true;
+  const text = (args.textBody as string | undefined) ?? (!isHtml ? body : undefined);
+  const html = (args.htmlBody as string | undefined) ?? (isHtml ? body : undefined);
+  return {
+    to: args.to as string,
+    subject: args.subject as string,
+    ...(text !== undefined ? { text } : {}),
+    ...(html !== undefined ? { html } : {}),
+    ...(args.cc ? { cc: args.cc as string } : {}),
+    ...(args.bcc ? { bcc: args.bcc as string } : {}),
+    ...(args.replyTo ? { replyTo: args.replyTo as string } : {}),
+    ...(args.from ? { from: args.from as string } : {}),
+    ...(Array.isArray(args.attachments)
+      ? { attachments: args.attachments as OutgoingAttachment[] }
+      : {}),
+    includeSignature: args.includeSignature !== false,
+  };
+}
+
+function usesExtendedOutgoingArgs(args: Record<string, unknown>): boolean {
+  return args.textBody !== undefined
+    || args.htmlBody !== undefined
+    || args.replyTo !== undefined
+    || args.from !== undefined
+    || args.attachments !== undefined;
+}
+
+function formatProviderResult(result: unknown, uri: string) {
+  if (result instanceof Uint8Array) {
+    return {
+      content: [
+        {
+          type: 'text' as const,
+          text: JSON.stringify({ bytes: result.byteLength, mediaType: 'application/octet-stream' }, null, 2),
+        },
+        {
+          type: 'resource' as const,
+          resource: {
+            uri,
+            mimeType: 'application/octet-stream',
+            blob: Buffer.from(result).toString('base64'),
+          },
+        },
+      ],
+    };
+  }
+  return {
+    content: [{
+      type: 'text' as const,
+      text: typeof result === 'string' ? result : JSON.stringify(result, null, 2),
+    }],
+  };
+}
+
+function providerErrorMessage(error: unknown): string {
+  if (error instanceof ProviderRuntimeError) {
+    return `[${error.code}] ${error.message}`;
+  }
+  if (error instanceof AppleMailError) {
+    const safeMessage = error.code === 'EXECUTION_FAILED'
+      ? 'Apple Mail automation failed. Check Mail.app state and macOS Automation permissions.'
+      : error.message;
+    return `[${error.code}] ${safeMessage}`;
+  }
+  if (error instanceof MicrosoftProviderError) {
+    const metadata = [
+      error.status !== undefined ? `HTTP ${error.status}` : undefined,
+      error.requestId ? `request ${error.requestId}` : undefined,
+    ].filter(Boolean).join(', ');
+    if (error.kind === 'validation' || error.kind === 'invalid_response') {
+      return `[${error.provider}:${error.kind}] ${error.message}`;
+    }
+    return `[${error.provider}:${error.kind}] Provider request failed${metadata ? ` (${metadata})` : ''}.`;
+  }
+  if (error instanceof MailtrapHttpError) {
+    return `[mailtrap${error.status ? `:${error.status}` : ''}] ${error.message}`;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 /**
  * Build a human-readable description of a write tool action for the confirmation prompt.
  */
 function buildConfirmationDescription(toolName: string, args: Record<string, unknown>): string {
+  if (toolName === 'mail_mutate') {
+    const routed = routeMailToolCall(toolName, args);
+    return buildConfirmationDescription(routed.name, routed.args);
+  }
   const uid = args.uid as string | undefined;
   const folder = (args.folder as string | undefined) || 'INBOX';
   switch (toolName) {
@@ -118,33 +233,85 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
     case 'create_draft':
       return `Save draft to ${args.to as string} with subject '${args.subject as string}'`;
     case 'reply_email':
-      return `Reply to email UID ${uid} in ${folder}`;
+      return args.locator
+        ? `Reply to message ${args.locator as string}`
+        : `Reply to email UID ${uid} in ${folder}`;
+    case 'reply_all_email':
+      return `Reply to all participants of message ${args.locator as string}`;
     case 'forward_email':
-      return `Forward email UID ${uid} to ${args.to as string}`;
+      return args.locator
+        ? `Forward message ${args.locator as string} to ${args.to as string}`
+        : `Forward email UID ${uid} to ${args.to as string}`;
     case 'delete_email':
-      return `Permanently delete email UID ${uid} from ${folder}`;
+      return args.locator
+        ? `Move message ${args.locator as string} to Trash`
+        : `Move email UID ${uid} from ${folder} to Trash`;
+    case 'permanently_delete_email':
+      return args.locator
+        ? `Permanently delete message ${args.locator as string}`
+        : `Permanently delete email UID ${uid} from ${folder}`;
+    case 'create_mailbox':
+      return `Create mailbox ${args.path as string}`;
+    case 'rename_mailbox':
+      return `Rename mailbox ${args.path as string} to ${args.newPath as string}`;
+    case 'delete_mailbox':
+      return `Delete mailbox ${args.path as string}`;
+    case 'copy_email':
+      return `Copy message ${args.locator as string} to ${args.targetFolder as string}`;
     case 'move_email':
-      return `Move email UID ${uid} from ${args.sourceFolder as string} to ${args.targetFolder as string}`;
+      return args.locator
+        ? `Move message ${args.locator as string} to ${args.targetFolder as string}`
+        : `Move email UID ${uid} from ${args.sourceFolder as string} to ${args.targetFolder as string}`;
     case 'batch_operations': {
-      const uids = args.uids as string[] | undefined;
-      return `Batch ${args.action as string} ${uids ? uids.length : 0} emails in ${folder}`;
+      const count = Array.isArray(args.locators)
+        ? args.locators.length
+        : Array.isArray(args.uids) ? args.uids.length : 0;
+      return `Batch ${args.action as string} ${count} emails${Array.isArray(args.locators) ? '' : ` in ${folder}`}`;
     }
     case 'modify_labels':
-      return `Modify labels on email UID ${uid} in ${folder}`;
+      return args.locator
+        ? `Modify labels on message ${args.locator as string}`
+        : `Modify labels on email UID ${uid} in ${folder}`;
     case 'mark_read':
-      return `Mark email UID ${uid} as read in ${folder}`;
+      return args.locator
+        ? `Mark message ${args.locator as string} as read`
+        : `Mark email UID ${uid} as read in ${folder}`;
     case 'mark_unread':
-      return `Mark email UID ${uid} as unread in ${folder}`;
+      return args.locator
+        ? `Mark message ${args.locator as string} as unread`
+        : `Mark email UID ${uid} as unread in ${folder}`;
     case 'star':
-      return `Star email UID ${uid} in ${folder}`;
+      return args.locator
+        ? `Star message ${args.locator as string}`
+        : `Star email UID ${uid} in ${folder}`;
     case 'unstar':
-      return `Unstar email UID ${uid} in ${folder}`;
+      return args.locator
+        ? `Unstar message ${args.locator as string}`
+        : `Unstar email UID ${uid} in ${folder}`;
     case 'register_oauth2_account':
       return `Register OAuth2 credentials for account ${args.accountId as string}`;
     case 'set_filter':
       return `Create/update SIEVE filter '${args.name as string}' on account ${args.accountId as string}`;
     case 'delete_filter':
       return `Delete SIEVE filter '${args.name as string}' on account ${args.accountId as string}`;
+    case 'apple_mail_mutate':
+    case 'microsoft_mail_send':
+      return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
+    case 'mailtrap_mutate': {
+      const input = args.input && typeof args.input === 'object' && !Array.isArray(args.input)
+        ? args.input as Record<string, unknown>
+        : {};
+      const operation = [args.action, input.resource, input.operation]
+        .filter(value => typeof value === 'string' && value.length > 0)
+        .join(' / ');
+      const identifiers = [
+        'templateId', 'projectId', 'folderId', 'inboxId', 'messageId', 'attachmentId',
+        'threadId', 'domainId', 'suppressionId', 'webhookId', 'contact', 'id', 'campaignId',
+      ].flatMap(key => input[key] === undefined ? [] : [`${key}=${String(input[key])}`]);
+      return `Execute Mailtrap ${operation} for account ${args.accountId as string}${
+        identifiers.length > 0 ? ` (${identifiers.join(', ')})` : ''
+      }`;
+    }
     default:
       return `Execute ${toolName}`;
   }
@@ -164,6 +331,7 @@ export class MailMCPServer {
   private readonly auditLogger?: AuditLogger;
   private readonly redact: boolean;
   private readonly runtimeState: MailMCPRuntimeState;
+  private readonly providerRuntime: ProviderRuntime;
   private readonly ownsRuntimeState: boolean;
 
   constructor(
@@ -176,7 +344,7 @@ export class MailMCPServer {
   ) {
     if (readOnly && allowedTools !== undefined) {
       throw new Error(
-        '--read-only and --allow-tools are mutually exclusive. Use --read-only to disable all write tools, or --allow-tools to enable specific ones.'
+        '--read-only and --allow-tools are mutually exclusive. Use --read-only to disable all write operations, or --allow-tools to enable specific ones.'
       );
     }
 
@@ -186,6 +354,7 @@ export class MailMCPServer {
     this.confirmStore = new ConfirmationStore();
     this.redact = redact;
     this.runtimeState = runtimeState ?? new MailMCPRuntimeState();
+    this.providerRuntime = new ProviderRuntime(this.runtimeState, { redact: this.redact });
     this.ownsRuntimeState = runtimeState === undefined;
     this.services = this.runtimeState.services;
     this.serviceCreations = this.runtimeState.serviceCreations;
@@ -193,11 +362,11 @@ export class MailMCPServer {
 
     const instructionsSuffix = (() => {
       if (readOnly) {
-        return ' This server is running in read-only mode. Write operations (send_email, create_draft, move_email, modify_labels, batch_operations, register_oauth2_account, reply_email, forward_email, delete_email, mark_read, mark_unread, star, unstar) are disabled.';
+        return ' This server is running in read-only mode. Write operations advertised by the normal server are disabled.';
       }
       if (allowedTools !== undefined) {
         const list = [...allowedTools].join(', ') || 'none';
-        return ` This server is running with allow-listed tools. Only these write operations are enabled: ${list}. All other write tools are disabled.`;
+        return ` This server is running with allow-listed write selectors. Only these write operations are enabled: ${list}.`;
       }
       if (confirmMode) {
         return ' This server is running in confirmation mode. Write operations require a two-step confirmation: the first call returns a confirmationId; include it in the second call to execute the action.';
@@ -213,8 +382,10 @@ export class MailMCPServer {
       {
         capabilities: {
           tools: {},
+          resources: {},
+          prompts: {},
         },
-        instructions: `Access configured email accounts over IMAP and SMTP.${instructionsSuffix}`,
+        instructions: `${MAIL_SERVER_INSTRUCTIONS}\n\n${instructionsSuffix.trim()}`.trim(),
       }
     );
 
@@ -294,507 +465,12 @@ export class MailMCPServer {
   }
 
   getTools(readOnly: boolean, allowedTools?: Set<string>) {
-    const allTools = [
-      {
-        name: 'list_accounts',
-        description: 'List configured email accounts.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {},
-        },
-      },
-      {
-        name: 'list_emails',
-        description: 'List messages in an IMAP folder. Set headerOnly=true to skip message bodies.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            folder: { type: 'string', description: 'The folder to list emails from (default: INBOX)' },
-            count: { type: 'number', description: 'The number of emails to retrieve (default: 10)' },
-            offset: { type: 'number', description: 'Number of messages to skip from the newest (for pagination, default: 0)' },
-            headerOnly: { type: 'boolean', description: 'When true, skip body download and return only headers (subject, from, date, flags). Much faster for large mailboxes. snippet will be empty. Default: false.' }
-          },
-          required: ['accountId']
-        }
-      },
-      {
-        name: 'search_emails',
-        description: 'Search an IMAP folder by address, subject, date, body text, or Message-ID.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            folder: { type: 'string', description: 'The folder to search in (default: INBOX)' },
-            from: { type: 'string', description: 'Filter by sender' },
-            to: { type: 'string', description: 'Filter by To recipient' },
-            cc: { type: 'string', description: 'Filter by Cc recipient' },
-            messageId: { type: 'string', description: 'Filter by exact RFC Message-ID header' },
-            subject: { type: 'string', description: 'Filter by subject' },
-            since: { type: 'string', description: 'Filter by date (ISO format)' },
-            before: { type: 'string', description: 'Filter by date (ISO format)' },
-            keywords: { type: 'string', description: 'Filter by keywords in body' },
-            count: { type: 'number', description: 'The number of emails to retrieve (default: 10)' },
-            offset: { type: 'number', description: 'Number of messages to skip from the newest (for pagination, default: 0)' }
-          },
-          required: ['accountId']
-        }
-      },
-      {
-        name: 'verify_sent_message',
-        description: 'Check whether a Message-ID exists in Sent. Absence does not prove SMTP non-delivery.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            messageId: { type: 'string', description: 'The exact RFC Message-ID returned by send_email, reply_email, or forward_email' },
-            sentFolder: { type: 'string', description: 'Optional Sent folder override. By default the account override or IMAP special-use Sent folder is used.' },
-            count: { type: 'number', description: 'Maximum matching messages to return (default: 10)' },
-            offset: { type: 'number', description: 'Number of matching messages to skip from the newest (default: 0)' },
-          },
-          required: ['accountId', 'messageId'],
-        },
-      },
-      {
-        name: 'read_email',
-        description: 'Read one message by IMAP UID.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to read' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' }
-          },
-          required: ['accountId', 'uid']
-        }
-      },
-      {
-        name: 'send_email',
-        description: 'Send through SMTP, then append the same MIME message to Sent.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            to: { type: 'string', description: 'Recipient email address' },
-            subject: { type: 'string', description: 'Email subject' },
-            body: { type: 'string', description: 'Email body content' },
-            isHtml: { type: 'boolean', description: 'Whether the body is HTML (default: false)' },
-            cc: { type: 'string', description: 'CC recipients' },
-            bcc: { type: 'string', description: 'BCC recipients' },
-            includeSignature: {
-              type: 'boolean',
-              description: 'Whether to append the account signature (default: true). Set to false to suppress the signature for this message.'
-            },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'to', 'subject', 'body']
-        }
-      },
-      {
-        name: 'create_draft',
-        description: 'Append a draft message to Drafts.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            to: { type: 'string', description: 'Recipient email address' },
-            subject: { type: 'string', description: 'Email subject' },
-            body: { type: 'string', description: 'Email body content' },
-            isHtml: { type: 'boolean', description: 'Whether the body is HTML (default: false)' },
-            cc: { type: 'string', description: 'CC recipients' },
-            bcc: { type: 'string', description: 'BCC recipients' },
-            includeSignature: {
-              type: 'boolean',
-              description: 'Whether to append the account signature (default: true). Set to false to suppress the signature for this draft.'
-            },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'to', 'subject', 'body']
-        }
-      },
-      {
-        name: 'list_folders',
-        description: 'List IMAP folders.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' }
-          },
-          required: ['accountId']
-        }
-      },
-      {
-        name: 'move_email',
-        description: 'Move a message between IMAP folders.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to move' },
-            sourceFolder: { type: 'string', description: 'The current folder of the email' },
-            targetFolder: { type: 'string', description: 'The destination folder' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid', 'sourceFolder', 'targetFolder']
-        }
-      },
-      {
-        name: 'modify_labels',
-        description: 'Add or remove IMAP flags such as \\\\Seen and \\\\Flagged.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email' },
-            folder: { type: 'string', description: 'The folder containing the email' },
-            addLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to add (e.g. \\Seen, \\Flagged)' },
-            removeLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to remove' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid', 'folder']
-        }
-      },
-      {
-        name: 'get_thread',
-        description: 'Find messages by Gmail thread ID or RFC Message-ID references.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            threadId: { type: 'string', description: 'The ID of the thread to retrieve' },
-            folder: { type: 'string', description: 'The folder containing the thread (default: INBOX)' }
-          },
-          required: ['accountId', 'threadId']
-        }
-      },
-      {
-        name: 'get_attachment',
-        description: 'Download one attachment by message UID and filename.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email' },
-            filename: { type: 'string', description: 'The name of the attachment file' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' }
-          },
-          required: ['accountId', 'uid', 'filename']
-        }
-      },
-      {
-        name: 'extract_attachment_text',
-        description: 'Extract text from a PDF or plain-text attachment.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email' },
-            filename: { type: 'string', description: 'The name of the attachment file' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' }
-          },
-          required: ['accountId', 'uid', 'filename']
-        }
-      },
-      {
-        name: 'register_oauth2_account',
-        description: 'Store OAuth2 credentials for an account in the system credential store.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account' },
-            clientId: { type: 'string', description: 'OAuth2 Client ID' },
-            clientSecret: { type: 'string', description: 'OAuth2 Client Secret' },
-            refreshToken: { type: 'string', description: 'OAuth2 Refresh Token' },
-            tokenEndpoint: { type: 'string', description: 'OAuth2 Token Endpoint URL' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'clientId', 'clientSecret', 'refreshToken', 'tokenEndpoint']
-        }
-      },
-      {
-        name: 'batch_operations',
-        description: 'Move, delete, or label up to 100 messages.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uids: { type: 'array', items: { type: 'string' }, description: 'Array of email UIDs to operate on (max 100)' },
-            folder: { type: 'string', description: 'The folder containing the emails' },
-            action: { type: 'string', enum: ['move', 'delete', 'label'], description: 'The batch action to perform' },
-            targetFolder: { type: 'string', description: 'Target folder (required for move action)' },
-            addLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to add (for label action)' },
-            removeLabels: { type: 'array', items: { type: 'string' }, description: 'Labels to remove (for label action)' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uids', 'folder', 'action']
-        }
-      },
-      {
-        name: 'delete_email',
-        description: 'Permanently delete one message by IMAP UID. Move to Trash when recovery is required.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to delete' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid']
-        }
-      },
-      {
-        name: 'reply_email',
-        description: 'Reply with In-Reply-To and References headers.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to reply to' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            body: { type: 'string', description: 'Reply body content' },
-            isHtml: { type: 'boolean', description: 'Whether the body is HTML (default: false)' },
-            cc: { type: 'string', description: 'CC recipients' },
-            bcc: { type: 'string', description: 'BCC recipients' },
-            includeSignature: {
-              type: 'boolean',
-              description: 'Whether to append the account signature (default: true). Set to false to suppress the signature.'
-            },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid', 'body']
-        }
-      },
-      {
-        name: 'forward_email',
-        description: 'Forward a message with its original headers and body.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to forward' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            to: { type: 'string', description: 'Recipient email address to forward to' },
-            body: { type: 'string', description: 'Optional preamble to include before the forwarded message' },
-            isHtml: { type: 'boolean', description: 'Whether the body is HTML (default: false)' },
-            cc: { type: 'string', description: 'CC recipients' },
-            bcc: { type: 'string', description: 'BCC recipients' },
-            includeSignature: {
-              type: 'boolean',
-              description: 'Whether to append the account signature (default: true). Set to false to suppress the signature.'
-            },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid', 'to']
-        }
-      },
-      {
-        name: 'mailbox_stats',
-        description: 'Return total, unread, and recent counts for IMAP folders.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            folders: {
-              type: 'array',
-              items: { type: 'string' },
-              description: 'Folder names to report stats for (default: all folders)'
-            }
-          },
-          required: ['accountId']
-        }
-      },
-      {
-        name: 'extract_contacts',
-        description: 'Count senders in recent messages and return contacts by frequency.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            folder: { type: 'string', description: 'The folder to scan (default: INBOX)' },
-            count: { type: 'number', description: 'Number of recent messages to scan (default: 100, max: 500)' },
-          },
-          required: ['accountId'],
-        },
-      },
-      {
-        name: 'list_templates',
-        description: 'List global and account-scoped templates.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'Optional account ID. Returns global templates and templates scoped to this account. Omit to return all templates.' },
-          },
-        },
-      },
-      {
-        name: 'use_template',
-        description: 'Fill template variables and return arguments for send_email or create_draft. Does not send.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            templateId: { type: 'string', description: 'The ID of the template to use' },
-            variables: {
-              type: 'object',
-              description: 'Key-value pairs to substitute into {{variable}} placeholders in the template subject and body',
-              additionalProperties: { type: 'string' },
-            },
-            to: { type: 'string', description: 'Recipient email address to include in the returned args' },
-            cc: { type: 'string', description: 'CC recipients to include in the returned args' },
-            bcc: { type: 'string', description: 'BCC recipients to include in the returned args' },
-            accountId: { type: 'string', description: 'Account ID to include in the returned args' },
-          },
-          required: ['templateId'],
-        },
-      },
-      {
-        name: 'mark_read',
-        description: 'Mark a message as read by adding \\\\Seen.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to mark as read' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid'],
-        },
-      },
-      {
-        name: 'mark_unread',
-        description: 'Mark a message as unread by removing \\\\Seen.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to mark as unread' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid'],
-        },
-      },
-      {
-        name: 'star',
-        description: 'Star a message by adding \\\\Flagged.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to star' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid'],
-        },
-      },
-      {
-        name: 'unstar',
-        description: 'Unstar a message by removing \\\\Flagged.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            uid: { type: 'string', description: 'The UID of the email to unstar' },
-            folder: { type: 'string', description: 'The folder containing the email (default: INBOX)' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'uid'],
-        },
-      },
-      {
-        name: 'list_filters',
-        description: 'List ManageSieve scripts and identify the active script.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-          },
-          required: ['accountId'],
-        },
-      },
-      {
-        name: 'get_filter',
-        description: 'Read a ManageSieve script by name.',
-        annotations: { readOnlyHint: true, destructiveHint: false },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            name: { type: 'string', description: 'The name of the SIEVE script to retrieve' },
-          },
-          required: ['accountId', 'name'],
-        },
-      },
-      {
-        name: 'set_filter',
-        description: 'Create or replace a ManageSieve script.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            name: { type: 'string', description: 'The name for the SIEVE script (e.g. "spam-filter")' },
-            content: { type: 'string', description: 'Valid SIEVE script content' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'name', 'content'],
-        },
-      },
-      {
-        name: 'delete_filter',
-        description: 'Delete an inactive ManageSieve script.',
-        annotations: { readOnlyHint: false, destructiveHint: true },
-        inputSchema: {
-          type: 'object',
-          properties: {
-            accountId: { type: 'string', description: 'The ID of the account to use' },
-            name: { type: 'string', description: 'The name of the SIEVE script to delete' },
-            confirmationId: { type: 'string', description: 'Confirmation ID returned by the first call when --confirm is enabled.' }
-          },
-          required: ['accountId', 'name'],
-        },
-      },
-    ];
-    if (readOnly) {
-      return allTools.filter(t => !WRITE_TOOLS.has(t.name));
-    }
-    if (allowedTools !== undefined) {
-      return allTools.filter(t => !WRITE_TOOLS.has(t.name) || allowedTools.has(t.name));
-    }
-    return allTools;
+    return filterToolCatalog(readOnly, allowedTools);
   }
-
   async dispatchTool(name: string, readOnly: boolean, args: Record<string, unknown>) {
     const _dispatchStart = Date.now();
+    const requestedName = name;
+    const requestedArgs = args;
     let _dispatchIsError = false;
     let _dispatchErrorMsg: string | undefined;
     const trackResult = <T extends { isError?: boolean; content?: Array<{ type: string; text?: string }> }>(result: T): T => {
@@ -808,7 +484,7 @@ export class MailMCPServer {
       return result;
     };
     try {
-      if (readOnly && WRITE_TOOLS.has(name)) {
+      if (readOnly && isWriteCall(name)) {
         return trackResult({
           content: [{
             type: 'text',
@@ -818,19 +494,20 @@ export class MailMCPServer {
         });
       }
 
-      if (this.allowedTools !== undefined && WRITE_TOOLS.has(name) && !this.allowedTools.has(name)) {
+      if (this.allowedTools !== undefined && isWriteCall(name)
+        && !isWriteCallAllowed(name, args, this.allowedTools)) {
         const list = [...this.allowedTools].join(', ') || 'none';
         return trackResult({
           content: [{
             type: 'text',
-            text: `Tool '${name}' is not available: not in the allowed tools list. Allowed write tools: ${list}. Use --allow-tools to change the list.`,
+            text: `Tool '${name}' is not available: its operation is not in the allowlist. Allowed write selectors: ${list}. Use --allow-tools to change the list.`,
           }],
           isError: true,
         });
       }
 
       // Confirmation mode gate — intercept write tools when --confirm is active
-      if (this.confirmMode && WRITE_TOOLS.has(name)) {
+      if (this.confirmMode && isWriteCall(name)) {
         const confirmationId = args.confirmationId as string | undefined;
         if (confirmationId) {
           // Second call: validate and consume the token
@@ -854,13 +531,28 @@ export class MailMCPServer {
               isError: true,
             });
           }
-          args = { ...pending.args };
+          const confirmedArgs = { ...args };
+          delete confirmedArgs.confirmationId;
+          if (pending.argsHash !== confirmationArgsHash(confirmedArgs)) {
+            return trackResult({
+              content: [{
+                type: 'text',
+                text: 'Tool arguments changed after confirmation. Request a new confirmation token for the updated action.',
+              }],
+              isError: true,
+            });
+          }
+          args = confirmedArgs;
         } else {
           // First call: create confirmation token and return prompt
           const argsWithoutId = { ...args };
           delete argsWithoutId.confirmationId;
-          const id = this.confirmStore.create(name, argsWithoutId);
+          const confirmationAccountId = argsWithoutId.accountId as string | undefined;
+          if (confirmationAccountId) {
+            await this.rateLimiter.consumeWrite(confirmationAccountId);
+          }
           const description = buildConfirmationDescription(name, args);
+          const id = this.confirmStore.create(name, argsWithoutId);
           return {
             content: [{
               type: 'text',
@@ -879,25 +571,107 @@ export class MailMCPServer {
       // Rate limit guard — before any I/O (list_accounts has no accountId, skip it)
       const accountId = (args as Record<string, unknown>)?.accountId as string | undefined;
       if (accountId) {
-        if (WRITE_TOOLS.has(name)) {
+        if (isWriteCall(name)) {
           await this.rateLimiter.consumeWrite(accountId);
         } else {
           await this.rateLimiter.consumeRead(accountId);
         }
       }
 
+      const routed = routeMailToolCall(name, args);
+      name = routed.name;
+      args = routed.args;
+
       if (name === 'list_accounts') {
-        const accounts = await getAccounts();
+        const accounts = await getConfiguredAccounts();
         return {
           content: [{
             type: 'text',
             text: JSON.stringify(
-              accounts.map((a) => ({ id: a.id, name: a.name, user: a.user })),
+              accounts.map((account) => ({
+                id: account.id,
+                name: account.name,
+                backend: account.backend ?? 'imap-smtp',
+                ...('user' in account ? { user: account.user } : {}),
+                capabilities: getAccountCapabilities(account),
+              })),
               null,
               2
             ),
           }],
         };
+      }
+
+      if (name === 'apple_mail_query' || name === 'apple_mail_mutate') {
+        const accountId = args.accountId as string;
+        const input = requireObject(args.input, 'input');
+        try {
+          const result = name === 'apple_mail_query'
+            ? await this.providerRuntime.executeAppleRead(
+                accountId,
+                args.operation as AppleReadOperation,
+                input as never,
+              )
+            : await this.providerRuntime.executeAppleWrite(
+                accountId,
+                args.operation as AppleWriteOperation,
+                input as never,
+              );
+          return formatProviderResult(
+            result,
+            `apple-mail-result://${encodeURIComponent(accountId)}/${encodeURIComponent(String(args.operation))}`,
+          );
+        } catch (error) {
+          throw new Error(providerErrorMessage(error), { cause: error });
+        }
+      }
+
+      if (name === 'microsoft_mail_query' || name === 'microsoft_mail_send') {
+        const accountId = args.accountId as string;
+        const input = requireObject(args.input, 'input');
+        try {
+          const result = name === 'microsoft_mail_query'
+            ? await this.providerRuntime.executeMicrosoftRead(
+                accountId,
+                args.operation as MicrosoftReadOperation,
+                input as never,
+              )
+            : await this.providerRuntime.executeMicrosoftWrite(
+                accountId,
+                args.operation as MicrosoftWriteOperation,
+                input as never,
+              );
+          return formatProviderResult(
+            result,
+            `microsoft-mail-result://${encodeURIComponent(accountId)}/${encodeURIComponent(String(args.operation))}`,
+          );
+        } catch (error) {
+          throw new Error(providerErrorMessage(error), { cause: error });
+        }
+      }
+
+      if (name === 'mailtrap_query' || name === 'mailtrap_mutate') {
+        const accountId = args.accountId as string;
+        const input = requireObject(args.input, 'input');
+        try {
+          const result = name === 'mailtrap_query'
+            ? await this.providerRuntime.executeMailtrapRead(
+                accountId,
+                args.action as MailtrapAction,
+                input as never,
+              )
+            : await this.providerRuntime.executeMailtrapWrite(
+                accountId,
+                args.action as MailtrapAction,
+                input as never,
+              );
+          return formatProviderResult(
+            result,
+            `mailtrap-result://${encodeURIComponent(accountId)}/${encodeURIComponent(String(args.action))}`,
+          );
+        } catch (error) {
+          throw new Error(providerErrorMessage(error), { cause: error });
+        }
       }
 
       // Email validation guard for send/draft/reply/forward tools — before SMTP/IMAP I/O
@@ -964,14 +738,40 @@ export class MailMCPServer {
       if (name === 'reply_email') {
         const service = await this.getService(args.accountId as string);
         const includeSignature = (args.includeSignature as boolean | undefined) !== false;
-        const result = await service.replyEmail(
-          args.uid as string,
-          (args.folder as string | undefined) || 'INBOX',
+        const result = args.locator
+          ? await service.replyLocatedEmail(
+              args.locator as string,
+              args.body as string,
+              args.isHtml as boolean | undefined,
+              args.cc as string | undefined,
+              args.bcc as string | undefined,
+              includeSignature,
+              args.attachments as OutgoingAttachment[] | undefined,
+            )
+          : await service.replyEmail(
+              args.uid as string,
+              (args.folder as string | undefined) || 'INBOX',
+              args.body as string,
+              args.isHtml as boolean | undefined,
+              args.cc as string | undefined,
+              args.bcc as string | undefined,
+              includeSignature,
+              args.attachments as OutgoingAttachment[] | undefined,
+            );
+        return trackResult(formatDeliveryResult(result));
+      }
+
+      if (name === 'reply_all_email') {
+        const service = await this.getService(args.accountId as string);
+        const result = await service.replyAllEmail(
+          args.locator as string,
           args.body as string,
-          args.isHtml as boolean | undefined,
-          args.cc as string | undefined,
-          args.bcc as string | undefined,
-          includeSignature
+          {
+            ...(args.isHtml !== undefined ? { isHtml: args.isHtml as boolean } : {}),
+            ...(args.bcc ? { bcc: args.bcc as string } : {}),
+            includeSignature: args.includeSignature !== false,
+            includeOriginalAttachments: args.includeOriginalAttachments === true,
+          },
         );
         return trackResult(formatDeliveryResult(result));
       }
@@ -979,39 +779,69 @@ export class MailMCPServer {
       if (name === 'forward_email') {
         const service = await this.getService(args.accountId as string);
         const includeSignature = (args.includeSignature as boolean | undefined) !== false;
-        const result = await service.forwardEmail(
-          args.uid as string,
-          (args.folder as string | undefined) || 'INBOX',
-          args.to as string,
-          (args.body as string | undefined) || '',
-          args.isHtml as boolean | undefined,
-          args.cc as string | undefined,
-          args.bcc as string | undefined,
-          includeSignature
-        );
+        const result = args.locator
+          ? await service.forwardLocatedEmail(
+              args.locator as string,
+              args.to as string,
+              (args.body as string | undefined) || '',
+              args.isHtml as boolean | undefined,
+              args.cc as string | undefined,
+              args.bcc as string | undefined,
+              includeSignature,
+              args.attachments as OutgoingAttachment[] | undefined,
+              args.includeOriginalAttachments === true,
+            )
+          : await service.forwardEmail(
+              args.uid as string,
+              (args.folder as string | undefined) || 'INBOX',
+              args.to as string,
+              (args.body as string | undefined) || '',
+              args.isHtml as boolean | undefined,
+              args.cc as string | undefined,
+              args.bcc as string | undefined,
+              includeSignature,
+              args.attachments as OutgoingAttachment[] | undefined,
+              args.includeOriginalAttachments === true,
+            );
         return trackResult(formatDeliveryResult(result));
       }
 
       if (name === 'list_emails') {
+        if ('offset' in args) {
+          throw new Error('Pagination is cursor-only; offset is not accepted');
+        }
         const service = await this.getService(args.accountId as string);
-        const messages = await (service as any).listEmails(args.folder, args.count, args.offset, args.headerOnly ?? false);
+        const messages = await service.listEmailsPage({
+          folder: args.folder as string | undefined,
+          limit: args.limit as number | undefined,
+          cursor: args.cursor as string | undefined,
+          headerOnly: args.headerOnly as boolean | undefined,
+        });
         return {
           content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],
         };
       }
 
       if (name === 'search_emails') {
+        if ('offset' in args) {
+          throw new Error('Pagination is cursor-only; offset is not accepted');
+        }
         const service = await this.getService(args.accountId as string);
-        const messages = await (service as any).searchEmails({
-          from: args.from,
-          to: args.to,
-          cc: args.cc,
-          messageId: args.messageId,
-          subject: args.subject,
-          since: args.since,
-          before: args.before,
-          keywords: args.keywords,
-        }, args.folder, args.count, args.offset);
+        const messages = await service.searchEmailsPage({
+          from: args.from as string | undefined,
+          to: args.to as string | undefined,
+          cc: args.cc as string | undefined,
+          messageId: args.messageId as string | undefined,
+          subject: args.subject as string | undefined,
+          since: args.since as string | undefined,
+          before: args.before as string | undefined,
+          keywords: args.keywords as string | undefined,
+        }, {
+          folder: args.folder as string | undefined,
+          limit: args.limit as number | undefined,
+          cursor: args.cursor as string | undefined,
+          headerOnly: args.headerOnly as boolean | undefined,
+        });
         return {
           content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],
         };
@@ -1019,18 +849,49 @@ export class MailMCPServer {
 
       if (name === 'read_email') {
         const service = await this.getService(args.accountId as string);
-        const content = await service.readEmail(
-          args.uid as string,
-          (args.folder as string | undefined) ?? 'INBOX'
-        );
+        const content = args.locator
+          ? await service.readLocatedEmail(args.locator as string)
+          : await service.readEmail(
+              args.uid as string,
+              (args.folder as string | undefined) ?? 'INBOX',
+            );
         return { content: [{ type: 'text', text: content }] };
       }
 
       if (name === 'list_folders') {
         const service = await this.getService(args.accountId as string);
-        const folders = await service.listFolders();
+        const folders = await service.listMailboxMetadata();
         return {
           content: [{ type: 'text', text: JSON.stringify(folders, null, 2) }],
+        };
+      }
+
+      if (name === 'get_raw_email') {
+        const service = await this.getService(args.accountId as string);
+        const maxBytes = Math.min(
+          Math.max((args.maxBytes as number | undefined) ?? 10 * 1024 * 1024, 1),
+          50 * 1024 * 1024,
+        );
+        const raw = await service.readRawEmail(args.locator as string, maxBytes);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                locator: raw.locator,
+                mediaType: raw.mediaType,
+                size: raw.size,
+              }, null, 2),
+            },
+            {
+              type: 'resource',
+              resource: {
+                uri: `mail-message://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(raw.locator)}`,
+                mimeType: raw.mediaType,
+                blob: raw.contentBase64,
+              },
+            },
+          ],
         };
       }
 
@@ -1049,21 +910,29 @@ export class MailMCPServer {
         const filename = args.filename as string;
         const uid = args.uid as string;
         const service = await this.getService(args.accountId as string);
-        const { content, contentType } = await service.downloadAttachment(
-          uid,
-          filename,
-          (args.folder as string | undefined) ?? 'INBOX'
-        );
+        const locator = args.locator as string | undefined;
+        const { content, contentType } = locator
+          ? await service.downloadLocatedAttachment(locator, filename)
+          : await service.downloadAttachment(
+              uid,
+              filename,
+              (args.folder as string | undefined) ?? 'INBOX'
+            );
         return {
           content: [
             {
               type: 'text',
-              text: JSON.stringify({ filename, contentType, bytes: content.length }, null, 2),
+              text: JSON.stringify({
+                ...(locator ? { locator } : { uid }),
+                filename,
+                contentType,
+                bytes: content.length,
+              }, null, 2),
             },
             {
               type: 'resource',
               resource: {
-                uri: `mail-attachment://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(uid)}/${encodeURIComponent(filename)}`,
+                uri: `mail-attachment://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(locator ?? uid)}/${encodeURIComponent(filename)}`,
                 mimeType: contentType,
                 blob: content.toString('base64'),
               },
@@ -1074,11 +943,14 @@ export class MailMCPServer {
 
       if (name === 'extract_attachment_text') {
         const service = await this.getService(args.accountId as string);
-        const content = await service.extractAttachmentText(
-          args.uid as string,
-          args.filename as string,
-          (args.folder as string | undefined) ?? 'INBOX'
-        );
+        const locator = args.locator as string | undefined;
+        const content = locator
+          ? await service.extractLocatedAttachmentText(locator, args.filename as string)
+          : await service.extractAttachmentText(
+              args.uid as string,
+              args.filename as string,
+              (args.folder as string | undefined) ?? 'INBOX'
+            );
         return { content: [{ type: 'text', text: content }] };
       }
 
@@ -1101,12 +973,14 @@ export class MailMCPServer {
         }
         const service = await this.getService(args.accountId as string);
         const sentFolder = await service.resolveSentFolder(args.sentFolder as string | undefined);
-        const matches = await service.searchEmails(
+        const page = await service.searchEmailsPage(
           { messageId },
-          sentFolder,
-          (args.count as number | undefined) ?? 10,
-          (args.offset as number | undefined) ?? 0
+          {
+            folder: sentFolder,
+            limit: Math.min((args.count as number | undefined) ?? 10, 100),
+          },
         );
+        const matches = page.items;
         return {
           content: [{
             type: 'text',
@@ -1126,76 +1000,108 @@ export class MailMCPServer {
 
       if (name === 'send_email') {
         const service = await this.getService(args.accountId as string);
-        const includeSignature = (args.includeSignature as boolean | undefined) !== false;
-        const result = await service.sendEmail(
-          args.to as string,
-          args.subject as string,
-          args.body as string,
-          args.isHtml as boolean | undefined,
-          args.cc as string | undefined,
-          args.bcc as string | undefined,
-          includeSignature
-        );
+        const result = usesExtendedOutgoingArgs(args)
+          ? await service.sendMessage(outgoingMessageFromArgs(args))
+          : await service.sendEmail(
+              args.to as string,
+              args.subject as string,
+              args.body as string,
+              args.isHtml as boolean | undefined,
+              args.cc as string | undefined,
+              args.bcc as string | undefined,
+              args.includeSignature !== false,
+            );
         return trackResult(formatDeliveryResult(result));
       }
 
       if (name === 'create_draft') {
         const service = await this.getService(args.accountId as string);
-        const includeSignature = (args.includeSignature as boolean | undefined) !== false;
-        await service.createDraft(
-          args.to as string,
-          args.subject as string,
-          args.body as string,
-          args.isHtml as boolean | undefined,
-          args.cc as string | undefined,
-          args.bcc as string | undefined,
-          includeSignature
-        );
+        const draft = await service.createDraftMessage(outgoingMessageFromArgs(args));
         return {
-          content: [{ type: 'text', text: `Draft successfully created in Drafts folder.` }],
+          content: [{ type: 'text', text: JSON.stringify(draft, null, 2) }],
         };
       }
 
       if (name === 'move_email') {
         const service = await this.getService(args.accountId as string);
-        const uid = args.uid as string;
-        const sourceFolder = args.sourceFolder as string;
         const targetFolder = args.targetFolder as string;
-        await service.moveMessage(uid, sourceFolder, targetFolder);
-        service.invalidateBodyCache(sourceFolder, uid);
+        if (args.locator) {
+          await service.moveLocatedEmail(args.locator as string, targetFolder);
+        } else {
+          await service.moveMessage(
+            args.uid as string,
+            args.sourceFolder as string,
+            targetFolder,
+          );
+        }
         return {
           content: [{
             type: 'text',
-            text: `Email ${uid} moved from ${sourceFolder} to ${targetFolder}.`,
+            text: JSON.stringify({ moved: true, targetFolder }, null, 2),
           }],
         };
       }
 
+      if (name === 'create_mailbox') {
+        const service = await this.getService(args.accountId as string);
+        const result = await service.createMailbox(args.path as string);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+
+      if (name === 'rename_mailbox') {
+        const service = await this.getService(args.accountId as string);
+        const result = await service.renameMailbox(args.path as string, args.newPath as string);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+
+      if (name === 'delete_mailbox') {
+        const service = await this.getService(args.accountId as string);
+        const result = await service.deleteMailbox(args.path as string);
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+
+      if (name === 'copy_email') {
+        const service = await this.getService(args.accountId as string);
+        const result = await service.copyEmail(
+          args.locator as string,
+          args.targetFolder as string,
+        );
+        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+      }
+
       if (name === 'modify_labels') {
         const service = await this.getService(args.accountId as string);
-        await service.modifyLabels(
-          args.uid as string,
-          args.folder as string,
-          (args.addLabels as string[] | undefined) ?? [],
-          (args.removeLabels as string[] | undefined) ?? []
-        );
+        const addLabels = (args.addLabels as string[] | undefined) ?? [];
+        const removeLabels = (args.removeLabels as string[] | undefined) ?? [];
+        if (args.locator) {
+          await service.modifyLocatedLabels(args.locator as string, addLabels, removeLabels);
+        } else {
+          await service.modifyLabels(
+            args.uid as string,
+            (args.folder as string | undefined) ?? 'INBOX',
+            addLabels,
+            removeLabels,
+          );
+        }
         return {
           content: [{
             type: 'text',
-            text: `Labels updated for email ${args.uid as string} in ${args.folder as string}.`,
+            text: args.locator
+              ? `Labels updated for message ${args.locator as string}.`
+              : `Labels updated for email ${args.uid as string} in ${(args.folder as string | undefined) ?? 'INBOX'}.`,
           }],
         };
       }
 
       if (name === 'batch_operations') {
         const service = await this.getService(args.accountId as string);
-        const action = args.action as 'move' | 'delete' | 'label';
+        const action = args.action as 'move' | 'copy' | 'delete' | 'label';
         let operation: Parameters<MailService['batchOperations']>[2];
 
-        if (action === 'move') {
+        if (action === 'move' || action === 'copy') {
           const targetFolder = args.targetFolder as string | undefined;
-          if (!targetFolder) throw new Error('targetFolder is required for move action');
-          operation = { type: 'move', targetFolder };
+          if (!targetFolder) throw new Error(`targetFolder is required for ${action} action`);
+          operation = { type: action, targetFolder };
         } else if (action === 'delete') {
           operation = { type: 'delete' };
         } else if (action === 'label') {
@@ -1208,22 +1114,25 @@ export class MailMCPServer {
           throw new Error(`Unknown action: ${String(args.action)}`);
         }
 
-        const result = await service.batchOperations(
-          args.uids as string[],
-          args.folder as string,
-          operation
-        );
+        const result = Array.isArray(args.locators)
+          ? await service.batchLocatedOperations(args.locators as string[], operation)
+          : await service.batchOperations(
+              args.uids as string[],
+              args.folder as string,
+              operation,
+            );
         return {
           content: [{
             type: 'text',
-            text: `Batch ${action} completed. ${result.processed} email(s) processed.`,
+            text: JSON.stringify({ action, ...result }, null, 2),
           }],
         };
       }
 
       if (name === 'register_oauth2_account') {
         const accountId = args.accountId as string;
-        const accounts = await getAccounts();
+        const tokenEndpoint = validateOAuth2TokenEndpoint(args.tokenEndpoint as string);
+        const accounts = await getConfiguredAccounts();
         if (!accounts.some(account => account.id === accountId)) {
           throw new Error(`Account ${accountId} not found in configuration.`);
         }
@@ -1233,7 +1142,7 @@ export class MailMCPServer {
           clientId: args.clientId,
           clientSecret: args.clientSecret,
           refreshToken: args.refreshToken,
-          tokenEndpoint: args.tokenEndpoint,
+          tokenEndpoint,
         }));
         return {
           content: [{
@@ -1273,9 +1182,12 @@ export class MailMCPServer {
 
       if (name === 'use_template') {
         const templateId = args.templateId as string;
+        const accountId = args.accountId as string | undefined;
         const variables = (args.variables as Record<string, string> | undefined) ?? {};
         const templates = await getTemplates();
-        const template = templates.find(t => t.id === templateId);
+        const template = templates.find(t =>
+          t.id === templateId && (!accountId || !t.accountId || t.accountId === accountId)
+        );
         if (!template) {
           return trackResult({
             content: [{ type: 'text', text: `Template not found: "${templateId}". Use list_templates to see available templates.` }],
@@ -1292,7 +1204,7 @@ export class MailMCPServer {
         if (args.to !== undefined) result.to = args.to;
         if (args.cc !== undefined) result.cc = args.cc;
         if (args.bcc !== undefined) result.bcc = args.bcc;
-        if (args.accountId !== undefined) result.accountId = args.accountId;
+        if (accountId !== undefined) result.accountId = accountId;
         return {
           content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
         };
@@ -1300,46 +1212,95 @@ export class MailMCPServer {
 
       if (name === 'delete_email') {
         const service = await this.getService(args.accountId as string);
-        const folder = (args.folder as string | undefined) ?? 'INBOX';
-        await service.deleteEmail(args.uid as string, folder);
+        if (args.locator) {
+          await service.deleteLocatedEmail(
+            args.locator as string,
+            args.trashFolder as string | undefined,
+          );
+        } else {
+          await service.deleteEmail(
+            args.uid as string,
+            (args.folder as string | undefined) ?? 'INBOX',
+            args.trashFolder as string | undefined,
+          );
+        }
         return {
-          content: [{ type: 'text', text: `Email ${args.uid as string} deleted from ${folder}.` }],
+          content: [{ type: 'text', text: JSON.stringify({ movedToTrash: true }, null, 2) }],
+        };
+      }
+
+      if (name === 'permanently_delete_email') {
+        const service = await this.getService(args.accountId as string);
+        if (args.locator) {
+          await service.permanentlyDeleteLocatedEmail(args.locator as string);
+        } else {
+          await service.permanentlyDeleteEmail(
+            args.uid as string,
+            (args.folder as string | undefined) ?? 'Trash',
+          );
+        }
+        return {
+          content: [{ type: 'text', text: JSON.stringify({ permanentlyDeleted: true }, null, 2) }],
         };
       }
 
       if (name === 'mark_read') {
         const service = await this.getService(args.accountId as string);
         const folder = (args.folder as string | undefined) ?? 'INBOX';
-        await service.modifyLabels(args.uid as string, folder, ['\\Seen'], []);
+        if (args.locator) {
+          await service.modifyLocatedLabels(args.locator as string, ['\\Seen'], []);
+        } else {
+          await service.modifyLabels(args.uid as string, folder, ['\\Seen'], []);
+        }
         return {
-          content: [{ type: 'text', text: `Email ${args.uid as string} marked as read in ${folder}.` }],
+          content: [{ type: 'text', text: args.locator
+            ? `Message ${args.locator as string} marked as read.`
+            : `Email ${args.uid as string} marked as read in ${folder}.` }],
         };
       }
 
       if (name === 'mark_unread') {
         const service = await this.getService(args.accountId as string);
         const folder = (args.folder as string | undefined) ?? 'INBOX';
-        await service.modifyLabels(args.uid as string, folder, [], ['\\Seen']);
+        if (args.locator) {
+          await service.modifyLocatedLabels(args.locator as string, [], ['\\Seen']);
+        } else {
+          await service.modifyLabels(args.uid as string, folder, [], ['\\Seen']);
+        }
         return {
-          content: [{ type: 'text', text: `Email ${args.uid as string} marked as unread in ${folder}.` }],
+          content: [{ type: 'text', text: args.locator
+            ? `Message ${args.locator as string} marked as unread.`
+            : `Email ${args.uid as string} marked as unread in ${folder}.` }],
         };
       }
 
       if (name === 'star') {
         const service = await this.getService(args.accountId as string);
         const folder = (args.folder as string | undefined) ?? 'INBOX';
-        await service.modifyLabels(args.uid as string, folder, ['\\Flagged'], []);
+        if (args.locator) {
+          await service.modifyLocatedLabels(args.locator as string, ['\\Flagged'], []);
+        } else {
+          await service.modifyLabels(args.uid as string, folder, ['\\Flagged'], []);
+        }
         return {
-          content: [{ type: 'text', text: `Email ${args.uid as string} starred in ${folder}.` }],
+          content: [{ type: 'text', text: args.locator
+            ? `Message ${args.locator as string} starred.`
+            : `Email ${args.uid as string} starred in ${folder}.` }],
         };
       }
 
       if (name === 'unstar') {
         const service = await this.getService(args.accountId as string);
         const folder = (args.folder as string | undefined) ?? 'INBOX';
-        await service.modifyLabels(args.uid as string, folder, [], ['\\Flagged']);
+        if (args.locator) {
+          await service.modifyLocatedLabels(args.locator as string, [], ['\\Flagged']);
+        } else {
+          await service.modifyLabels(args.uid as string, folder, [], ['\\Flagged']);
+        }
         return {
-          content: [{ type: 'text', text: `Email ${args.uid as string} unstarred in ${folder}.` }],
+          content: [{ type: 'text', text: args.locator
+            ? `Message ${args.locator as string} unstarred.`
+            : `Email ${args.uid as string} unstarred in ${folder}.` }],
         };
       }
 
@@ -1406,12 +1367,12 @@ export class MailMCPServer {
       };
     } finally {
       if (this.auditLogger) {
-        const _accountId = (args as Record<string, unknown>)?.accountId as string | undefined;
+        const _accountId = requestedArgs.accountId as string | undefined;
         await this.auditLogger.log({
           timestamp: new Date().toISOString(),
-          tool: name,
+          tool: requestedName,
           ...(_accountId !== undefined ? { accountId: _accountId } : {}),
-          args,
+          args: requestedArgs,
           success: !_dispatchIsError,
           durationMs: Date.now() - _dispatchStart,
           ...(_dispatchIsError ? { error: _dispatchErrorMsg } : {}),
@@ -1434,6 +1395,10 @@ export class MailMCPServer {
 
       this.inFlightCount++;
       try {
+        const advertised = this.getTools(this.readOnly, this.allowedTools);
+        if (!advertised.some(tool => tool.name === request.params.name)) {
+          throw new McpError(ErrorCode.MethodNotFound, `Unknown tool: ${request.params.name}`);
+        }
         return await this.dispatchTool(
           request.params.name,
           this.readOnly,
@@ -1442,6 +1407,31 @@ export class MailMCPServer {
       } finally {
         this.inFlightCount--;
       }
+
+    });
+
+    this.server.setRequestHandler(ListResourcesRequestSchema, async () => ({
+      resources: [MAIL_AGENT_GUIDE_RESOURCE],
+    }));
+
+    this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
+      const resource = readMailAgentGuideResource(request.params.uri);
+      if (!resource) {
+        throw new McpError(ErrorCode.InvalidParams, `Unknown resource: ${request.params.uri}`);
+      }
+      return resource;
+    });
+
+    this.server.setRequestHandler(ListPromptsRequestSchema, async () => ({
+      prompts: [MAIL_AGENT_GUIDE_PROMPT],
+    }));
+
+    this.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+      const prompt = getMailAgentGuidePrompt(request.params.name);
+      if (!prompt) {
+        throw new McpError(ErrorCode.InvalidParams, `Unknown prompt: ${request.params.name}`);
+      }
+      return prompt;
     });
   }
 
@@ -1520,8 +1510,8 @@ Commands:
 
 Options:
   --read-only                 Start in read-only mode (no send/move/label tools)
-  --allow-tools t1,t2,...     Allow only specific write tools (comma-separated). Mutually exclusive with --read-only.
-  --confirm                   Enable confirmation mode; write tools require a two-step call (first returns confirmationId, second executes)
+  --allow-tools op1,op2,...   Allow only specific write operations (comma-separated). Mutually exclusive with --read-only.
+  --confirm                   Enable confirmation mode; writes require a two-step call (first returns confirmationId, second executes)
   --audit-log                 Append a JSONL entry for every tool call to ~/.config/mail-mcp/audit.log
   --redact                    Mask credit card numbers, SSNs, passwords, and API keys in email content before returning to AI
   --http                      Run one shared Streamable HTTP service instead of stdio
@@ -1530,6 +1520,7 @@ Options:
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
   --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
+  --install-claude-code       Register an auto-updating user-scoped MCP server in Claude Code
   --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
   --install-codex-stdio       Write an auto-updating per-client stdio command to Codex config
   --auto-update-seconds N     Managed HTTP service update check interval (minimum: 60)
@@ -1567,7 +1558,7 @@ Options:
   installRuntimeArgs.push('--audit-log', '--redact');
   const npxArgs = buildMailMcpNpxArgs(installRuntimeArgs);
 
-  if (values['install-codex-stdio'] || values['install-claude']) {
+  if (values['install-codex-stdio'] || values['install-claude'] || values['install-claude-code']) {
     await prepareMailMcpNpxRuntime();
   }
 
@@ -1575,36 +1566,57 @@ Options:
     const { join } = await import('node:path');
     const { homedir } = await import('node:os');
 
-    const configPath = join(homedir(), '.codex', 'config.toml');
+    const codexHome = join(homedir(), '.codex');
+    const configPath = join(codexHome, 'config.toml');
     try {
       if (process.platform === 'win32') {
-        const service = await installWindowsHttpService({ runtimeArgs: installRuntimeArgs });
-        const result = await installCodexHttp(configPath, {
-          url: service.url,
-          bearerTokenEnvVar: service.bearerTokenEnvVar,
+        const expectedUrl = `http://${SHARED_HTTP_HOST}:${SHARED_HTTP_PORT}/mcp`;
+        const bundle = await installCodexBundle(configPath, codexHome, {
+          transport: 'http',
+          options: {
+            url: expectedUrl,
+            bearerTokenEnvVar: HTTP_BEARER_TOKEN_ENV,
+          },
         });
-        console.log(result.changed
-          ? `mail-mcp shared HTTP service configured for Codex at: ${result.configPath}`
+        let service;
+        try {
+          service = await installWindowsHttpService({
+            runtimeArgs: installRuntimeArgs,
+            host: SHARED_HTTP_HOST,
+            port: SHARED_HTTP_PORT,
+            bearerTokenEnvVar: HTTP_BEARER_TOKEN_ENV,
+          });
+        } catch (error) {
+          await bundle.rollback();
+          throw error;
+        }
+        console.log(bundle.config.changed
+          ? `mail-mcp shared HTTP service configured for Codex at: ${bundle.config.configPath}`
           : `Codex already uses the shared mail-mcp HTTP service.`);
-        if (result.backupPath) {
-          console.log(`Previous config backed up to: ${result.backupPath}`);
+        if (bundle.config.backupPath) {
+          console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
         }
         console.log(`Service task: ${service.taskName}`);
         console.log(`Health check: ${service.healthUrl}`);
+        console.log(`Codex skill: ${bundle.skill.skillPath}`);
         console.log('Service status: healthy');
         console.log('Restart Codex to load the bearer token from the user environment.');
         process.exit(0);
       }
 
       await prepareMailMcpNpxRuntime();
-      const result = await installCodex(configPath, npxArgs);
-      console.log(result.changed
-        ? `mail-mcp configured for Codex at: ${result.configPath}`
+      const bundle = await installCodexBundle(configPath, codexHome, {
+        transport: 'stdio',
+        npxArgs,
+      });
+      console.log(bundle.config.changed
+        ? `mail-mcp configured for Codex at: ${bundle.config.configPath}`
         : `Codex already tracks ${MAIL_MCP_LATEST_SPEC}.`);
-      if (result.backupPath) {
-        console.log(`Previous config backed up to: ${result.backupPath}`);
+      if (bundle.config.backupPath) {
+        console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1616,16 +1628,21 @@ Options:
   if (values['install-codex-stdio']) {
     const { join } = await import('node:path');
     const { homedir } = await import('node:os');
-    const configPath = join(homedir(), '.codex', 'config.toml');
+    const codexHome = join(homedir(), '.codex');
+    const configPath = join(codexHome, 'config.toml');
     try {
-      const result = await installCodex(configPath, npxArgs);
-      console.log(result.changed
-        ? `mail-mcp stdio command configured for Codex at: ${result.configPath}`
+      const bundle = await installCodexBundle(configPath, codexHome, {
+        transport: 'stdio',
+        npxArgs,
+      });
+      console.log(bundle.config.changed
+        ? `mail-mcp stdio command configured for Codex at: ${bundle.config.configPath}`
         : `Codex already tracks ${MAIL_MCP_LATEST_SPEC} over stdio.`);
-      if (result.backupPath) {
-        console.log(`Previous config backed up to: ${result.backupPath}`);
+      if (bundle.config.backupPath) {
+        console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1649,6 +1666,20 @@ Options:
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
       console.log('Restart Claude Desktop to activate.');
+    } catch (err) {
+      console.error(`Error: ${(err as Error).message}`);
+      process.exit(1);
+    }
+    process.exit(0);
+  }
+
+  if (values['install-claude-code']) {
+    try {
+      const result = await installClaudeCode(npxArgs);
+      console.log('mail-mcp configured in Claude Code user scope.');
+      if (result.stdout) console.log(result.stdout);
+      console.log(`Server command: npx ${npxArgs.join(' ')}`);
+      console.log('Restart Claude Code to activate.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
       process.exit(1);

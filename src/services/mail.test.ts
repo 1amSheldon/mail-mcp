@@ -2,6 +2,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 const mockImapConnect = vi.fn().mockResolvedValue(undefined);
 const mockImapAppendMessage = vi.fn().mockResolvedValue({ uid: 101 });
+const mockGetMailboxIdentity = vi.fn().mockResolvedValue({ path: 'Drafts', uidValidity: '1' });
 const mockFindSpecialUseFolder = vi.fn().mockResolvedValue('Sent');
 const mockSmtpConnect = vi.fn().mockResolvedValue(undefined);
 const mockSmtpDisconnect = vi.fn();
@@ -19,7 +20,8 @@ const mockGetMailboxStatus = vi.fn().mockResolvedValue([
 ]);
 const mockListFolders = vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts']);
 const mockScanSenderEnvelopes = vi.fn().mockResolvedValue([]);
-const mockSearchMessages = vi.fn().mockResolvedValue([]);
+const mockSearchMessageUids = vi.fn().mockResolvedValue([]);
+const mockFetchMessagesByUids = vi.fn().mockResolvedValue([]);
 
 vi.mock('../protocol/imap.js', () => {
   return {
@@ -27,13 +29,15 @@ vi.mock('../protocol/imap.js', () => {
       return {
         connect: mockImapConnect,
         appendMessage: mockImapAppendMessage,
+        getMailboxIdentity: mockGetMailboxIdentity,
         findSpecialUseFolder: mockFindSpecialUseFolder,
         fetchAttachmentSize: mockFetchAttachmentSize,
         fetchMessageBody: mockFetchMessageBody,
         getMailboxStatus: mockGetMailboxStatus,
         listFolders: mockListFolders,
         scanSenderEnvelopes: mockScanSenderEnvelopes,
-        searchMessages: mockSearchMessages,
+        searchMessageUids: mockSearchMessageUids,
+        fetchMessagesByUids: mockFetchMessagesByUids,
       };
     }),
   };
@@ -58,7 +62,33 @@ vi.mock('../protocol/smtp.js', () => {
   }
   return {
     SmtpClient: vi.fn(function () {
-      return { connect: mockSmtpConnect, disconnect: mockSmtpDisconnect, send: mockSmtpSend };
+      return {
+        connect: mockSmtpConnect,
+        disconnect: mockSmtpDisconnect,
+        sendMessage: (message: any) => {
+          const threadingHeaders = {
+            ...(message.threading?.inReplyTo ? { 'In-Reply-To': message.threading.inReplyTo } : {}),
+            ...(message.threading?.references ? { References: message.threading.references } : {}),
+            ...(message.headers ?? {}),
+          };
+          const args = [
+            message.to,
+            message.subject,
+            message.html ?? message.text ?? '',
+            message.html !== undefined,
+            message.cc,
+            message.bcc,
+          ];
+          return Object.keys(threadingHeaders).length > 0
+            ? mockSmtpSend(...args, threadingHeaders)
+            : mockSmtpSend(...args);
+        },
+        composeMessage: (message: any) => ({
+          rawMessage: message.html ?? message.text ?? '',
+          messageId: '<draft@example.com>',
+          envelope: {},
+        }),
+      };
     }),
     SmtpRecipientRejectedError: MockSmtpRecipientRejectedError,
     SmtpSendError: MockSmtpSendError,
@@ -235,16 +265,17 @@ describe('MailService searchable delivery identifiers', () => {
   it('maps to, cc, and Message-ID to IMAP search criteria', async () => {
     const account = { id: 'test', name: 'Test', user: 'test@example.com' } as any;
     const service = new MailService(account, false);
-    await service.searchEmails({
+    mockGetMailboxIdentity.mockResolvedValueOnce({ path: 'Sent', uidValidity: '1' });
+    await service.searchEmailsPage({
       to: 'to@example.com',
       cc: 'cc@example.com',
       messageId: '<delivery@example.com>',
-    }, 'Sent', 5, 2);
-    expect(mockSearchMessages).toHaveBeenCalledWith({
+    }, { folder: 'Sent', limit: 5 });
+    expect(mockSearchMessageUids).toHaveBeenCalledWith({
       to: 'to@example.com',
       cc: 'cc@example.com',
       header: { 'Message-ID': '<delivery@example.com>' },
-    }, 'Sent', 5, 2);
+    }, 'Sent', 10_000);
   });
 });
 
@@ -486,6 +517,28 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     const result = await service.readEmail('1');
     expect(result).toContain('**Unsubscribe:** https://example.com/unsub');
     expect(result).toContain('**Unsubscribe (one-click):** yes');
+  });
+
+  it('redacts human-readable headers and body content when enabled', async () => {
+    mockFetchMessageBody.mockResolvedValue(makeParsedMail({}, {
+      from: { text: 'password: from-secret' },
+      to: { text: 'Card 4111 1111 1111 1111' },
+      cc: { text: 'SSN 123-45-6789' },
+      subject: 'password: subject-secret',
+      text: 'API key sk-abcdefghijklmnopqrstuvwx',
+    }));
+    const service = new MailService(account, true);
+
+    const result = await service.readEmail('redacted');
+
+    expect(result).not.toContain('from-secret');
+    expect(result).not.toContain('4111 1111 1111 1111');
+    expect(result).not.toContain('123-45-6789');
+    expect(result).not.toContain('subject-secret');
+    expect(result).not.toContain('sk-abcdefghijklmnopqrstuvwx');
+    expect(result).toContain('[REDACTED CC]');
+    expect(result).toContain('[REDACTED SSN]');
+    expect(result).toContain('[REDACTED KEY]');
   });
 
   it('shares one IMAP body fetch between concurrent reads', async () => {
@@ -957,6 +1010,21 @@ describe('MailService extractContacts', () => {
     expect(result[0].name).toBe('Alice Smith');
   });
 
+  it('redacts sensitive contact display names without changing email identifiers', async () => {
+    mockScanSenderEnvelopes.mockResolvedValue([{
+      name: 'password: display-secret',
+      email: 'alice@example.com',
+      date: new Date('2024-01-15T00:00:00Z'),
+    }]);
+    const service = new MailService(account, true);
+    await service.connect();
+
+    await expect(service.extractContacts()).resolves.toEqual([expect.objectContaining({
+      name: 'password: [REDACTED]',
+      email: 'alice@example.com',
+    })]);
+  });
+
   it('sets lastSeen to ISO-8601 string of the most recent message date', async () => {
     const latestDate = new Date('2024-02-01T12:00:00Z');
     mockScanSenderEnvelopes.mockResolvedValue([
@@ -1102,8 +1170,8 @@ describe('MailService.extractAttachmentText', () => {
     return Buffer.from(pdf, 'latin1');
   }
 
-  function serviceReturning(content: Buffer, contentType: string): MailService {
-    const service = new MailService(account, false);
+  function serviceReturning(content: Buffer, contentType: string, redact = false): MailService {
+    const service = new MailService(account, redact);
     vi.spyOn(service as any, 'downloadAttachment').mockResolvedValue({ content, contentType });
     return service;
   }
@@ -1117,6 +1185,23 @@ describe('MailService.extractAttachmentText', () => {
   it('returns text/* attachments as UTF-8', async () => {
     const service = serviceReturning(Buffer.from('plain body'), 'text/plain');
     await expect(service.extractAttachmentText('1', 'note.txt')).resolves.toBe('plain body');
+  });
+
+  it('redacts sensitive values extracted from text attachments', async () => {
+    const service = serviceReturning(
+      Buffer.from('password: hunter2; card 4111 1111 1111 1111'),
+      'text/plain',
+      true,
+    );
+    const text = await service.extractAttachmentText('1', 'note.txt');
+    expect(text).toBe('password: [REDACTED] card [REDACTED CC]');
+  });
+
+  it('redacts sensitive values extracted from PDF attachments', async () => {
+    const service = serviceReturning(buildPdf('SSN 123-45-6789'), 'application/pdf', true);
+    const text = await service.extractAttachmentText('1', 'invoice.pdf');
+    expect(text).toContain('[REDACTED SSN]');
+    expect(text).not.toContain('123-45-6789');
   });
 
   it('rejects unsupported content types', async () => {

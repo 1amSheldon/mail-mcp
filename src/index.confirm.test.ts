@@ -15,6 +15,9 @@ vi.mock('./config.js', () => ({
   getAccounts: vi.fn().mockResolvedValue([
     { id: 'acc1', name: 'Test', user: 'test@example.com', host: 'imap.example.com', port: 993, smtpHost: 'smtp.example.com', smtpPort: 587, secure: true }
   ]),
+  getConfiguredAccounts: vi.fn().mockResolvedValue([
+    { id: 'acc1', name: 'Test', user: 'test@example.com', host: 'imap.example.com', port: 993, smtpHost: 'smtp.example.com', smtpPort: 587, secure: true }
+  ]),
   AUDIT_LOG_PATH: '/tmp/test-audit.log',
 }));
 
@@ -60,41 +63,9 @@ const mockDeleteEmail = vi.fn().mockResolvedValue(undefined);
 
 import { MailMCPServer } from './index.js';
 
-const WRITE_TOOL_NAMES = [
-  'send_email',
-  'create_draft',
-  'move_email',
-  'modify_labels',
-  'register_oauth2_account',
-  'batch_operations',
-  'reply_email',
-  'forward_email',
-  'delete_email',
-  'mark_read',
-  'mark_unread',
-  'star',
-  'unstar',
-  'set_filter',
-  'delete_filter',
-];
+const WRITE_TOOL_NAMES = ['mail_mutate'];
 
-const READ_TOOL_NAMES = [
-  'list_accounts',
-  'list_emails',
-  'search_emails',
-  'verify_sent_message',
-  'read_email',
-  'list_folders',
-  'get_thread',
-  'get_attachment',
-  'extract_attachment_text',
-  'extract_contacts',
-  'mailbox_stats',
-  'list_templates',
-  'use_template',
-  'list_filters',
-  'get_filter',
-];
+const READ_TOOL_NAMES = ['list_accounts', 'mail_query'];
 
 describe('CONF-01: MailMCPServer confirmMode constructor', () => {
   it('constructs with confirmMode=false by default (4th param omitted)', () => {
@@ -160,6 +131,75 @@ describe('CONF-03: write tool schemas include confirmationId', () => {
         `Read tool ${toolName} should not have confirmationId`
       ).toBeUndefined();
     }
+  });
+});
+
+describe('CONF-03b: public mutation router confirmation', () => {
+  it('does not retain a token when a routed request is invalid', async () => {
+    const server = new MailMCPServer(false, undefined, undefined, true);
+    const result = await (server as any).dispatchTool('mail_mutate', false, {
+      operation: 'sendMessage',
+      input: {
+        to: 'alice@example.com',
+        subject: 'Hi',
+        body: 'Hello',
+      },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('accountId is required');
+    expect((server as any).confirmStore.size).toBe(0);
+  });
+
+  it('binds the token to the public operation and nested input', async () => {
+    const server = new MailMCPServer(false, undefined, undefined, true);
+    const request = {
+      accountId: 'acc1',
+      operation: 'sendMessage',
+      input: {
+        to: 'alice@example.com',
+        subject: 'Project update',
+        body: 'Hello',
+      },
+    };
+
+    const first = await (server as any).dispatchTool('mail_mutate', false, request);
+    const challenge = JSON.parse(first.content[0].text);
+    expect(challenge).toMatchObject({
+      confirmationRequired: true,
+      action: 'mail_mutate',
+      description: expect.stringContaining('alice@example.com'),
+    });
+
+    const changed = await (server as any).dispatchTool('mail_mutate', false, {
+      ...request,
+      input: { ...request.input, to: 'mallory@example.com' },
+      confirmationId: challenge.confirmationId,
+    });
+    expect(changed.isError).toBe(true);
+    expect(changed.content[0].text).toContain('arguments changed');
+  });
+
+  it('routes the confirmed second call to the existing send handler', async () => {
+    const server = new MailMCPServer(false, undefined, undefined, true);
+    const request = {
+      accountId: 'acc1',
+      operation: 'sendMessage',
+      input: {
+        to: 'alice@example.com',
+        subject: 'Project update',
+        body: 'Hello',
+      },
+    };
+    const first = await (server as any).dispatchTool('mail_mutate', false, request);
+    const { confirmationId } = JSON.parse(first.content[0].text);
+
+    const confirmed = await (server as any).dispatchTool('mail_mutate', false, {
+      ...request,
+      confirmationId,
+    });
+    expect(confirmed.isError).not.toBe(true);
+    expect(confirmed.content[0].text).not.toContain('confirmationRequired');
   });
 });
 
@@ -283,7 +323,7 @@ describe('CONF-05: second write call with valid confirmationId executes', () => 
     expect(thirdResult.content[0].text).toContain('invalid or expired');
   });
 
-  it('executes the exact arguments that were confirmed, not replacement arguments', async () => {
+  it('rejects arguments changed after confirmation', async () => {
     const sendEmail = vi.fn().mockResolvedValue({
       status: 'sent_and_saved',
       smtpAccepted: true,
@@ -302,7 +342,7 @@ describe('CONF-05: second write call with valid confirmationId executes', () => 
     });
     const { confirmationId } = JSON.parse(first.content[0].text);
 
-    await (server as any).dispatchTool('send_email', false, {
+    const result = await (server as any).dispatchTool('send_email', false, {
       accountId: 'acc1',
       to: 'attacker@example.com',
       subject: 'Changed subject',
@@ -310,15 +350,9 @@ describe('CONF-05: second write call with valid confirmationId executes', () => 
       confirmationId,
     });
 
-    expect(sendEmail).toHaveBeenCalledWith(
-      'alice@example.com',
-      'Approved subject',
-      'Approved body',
-      undefined,
-      undefined,
-      undefined,
-      true
-    );
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('arguments changed');
+    expect(sendEmail).not.toHaveBeenCalled();
   });
 
   it('rejects a confirmation token issued for a different tool', async () => {
@@ -436,6 +470,19 @@ describe('CONF-09: description strings are meaningful', () => {
       tool: 'move_email',
       args: { accountId: 'a', uid: '5', sourceFolder: 'INBOX', targetFolder: 'Archive' },
       expect: ['5', 'INBOX', 'Archive'],
+    },
+    {
+      tool: 'mail_mutate',
+      args: {
+        accountId: 'mailtrap',
+        operation: 'mailtrap.sandbox',
+        input: {
+          resource: 'inbox',
+          operation: 'reset_credentials',
+          inboxId: 7,
+        },
+      },
+      expect: ['sandbox', 'inbox', 'reset_credentials', 'inboxId=7'],
     },
   ];
 

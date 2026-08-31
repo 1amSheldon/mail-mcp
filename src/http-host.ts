@@ -7,6 +7,8 @@ const MAX_REQUEST_BYTES = 32 * 1024 * 1024;
 const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_MAX_SESSIONS = 64;
 const SHUTDOWN_DRAIN_TIMEOUT_MS = 8_000;
+const REQUEST_RECEIVE_TIMEOUT_MS = 30_000;
+const HEADER_RECEIVE_TIMEOUT_MS = 15_000;
 
 export interface HostedMcpSession {
   connect(transport: StreamableHTTPServerTransport): Promise<void>;
@@ -279,8 +281,8 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     }
   });
 
-  httpServer.requestTimeout = 0;
-  httpServer.headersTimeout = 60_000;
+  httpServer.requestTimeout = REQUEST_RECEIVE_TIMEOUT_MS;
+  httpServer.headersTimeout = HEADER_RECEIVE_TIMEOUT_MS;
   httpServer.keepAliveTimeout = 65_000;
 
   await new Promise<void>((resolve, reject) => {

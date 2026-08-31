@@ -6,6 +6,42 @@ import * as os from 'node:os';
 import type { FSWatcher } from 'node:fs';
 import { watchFileChanges } from './utils/file-watcher.js';
 import { writeTextFileAtomicSync } from './utils/atomic-write.js';
+import {
+  configuredAccountSchema,
+  emailAccountSchema,
+  isImapSmtpAccount,
+} from './providers/account-types.js';
+import type { ConfiguredAccount, EmailAccount } from './providers/account-types.js';
+
+export {
+  ACCOUNT_BACKEND_CAPABILITIES,
+  appleMailAccountSchema,
+  configuredAccountSchema,
+  emailAccountSchema,
+  ewsAccountSchema,
+  getAccountCapabilities,
+  imapSmtpAccountSchema,
+  isAppleMailAccount,
+  isEwsAccount,
+  isImapSmtpAccount,
+  isMailtrapAccount,
+  isMicrosoftGraphAccount,
+  legacyEmailAccountSchema,
+  mailtrapAccountSchema,
+  microsoftGraphAccountSchema,
+} from './providers/account-types.js';
+export type {
+  AccountBackend,
+  AccountCapabilityDescriptor,
+  AppleMailConfiguredAccount,
+  ConfiguredAccount,
+  EmailAccount,
+  EwsConfiguredAccount,
+  ImapSmtpAccount,
+  LegacyEmailAccount,
+  MailtrapConfiguredAccount,
+  MicrosoftGraphConfiguredAccount,
+} from './providers/account-types.js';
 
 export const ACCOUNTS_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'accounts.json');
 export const AUDIT_LOG_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'audit.log');
@@ -26,31 +62,11 @@ export const config = configSchema.parse({
 // Account schema and type
 // ---------------------------------------------------------------------------
 
-const portSchema = z.number().int().min(1).max(65535);
-
-export const emailAccountSchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  host: z.string().min(1),
-  port: portSchema,
-  smtpHost: z.string().min(1).optional(),
-  smtpPort: portSchema.optional(),
-  user: z.string().min(1),
-  authType: z.enum(['login', 'oauth2']),
-  useTLS: z.boolean(),
-  signature: z.string().optional(),
-  manageSievePort: portSchema.optional(),
-  allowedRecipients: z.array(z.string()).optional(),
-  sentFolder: z.string().min(1).optional(),
-});
-
-export type EmailAccount = z.infer<typeof emailAccountSchema>;
-
 // ---------------------------------------------------------------------------
 // In-memory cache with fs.watch invalidation
 // ---------------------------------------------------------------------------
 
-let cachedAccounts: EmailAccount[] | null = null;
+let cachedAccounts: ConfiguredAccount[] | null = null;
 let accountsWatcher: FSWatcher | undefined;
 
 function startWatcher(): void {
@@ -77,18 +93,17 @@ export function resetConfigCache(): void {
 // Internal disk loader with per-item safeParse
 // ---------------------------------------------------------------------------
 
-async function loadAccountsFromDisk(): Promise<EmailAccount[]> {
-  const raw = await fsPromises.readFile(ACCOUNTS_PATH, 'utf-8');
+function parseConfiguredAccounts(raw: string): ConfiguredAccount[] {
   const parsed = JSON.parse(raw);
   if (!Array.isArray(parsed)) {
     console.error('accounts.json must be an array');
     return [];
   }
 
-  const valid: EmailAccount[] = [];
+  const valid: ConfiguredAccount[] = [];
   const seenIds = new Set<string>();
   for (const item of parsed) {
-    const result = emailAccountSchema.safeParse(item);
+    const result = configuredAccountSchema.safeParse(item);
     if (result.success) {
       if (seenIds.has(result.data.id)) {
         console.error(`accounts.json: duplicate account ID "${result.data.id}" skipped`);
@@ -105,6 +120,33 @@ async function loadAccountsFromDisk(): Promise<EmailAccount[]> {
   return valid;
 }
 
+async function loadAccountsFromDisk(): Promise<ConfiguredAccount[]> {
+  const raw = await fsPromises.readFile(ACCOUNTS_PATH, 'utf-8');
+  return parseConfiguredAccounts(raw);
+}
+
+function loadAccountsFromDiskSync(): ConfiguredAccount[] {
+  const raw = fs.readFileSync(ACCOUNTS_PATH, 'utf-8');
+  return parseConfiguredAccounts(raw);
+}
+
+function assertUniqueAccountIds(accounts: readonly ConfiguredAccount[]): void {
+  const duplicateIds = accounts
+    .map(account => account.id)
+    .filter((id, index, ids) => ids.indexOf(id) !== index);
+  if (duplicateIds.length > 0) {
+    throw new Error(`Duplicate account ID(s): ${[...new Set(duplicateIds)].join(', ')}`);
+  }
+}
+
+function writeAccounts(accounts: ConfiguredAccount[]): void {
+  const dir = path.dirname(ACCOUNTS_PATH);
+  fs.mkdirSync(dir, { recursive: true });
+  writeTextFileAtomicSync(ACCOUNTS_PATH, `${JSON.stringify(accounts, null, 2)}\n`);
+  cachedAccounts = accounts;
+  startWatcher();
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -115,6 +157,14 @@ async function loadAccountsFromDisk(): Promise<EmailAccount[]> {
  * Returns an empty array if the file does not exist or cannot be parsed.
  */
 export async function getAccounts(): Promise<EmailAccount[]> {
+  return (await getConfiguredAccounts()).filter(isImapSmtpAccount);
+}
+
+/**
+ * Reads every supported account definition from accounts.json.
+ * Item-level validation failures are logged and isolated from valid accounts.
+ */
+export async function getConfiguredAccounts(): Promise<ConfiguredAccount[]> {
   if (cachedAccounts !== null) return cachedAccounts;
   startWatcher();
   try {
@@ -139,16 +189,31 @@ export async function getAccounts(): Promise<EmailAccount[]> {
  */
 export function saveAccounts(accounts: EmailAccount[]): void {
   const validated = z.array(emailAccountSchema).parse(accounts);
-  const duplicateIds = validated
-    .map(account => account.id)
-    .filter((id, index, ids) => ids.indexOf(id) !== index);
-  if (duplicateIds.length > 0) {
-    throw new Error(`Duplicate account ID(s): ${[...new Set(duplicateIds)].join(', ')}`);
+  let existing: ConfiguredAccount[];
+  if (cachedAccounts !== null) {
+    existing = cachedAccounts;
+  } else {
+    try {
+      existing = loadAccountsFromDiskSync();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        existing = [];
+      } else {
+        throw error;
+      }
+    }
   }
-  const configPath = ACCOUNTS_PATH;
-  const dir = path.dirname(configPath);
-  fs.mkdirSync(dir, { recursive: true });
-  writeTextFileAtomicSync(configPath, `${JSON.stringify(validated, null, 2)}\n`);
-  cachedAccounts = validated;
-  startWatcher();
+  const retainedProviders = existing.filter(account => !isImapSmtpAccount(account));
+  const combined = [...retainedProviders, ...validated];
+  assertUniqueAccountIds(combined);
+  writeAccounts(combined);
+}
+
+/**
+ * Replaces accounts.json with a validated set containing any supported backend.
+ */
+export function saveConfiguredAccounts(accounts: ConfiguredAccount[]): void {
+  const validated = z.array(configuredAccountSchema).parse(accounts);
+  assertUniqueAccountIds(validated);
+  writeAccounts(validated);
 }

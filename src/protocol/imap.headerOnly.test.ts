@@ -62,7 +62,7 @@ function makeMockFlow(messages: ReturnType<typeof makeMsg>[]) {
   return { flow, lock };
 }
 
-describe('ImapClient.listMessages — headerOnly flag', () => {
+describe('ImapClient.fetchMessagesByUids headerOnly flag', () => {
   let client: ImapClient;
   let mockFlow: any;
   let mockLock: any;
@@ -83,7 +83,7 @@ describe('ImapClient.listMessages — headerOnly flag', () => {
     const msg = makeMsg('Hello this is the body text');
     await setupClient([msg]);
 
-    const results = await client.listMessages('INBOX', 10, 0, false);
+    const results = await client.fetchMessagesByUids([42], 'INBOX', false);
 
     expect(mockFlow.fetch).toHaveBeenCalledOnce();
     const [, fetchOptions] = mockFlow.fetch.mock.calls[0];
@@ -101,7 +101,7 @@ describe('ImapClient.listMessages — headerOnly flag', () => {
     const msg = makeMsg('Body that should not appear');
     await setupClient([msg]);
 
-    const results = await client.listMessages('INBOX', 10, 0, true);
+    const results = await client.fetchMessagesByUids([42], 'INBOX', true);
 
     expect(mockFlow.fetch).toHaveBeenCalledOnce();
     const [, fetchOptions] = mockFlow.fetch.mock.calls[0];
@@ -115,8 +115,7 @@ describe('ImapClient.listMessages — headerOnly flag', () => {
     const msg = makeMsg('Some body text here');
     await setupClient([msg]);
 
-    // Call without 4th arg — should default to headerOnly=false
-    const results = await client.listMessages('INBOX', 10, 0);
+    const results = await client.fetchMessagesByUids([42], 'INBOX');
 
     expect(mockFlow.fetch).toHaveBeenCalledOnce();
     const [, fetchOptions] = mockFlow.fetch.mock.calls[0];
@@ -132,7 +131,7 @@ describe('ImapClient.listMessages — headerOnly flag', () => {
     const msg = makeMsg(null); // no body content provided
     await setupClient([msg]);
 
-    const results = await client.listMessages('INBOX', 10, 0, true);
+    const results = await client.fetchMessagesByUids([42], 'INBOX', true);
 
     expect(results).toHaveLength(1);
     const result = results[0];
@@ -149,7 +148,7 @@ describe('ImapClient.listMessages — headerOnly flag', () => {
     const msg = makeMsg(null);
     await setupClient([msg]);
 
-    const results = await client.listMessages('INBOX', 10, 0, false);
+    const results = await client.fetchMessagesByUids([42], 'INBOX', false);
 
     expect(results).toHaveLength(1);
     // snippet should gracefully be '' when no TEXT part

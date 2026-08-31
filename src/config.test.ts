@@ -15,6 +15,7 @@ vi.mock('./utils/atomic-write.js', () => atomicWrite);
 vi.mock('node:fs', () => ({
   watch: vi.fn(),
   existsSync: vi.fn(),
+  readFileSync: vi.fn(),
   mkdirSync: vi.fn(),
 }));
 
@@ -167,6 +168,26 @@ describe('getAccounts (async with cache)', () => {
     expect(result[0].id).toBe('work');
   });
 
+  it('getConfiguredAccounts loads provider accounts while getAccounts returns only IMAP/SMTP', async () => {
+    const appleAccount = {
+      id: 'local-mail',
+      name: 'Apple Mail',
+      backend: 'apple-mail',
+      nativeAccountName: 'iCloud',
+    };
+    mockedFsPromises.readFile.mockResolvedValue(
+      JSON.stringify([VALID_ACCOUNT, appleAccount]) as any
+    );
+
+    const { getAccounts, getConfiguredAccounts } = await import('./config.js');
+    const configured = await getConfiguredAccounts();
+    const legacy = await getAccounts();
+
+    expect(configured).toEqual([VALID_ACCOUNT, appleAccount]);
+    expect(legacy).toEqual([VALID_ACCOUNT]);
+    expect(mockedFsPromises.readFile).toHaveBeenCalledTimes(1);
+  });
+
   it('skips duplicate account IDs loaded from disk', async () => {
     const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockedFsPromises.readFile.mockResolvedValue(
@@ -175,6 +196,23 @@ describe('getAccounts (async with cache)', () => {
 
     const { getAccounts } = await import('./config.js');
     const result = await getAccounts();
+
+    expect(result).toEqual([VALID_ACCOUNT]);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      'accounts.json: duplicate account ID "work" skipped'
+    );
+    consoleErrorSpy.mockRestore();
+  });
+
+  it('skips duplicate IDs across different account backends', async () => {
+    const consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockedFsPromises.readFile.mockResolvedValue(JSON.stringify([
+      VALID_ACCOUNT,
+      { id: 'work', name: 'Apple Mail', backend: 'apple-mail' },
+    ]) as any);
+
+    const { getConfiguredAccounts } = await import('./config.js');
+    const result = await getConfiguredAccounts();
 
     expect(result).toEqual([VALID_ACCOUNT]);
     expect(consoleErrorSpy).toHaveBeenCalledWith(
@@ -269,6 +307,9 @@ describe('saveAccounts', () => {
   beforeEach(async () => {
     vi.resetAllMocks();
     mockedFs.watch.mockImplementation(() => ({ close: vi.fn(), once: vi.fn() }) as any);
+    vi.mocked(fs.readFileSync).mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     const { resetConfigCache } = await import('./config.js');
     resetConfigCache();
   });
@@ -298,5 +339,76 @@ describe('saveAccounts', () => {
       ACCOUNTS_PATH,
       `${JSON.stringify([VALID_ACCOUNT], null, 2)}\n`
     );
+  });
+
+  it('preserves provider accounts when replacing the legacy IMAP/SMTP subset', async () => {
+    const providerAccount = {
+      id: 'graph',
+      name: 'Microsoft 365',
+      backend: 'microsoft-graph',
+      user: 'user@example.com',
+    };
+    vi.mocked(fs.readFileSync).mockReturnValue(
+      JSON.stringify([{ ...VALID_ACCOUNT, id: 'old-imap' }, providerAccount])
+    );
+
+    const { saveAccounts, ACCOUNTS_PATH } = await import('./config.js');
+    saveAccounts([VALID_ACCOUNT]);
+
+    expect(atomicWrite.writeTextFileAtomicSync).toHaveBeenCalledWith(
+      ACCOUNTS_PATH,
+      expect.any(String)
+    );
+    const written = atomicWrite.writeTextFileAtomicSync.mock.calls[0][1];
+    expect(JSON.parse(written)).toEqual([providerAccount, VALID_ACCOUNT]);
+  });
+
+  it('rejects an incoming IMAP/SMTP ID that collides with a retained provider account', async () => {
+    vi.mocked(fs.readFileSync).mockReturnValue(JSON.stringify([{
+      id: 'work',
+      name: 'Native Mail',
+      backend: 'apple-mail',
+    }]));
+
+    const { saveAccounts } = await import('./config.js');
+
+    expect(() => saveAccounts([VALID_ACCOUNT])).toThrow('Duplicate account ID(s): work');
+    expect(atomicWrite.writeTextFileAtomicSync).not.toHaveBeenCalled();
+  });
+});
+
+describe('saveConfiguredAccounts', () => {
+  beforeEach(async () => {
+    vi.resetAllMocks();
+    mockedFs.watch.mockImplementation(() => ({ close: vi.fn(), once: vi.fn() }) as any);
+    const { resetConfigCache } = await import('./config.js');
+    resetConfigCache();
+  });
+
+  it('writes a full mixed-backend replacement', async () => {
+    const accounts = [
+      VALID_ACCOUNT,
+      { id: 'mailtrap', name: 'Mailtrap', backend: 'mailtrap' as const, accountId: '42' },
+    ];
+    const { saveConfiguredAccounts, ACCOUNTS_PATH } = await import('./config.js');
+
+    saveConfiguredAccounts(accounts);
+
+    expect(atomicWrite.writeTextFileAtomicSync).toHaveBeenCalledWith(
+      ACCOUNTS_PATH,
+      expect.any(String)
+    );
+    const written = atomicWrite.writeTextFileAtomicSync.mock.calls[0][1];
+    expect(JSON.parse(written)).toEqual(accounts);
+  });
+
+  it('rejects duplicate IDs across different backends', async () => {
+    const { saveConfiguredAccounts } = await import('./config.js');
+
+    expect(() => saveConfiguredAccounts([
+      VALID_ACCOUNT,
+      { id: 'work', name: 'Apple Mail', backend: 'apple-mail' },
+    ])).toThrow('Duplicate account ID(s): work');
+    expect(atomicWrite.writeTextFileAtomicSync).not.toHaveBeenCalled();
   });
 });

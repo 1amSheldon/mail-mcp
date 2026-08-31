@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import nodemailer from 'nodemailer';
 import { SmtpClient, SmtpRecipientRejectedError } from './smtp.js';
 import type { EmailAccount } from '../config.js';
 
@@ -69,6 +70,113 @@ describe('SmtpClient', () => {
     await Promise.all([first, second]);
   });
 
+  it('requires STARTTLS by default on submission ports', async () => {
+    const client = new SmtpClient(account);
+    await client.connect();
+
+    expect(vi.mocked(nodemailer.createTransport)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        host: 'smtp.test.com',
+        port: 587,
+        secure: false,
+        requireTLS: true,
+        ignoreTLS: false,
+        tls: { rejectUnauthorized: true },
+      })
+    );
+  });
+
+  it('uses implicit TLS on port 465', async () => {
+    const client = new SmtpClient({ ...account, smtpPort: 465 });
+    await client.connect();
+
+    expect(vi.mocked(nodemailer.createTransport)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        port: 465,
+        secure: true,
+        requireTLS: false,
+        ignoreTLS: false,
+        tls: { rejectUnauthorized: true },
+      })
+    );
+  });
+
+  it('uses the account SMTP security policy when no constructor override is provided', async () => {
+    const client = new SmtpClient({
+      ...account,
+      smtpPort: 587,
+      smtpSecurity: 'tls',
+    });
+    await client.connect();
+
+    expect(vi.mocked(nodemailer.createTransport)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        port: 587,
+        secure: true,
+        requireTLS: false,
+        ignoreTLS: false,
+        tls: { rejectUnauthorized: true },
+      })
+    );
+  });
+
+  it('gives an explicit constructor security policy precedence over account configuration', async () => {
+    const client = new SmtpClient(
+      {
+        ...account,
+        smtpPort: 465,
+        smtpSecurity: 'tls',
+      },
+      { securityMode: 'starttls' },
+    );
+    await client.connect();
+
+    expect(vi.mocked(nodemailer.createTransport)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        port: 465,
+        secure: false,
+        requireTLS: true,
+        ignoreTLS: false,
+        tls: { rejectUnauthorized: true },
+      })
+    );
+  });
+
+  it('rejects plain SMTP for non-loopback hosts', async () => {
+    const client = new SmtpClient(account, { securityMode: 'plain' });
+    await expect(client.connect()).rejects.toThrow('Plain SMTP is allowed only for localhost');
+    expect(mocks.verify).not.toHaveBeenCalled();
+  });
+
+  it('allows explicitly requested plain SMTP on localhost only', async () => {
+    const client = new SmtpClient(
+      { ...account, smtpHost: 'localhost', smtpPort: 2525 },
+      { securityMode: 'plain' }
+    );
+    await client.connect();
+
+    expect(vi.mocked(nodemailer.createTransport)).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        host: 'localhost',
+        secure: false,
+        requireTLS: false,
+        ignoreTLS: true,
+      })
+    );
+  });
+
+  it('enforces a plain account policy through the loopback guard', async () => {
+    const client = new SmtpClient({
+      ...account,
+      smtpHost: 'smtp.test.com',
+      smtpPort: 2525,
+      smtpSecurity: 'plain',
+    });
+
+    await expect(client.connect()).rejects.toThrow('Plain SMTP is allowed only for localhost');
+    expect(mocks.verify).not.toHaveBeenCalled();
+  });
+
   it('sends the exact MIME buffer produced for the Sent append', async () => {
     const client = new SmtpClient(account);
     await client.connect();
@@ -106,6 +214,35 @@ describe('SmtpClient', () => {
       bcc: 'bcc@example.com',
       headers,
     }));
+  });
+
+  it('keeps the authenticated sender as envelope from when the header from is overridden', async () => {
+    mocks.compose.mockResolvedValueOnce({
+      envelope: { from: 'alias@example.com', to: ['recipient@example.com'] },
+      messageId: '<alias@example.com>',
+      message: Buffer.from('From: Alias <alias@example.com>\r\n\r\nBody'),
+    });
+    const client = new SmtpClient(account);
+    await client.connect();
+    await client.sendMessage({
+      to: 'recipient@example.com',
+      subject: 'Subject',
+      text: 'Body',
+      from: 'Alias <alias@example.com>',
+      replyTo: 'support@example.com',
+    });
+
+    expect(mocks.compose).toHaveBeenCalledWith(expect.objectContaining({
+      from: 'Alias <alias@example.com>',
+      replyTo: 'support@example.com',
+    }));
+    expect(mocks.send).toHaveBeenCalledWith({
+      raw: expect.any(Buffer),
+      envelope: {
+        from: 'test@test.com',
+        to: ['recipient@example.com'],
+      },
+    });
   });
 
   it('returns partial SMTP acceptance without hiding rejected recipients', async () => {

@@ -1,6 +1,13 @@
 import { createInterface } from 'node:readline/promises';
-import { getAccounts, saveAccounts, ACCOUNTS_PATH, type EmailAccount } from '../config.js';
+import {
+  getConfiguredAccounts,
+  saveConfiguredAccounts,
+  ACCOUNTS_PATH,
+  type ConfiguredAccount,
+  type EmailAccount,
+} from '../config.js';
 import { saveCredentials, removeCredentials } from '../security/keychain.js';
+import { validateOAuth2TokenEndpoint } from '../security/oauth2.js';
 
 interface QuestionPrompt {
   question(query: string): Promise<string>;
@@ -58,7 +65,7 @@ export async function handleAccountsCommand(args: string[]): Promise<boolean> {
 }
 
 async function listAccounts(): Promise<void> {
-  const accounts = await getAccounts();
+  const accounts = await getConfiguredAccounts();
 
   if (accounts.length === 0) {
     console.log('No accounts configured.');
@@ -69,23 +76,143 @@ async function listAccounts(): Promise<void> {
   const colWidths = {
     id: Math.max(2, ...accounts.map((a) => a.id.length)),
     name: Math.max(4, ...accounts.map((a) => a.name.length)),
-    host: Math.max(4, ...accounts.map((a) => a.host.length)),
-    user: Math.max(4, ...accounts.map((a) => a.user.length)),
+    backend: Math.max(7, ...accounts.map((account) => (account.backend ?? 'imap-smtp').length)),
+    detail: Math.max(6, ...accounts.map(account => accountDetail(account).length)),
   };
 
   const pad = (s: string, n: number) => s.padEnd(n);
   const header =
-    `${pad('ID', colWidths.id)}  ${pad('Name', colWidths.name)}  ${pad('Host', colWidths.host)}  ${pad('User', colWidths.user)}`;
+    `${pad('ID', colWidths.id)}  ${pad('Name', colWidths.name)}  ${pad('Backend', colWidths.backend)}  ${pad('Detail', colWidths.detail)}`;
   const divider =
-    `${'-'.repeat(colWidths.id)}  ${'-'.repeat(colWidths.name)}  ${'-'.repeat(colWidths.host)}  ${'-'.repeat(colWidths.user)}`;
+    `${'-'.repeat(colWidths.id)}  ${'-'.repeat(colWidths.name)}  ${'-'.repeat(colWidths.backend)}  ${'-'.repeat(colWidths.detail)}`;
 
   console.log(header);
   console.log(divider);
   for (const account of accounts) {
     console.log(
-      `${pad(account.id, colWidths.id)}  ${pad(account.name, colWidths.name)}  ${pad(account.host, colWidths.host)}  ${pad(account.user, colWidths.user)}`
+      `${pad(account.id, colWidths.id)}  ${pad(account.name, colWidths.name)}  ${pad(account.backend ?? 'imap-smtp', colWidths.backend)}  ${pad(accountDetail(account), colWidths.detail)}`
     );
   }
+}
+
+type ConfiguredBackend = 'imap-smtp' | 'apple-mail' | 'microsoft-graph' | 'ews' | 'mailtrap';
+type ProviderAccountBase = {
+  [Backend in Exclude<ConfiguredBackend, 'imap-smtp'>]: {
+    id: string;
+    name: string;
+    backend: Backend;
+  };
+}[Exclude<ConfiguredBackend, 'imap-smtp'>];
+
+async function askRequired(prompt: QuestionPrompt, label: string): Promise<string> {
+  while (true) {
+    const value = (await prompt.question(`${label}: `)).trim();
+    if (value) return value;
+    console.log(`  ${label} is required.`);
+  }
+}
+
+async function askOAuth2TokenEndpoint(prompt: QuestionPrompt): Promise<string> {
+  while (true) {
+    const value = await askRequired(prompt, 'OAuth2 token endpoint');
+    try {
+      return validateOAuth2TokenEndpoint(value);
+    } catch (error) {
+      console.log(`  ${(error as Error).message}.`);
+    }
+  }
+}
+
+async function askBackend(prompt: QuestionPrompt): Promise<ConfiguredBackend> {
+  const choices: Record<string, ConfiguredBackend> = {
+    '1': 'imap-smtp',
+    '2': 'apple-mail',
+    '3': 'microsoft-graph',
+    '4': 'ews',
+    '5': 'mailtrap',
+  };
+  while (true) {
+    const raw = (await prompt.question(
+      'Backend: 1) IMAP/SMTP  2) Apple Mail  3) Microsoft Graph  4) EWS  5) Mailtrap [1]: '
+    )).trim();
+    const backend = choices[raw || '1'];
+    if (backend) return backend;
+    console.log('  Choose a backend from 1 to 5.');
+  }
+}
+
+async function saveProviderAccount(
+  existingAccounts: ConfiguredAccount[],
+  account: ConfiguredAccount,
+  credential?: string,
+): Promise<void> {
+  if (credential !== undefined) await saveCredentials(account.id, credential);
+  try {
+    saveConfiguredAccounts([...existingAccounts, account]);
+  } catch (error) {
+    if (credential !== undefined) await removeCredentials(account.id).catch(() => undefined);
+    throw error;
+  }
+  console.log(
+    credential === undefined
+      ? `Account '${account.id}' added.`
+      : `Account '${account.id}' added. Credential stored in the system credential store.`
+  );
+}
+
+async function addProviderAccount(
+  prompt: QuestionPrompt,
+  existingAccounts: ConfiguredAccount[],
+  base: ProviderAccountBase,
+): Promise<void> {
+  if (base.backend === 'apple-mail') {
+    const nativeAccountName = await askRequired(
+      prompt,
+      'Exact Apple Mail account name (as shown in Mail.app)',
+    );
+    await saveProviderAccount(existingAccounts, { ...base, nativeAccountName });
+    return;
+  }
+
+  if (base.backend === 'mailtrap') {
+    const accountId = (await prompt.question('Mailtrap account ID (optional): ')).trim();
+    const token = await askRequired(prompt, 'Mailtrap API token');
+    await saveProviderAccount(
+      existingAccounts,
+      { ...base, ...(accountId ? { accountId } : {}) },
+      token,
+    );
+    return;
+  }
+
+  const user = await askRequired(prompt, 'Microsoft mailbox user or user ID');
+  const endpoint = base.backend === 'ews'
+    ? await askRequired(prompt, 'EWS HTTPS endpoint')
+    : (await prompt.question('Microsoft Graph HTTPS endpoint override (optional): ')).trim();
+  const tokenEndpoint = await askOAuth2TokenEndpoint(prompt);
+  const clientId = await askRequired(prompt, 'OAuth2 client ID');
+  const clientSecret = await askRequired(prompt, 'OAuth2 client secret');
+  const refreshToken = await askRequired(prompt, 'OAuth2 refresh token');
+  const account: ConfiguredAccount = base.backend === 'ews'
+    ? { ...base, user, endpoint }
+    : { ...base, user, ...(endpoint ? { endpoint } : {}) };
+  await saveProviderAccount(existingAccounts, account, JSON.stringify({
+    clientId,
+    clientSecret,
+    refreshToken,
+    tokenEndpoint,
+  }));
+}
+
+function accountDetail(account: ConfiguredAccount): string {
+  if (account.backend === 'apple-mail') {
+    return account.nativeAccountUuid ?? account.nativeAccountName ?? 'unbound';
+  }
+  if (account.backend === 'mailtrap') return account.accountId ?? 'Mailtrap API';
+  if (account.backend === undefined || account.backend === 'imap-smtp') {
+    return `${account.user} @ ${account.host}`;
+  }
+  return account.user;
 }
 
 async function removeAccount(id: string | undefined): Promise<void> {
@@ -94,7 +221,7 @@ async function removeAccount(id: string | undefined): Promise<void> {
     process.exit(1);
   }
 
-  const accounts = await getAccounts();
+  const accounts = await getConfiguredAccounts();
   const index = accounts.findIndex((a) => a.id === id);
 
   if (index === -1) {
@@ -103,7 +230,7 @@ async function removeAccount(id: string | undefined): Promise<void> {
   }
 
   accounts.splice(index, 1);
-  saveAccounts(accounts);
+  saveConfiguredAccounts(accounts);
 
   try {
     await removeCredentials(id);
@@ -121,7 +248,7 @@ async function addAccount(): Promise<void> {
   });
 
   try {
-    const existingAccounts = await getAccounts();
+    const existingAccounts = await getConfiguredAccounts();
     const existingIds = new Set(existingAccounts.map((a) => a.id));
 
     // id
@@ -143,6 +270,12 @@ async function addAccount(): Promise<void> {
     // name
     const nameRaw = await rl.question(`Name [${id}]: `);
     const name = nameRaw.trim() || id;
+
+    const backend = await askBackend(rl);
+    if (backend !== 'imap-smtp') {
+      await addProviderAccount(rl, existingAccounts, { id, name, backend });
+      return;
+    }
 
     // host (IMAP)
     let host = '';
@@ -213,6 +346,7 @@ async function addAccount(): Promise<void> {
     }
 
     const account: EmailAccount = {
+      backend: 'imap-smtp',
       id,
       name,
       host,
@@ -227,14 +361,14 @@ async function addAccount(): Promise<void> {
     if (authType === 'login' && password) {
       await saveCredentials(id, password);
       try {
-        saveAccounts([...existingAccounts, account]);
+        saveConfiguredAccounts([...existingAccounts, account]);
       } catch (error) {
         await removeCredentials(id).catch(() => undefined);
         throw error;
       }
       console.log(`Account '${id}' added. Credential stored in the system credential store.`);
     } else {
-      saveAccounts([...existingAccounts, account]);
+      saveConfiguredAccounts([...existingAccounts, account]);
       console.log(`Account '${id}' added.`);
     }
   } finally {
