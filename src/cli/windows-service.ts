@@ -292,14 +292,28 @@ if ($null -ne $existingTask) {
 
 try {
     $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
-    if ($health.status -eq 'ok' -and $health.service -eq 'mail-mcp') {
+    if ($health.status -eq 'ok') {
         $listeners = Get-NetTCPConnection -LocalPort $servicePort -State Listen -ErrorAction SilentlyContinue |
             Where-Object {
                 $_.LocalAddress -eq $serviceHost -or
                 ($serviceHost -eq 'localhost' -and ($_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1'))
             }
-        $listeners | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object {
-            Stop-Process -Id $_ -Force -ErrorAction Stop
+        $stoppedManagedListener = $false
+        $listenerPids = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
+        foreach ($listenerPid in $listenerPids) {
+            $isCurrentMailMcp = $health.service -eq 'mail-mcp'
+            $isLegacyMailMcp = $false
+            if ($null -ne $existingTask -and [string]::IsNullOrWhiteSpace([string]$health.service)) {
+                $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
+                $isLegacyMailMcp = $null -ne $owner -and $owner.CommandLine -match '(?i)mail-mcp'
+            }
+            if ($isCurrentMailMcp -or $isLegacyMailMcp) {
+                Stop-Process -Id $listenerPid -Force -ErrorAction Stop
+                $stoppedManagedListener = $true
+            }
+        }
+        if ($listeners -and -not $stoppedManagedListener) {
+            throw "Port $servicePort is occupied by a process that could not be verified as Mail MCP"
         }
         $deadline = (Get-Date).AddSeconds(10)
         do {
