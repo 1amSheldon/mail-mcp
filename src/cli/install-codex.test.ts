@@ -6,7 +6,9 @@ import { parse } from 'smol-toml';
 import {
   buildCodexHttpServerSection,
   installCodex,
+  installCodexBundle,
   installCodexHttp,
+  installCodexSkill,
   upsertCodexServer,
 } from './install-codex.js';
 import { buildMailMcpNpxArgs } from './npm-runtime.js';
@@ -150,5 +152,72 @@ describe('installCodex', () => {
       installCodex(configPath, buildMailMcpNpxArgs(['--confirm'], tempDir))
     ).rejects.toThrow(/Invalid existing Codex config/);
     expect(await readFile(configPath, 'utf8')).toBe(source);
+  });
+
+  it('installs and updates the bundled Codex skill without losing the previous file', async () => {
+    const codexHome = join(tempDir, '.codex');
+    const first = await installCodexSkill(codexHome);
+    const installed = await readFile(first.skillPath, 'utf8');
+
+    expect(first).toEqual({
+      skillPath: join(codexHome, 'skills', 'mail-mcp', 'SKILL.md'),
+      changed: true,
+    });
+    expect(installed).toContain('name: mail-mcp');
+    expect(installed).toContain('do not invent offsets');
+
+    expect(await installCodexSkill(codexHome)).toEqual({
+      skillPath: first.skillPath,
+      changed: false,
+    });
+
+    await writeFile(first.skillPath, 'local customization\n', 'utf8');
+    const updated = await installCodexSkill(codexHome);
+    expect(await readFile(updated.backupPath!, 'utf8')).toBe('local customization\n');
+    expect(await readFile(updated.skillPath, 'utf8')).toBe(installed);
+  });
+
+  it('restores the previous skill when config validation fails', async () => {
+    const codexHome = join(tempDir, '.codex');
+    const skillPath = join(codexHome, 'skills', 'mail-mcp', 'SKILL.md');
+    const invalidConfig = '[mcp_servers.mail\ncommand = "broken"\n';
+    await mkdir(join(codexHome, 'skills', 'mail-mcp'), { recursive: true });
+    await writeFile(skillPath, 'local skill\n', 'utf8');
+    await writeFile(`${skillPath}.mail-mcp.bak`, 'older skill backup\n', 'utf8');
+    await writeFile(configPath, invalidConfig, 'utf8');
+
+    await expect(installCodexBundle(configPath, codexHome, {
+      transport: 'stdio',
+      npxArgs: buildMailMcpNpxArgs(runtimeArgs, tempDir),
+    })).rejects.toThrow(/Invalid existing Codex config/);
+
+    expect(await readFile(skillPath, 'utf8')).toBe('local skill\n');
+    expect(await readFile(`${skillPath}.mail-mcp.bak`, 'utf8')).toBe('older skill backup\n');
+    expect(await readFile(configPath, 'utf8')).toBe(invalidConfig);
+  });
+
+  it('can roll back config and skill after a later service failure', async () => {
+    const codexHome = join(tempDir, '.codex');
+    const skillPath = join(codexHome, 'skills', 'mail-mcp', 'SKILL.md');
+    const originalConfig = 'model = "gpt-5"\n';
+    await mkdir(join(codexHome, 'skills', 'mail-mcp'), { recursive: true });
+    await writeFile(skillPath, 'local skill\n', 'utf8');
+    await writeFile(`${skillPath}.mail-mcp.bak`, 'older skill backup\n', 'utf8');
+    await writeFile(configPath, originalConfig, 'utf8');
+    await writeFile(`${configPath}.mail-mcp.bak`, 'older config backup\n', 'utf8');
+
+    const bundle = await installCodexBundle(configPath, codexHome, {
+      transport: 'http',
+      options: {
+        url: 'http://127.0.0.1:8765/mcp',
+        bearerTokenEnvVar: 'MAIL_MCP_BEARER_TOKEN',
+      },
+    });
+    await bundle.rollback();
+
+    expect(await readFile(configPath, 'utf8')).toBe(originalConfig);
+    expect(await readFile(`${configPath}.mail-mcp.bak`, 'utf8')).toBe('older config backup\n');
+    expect(await readFile(skillPath, 'utf8')).toBe('local skill\n');
+    expect(await readFile(`${skillPath}.mail-mcp.bak`, 'utf8')).toBe('older skill backup\n');
   });
 });

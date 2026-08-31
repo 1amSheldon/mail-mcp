@@ -1,5 +1,5 @@
-import { copyFile, mkdir, readFile } from 'node:fs/promises';
-import { dirname } from 'node:path';
+import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import { parse } from 'smol-toml';
 import { writeTextFileAtomic } from '../utils/atomic-write.js';
 
@@ -11,9 +11,38 @@ export interface CodexInstallResult {
   changed: boolean;
 }
 
+export interface CodexSkillInstallResult {
+  skillPath: string;
+  backupPath?: string;
+  changed: boolean;
+}
+
 export interface CodexHttpServerOptions {
   url: string;
   bearerTokenEnvVar: string;
+}
+
+export type CodexBundleServer =
+  | {
+      transport: 'stdio';
+      npxArgs: readonly string[];
+      serverName?: string;
+    }
+  | {
+      transport: 'http';
+      options: CodexHttpServerOptions;
+      serverName?: string;
+    };
+
+export interface CodexBundleInstallResult {
+  config: CodexInstallResult;
+  skill: CodexSkillInstallResult;
+  rollback: () => Promise<void>;
+}
+
+interface TextFileSnapshot {
+  path: string;
+  content?: string;
 }
 
 function tomlString(value: string): string {
@@ -198,4 +227,109 @@ export async function installCodexHttp(
     buildCodexHttpServerSection(options, serverName),
     serverName
   );
+}
+
+export async function installCodexSkill(codexHome: string): Promise<CodexSkillInstallResult> {
+  const skillPath = getCodexSkillPath(codexHome);
+  const bundledSkill = await readFile(
+    new URL('../../skills/mail-mcp/SKILL.md', import.meta.url),
+    'utf8'
+  );
+
+  let currentSkill: string | undefined;
+  try {
+    currentSkill = await readFile(skillPath, 'utf8');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
+      throw error;
+    }
+  }
+
+  if (currentSkill === bundledSkill) {
+    return { skillPath, changed: false };
+  }
+
+  await mkdir(dirname(skillPath), { recursive: true });
+  let backupPath: string | undefined;
+  if (currentSkill !== undefined) {
+    backupPath = `${skillPath}.mail-mcp.bak`;
+    await copyFile(skillPath, backupPath);
+  }
+  await writeTextFileAtomic(skillPath, bundledSkill);
+
+  return { skillPath, backupPath, changed: true };
+}
+
+export function getCodexSkillPath(codexHome: string): string {
+  return join(codexHome, 'skills', 'mail-mcp', 'SKILL.md');
+}
+
+async function snapshotTextFile(path: string): Promise<TextFileSnapshot> {
+  try {
+    return { path, content: await readFile(path, 'utf8') };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { path };
+    }
+    throw error;
+  }
+}
+
+async function restoreTextFile(snapshot: TextFileSnapshot): Promise<void> {
+  if (snapshot.content === undefined) {
+    await rm(snapshot.path, { force: true });
+    return;
+  }
+  await writeTextFileAtomic(snapshot.path, snapshot.content);
+}
+
+async function restoreCodexBundle(snapshots: readonly TextFileSnapshot[]): Promise<void> {
+  const failures: Error[] = [];
+  for (const snapshot of snapshots) {
+    try {
+      await restoreTextFile(snapshot);
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Failed to restore the previous Codex installation');
+  }
+}
+
+export async function installCodexBundle(
+  configPath: string,
+  codexHome: string,
+  server: CodexBundleServer
+): Promise<CodexBundleInstallResult> {
+  const skillPath = getCodexSkillPath(codexHome);
+  const snapshots = await Promise.all([
+    configPath,
+    `${configPath}.mail-mcp.bak`,
+    skillPath,
+    `${skillPath}.mail-mcp.bak`,
+  ].map(snapshotTextFile));
+
+  try {
+    const skill = await installCodexSkill(codexHome);
+    const config = server.transport === 'http'
+      ? await installCodexHttp(configPath, server.options, server.serverName)
+      : await installCodex(configPath, server.npxArgs, server.serverName);
+
+    return {
+      config,
+      skill,
+      rollback: () => restoreCodexBundle(snapshots),
+    };
+  } catch (error) {
+    try {
+      await restoreCodexBundle(snapshots);
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [error as Error, rollbackError as Error],
+        'Codex installation failed and the previous files could not be fully restored'
+      );
+    }
+    throw error;
+  }
 }

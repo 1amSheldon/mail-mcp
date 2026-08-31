@@ -7,7 +7,7 @@ const keychain = vi.hoisted(() => ({
 
 vi.mock('./keychain.js', () => keychain);
 
-import { getValidAccessToken } from './oauth2.js';
+import { getValidAccessToken, validateOAuth2TokenEndpoint } from './oauth2.js';
 
 const tokenSet = {
   clientId: 'client-id',
@@ -55,6 +55,7 @@ describe('OAuth2 access token refresh', () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+    expect(fetchMock.mock.calls[0][1]?.redirect).toBe('error');
     expect(keychain.saveCredentials).toHaveBeenCalledOnce();
   });
 
@@ -93,12 +94,55 @@ describe('OAuth2 access token refresh', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('rejects plaintext HTTP outside loopback before making a request', async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify({
+      ...tokenSet,
+      tokenEndpoint: 'http://accounts.example.test/token',
+    }));
+
+    await expect(getValidAccessToken('work')).rejects.toThrow(
+      'OAuth2 credentials for account work contain an invalid tokenEndpoint: OAuth2 token endpoint must use HTTPS',
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
   it('adds context when the token endpoint cannot be reached', async () => {
     vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('connection reset')));
     keychain.loadCredentials.mockResolvedValue(JSON.stringify(tokenSet));
 
     await expect(getValidAccessToken('work')).rejects.toThrow(
       'OAuth2 token refresh request failed: connection reset'
+    );
+  });
+});
+
+describe('validateOAuth2TokenEndpoint', () => {
+  it('accepts HTTPS endpoints', () => {
+    expect(validateOAuth2TokenEndpoint('https://accounts.example.test/token'))
+      .toBe('https://accounts.example.test/token');
+  });
+
+  it.each([
+    'http://localhost:8080/token',
+    'http://localhost.:8080/token',
+    'http://127.0.0.1:8080/token',
+    'http://127.23.45.67/token',
+    'http://[::1]:8080/token',
+  ])('accepts loopback HTTP endpoint %s', (endpoint) => {
+    expect(validateOAuth2TokenEndpoint(endpoint)).toBe(endpoint);
+  });
+
+  it.each([
+    'http://accounts.example.test/token',
+    'http://localhost.example.test/token',
+    'http://192.168.1.10/token',
+    'file:///tmp/token',
+    'not-a-url',
+  ])('rejects insecure or invalid endpoint %s', (endpoint) => {
+    expect(() => validateOAuth2TokenEndpoint(endpoint)).toThrow(
+      'OAuth2 token endpoint must use HTTPS, except for loopback HTTP development endpoints',
     );
   });
 });

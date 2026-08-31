@@ -2,6 +2,9 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 
 const mockImapConnect = vi.fn().mockResolvedValue(undefined);
 const mockDeleteMessage = vi.fn().mockResolvedValue(undefined);
+const mockMoveMessage = vi.fn().mockResolvedValue(undefined);
+const mockFindSpecialUseFolder = vi.fn().mockResolvedValue('Deleted Items');
+const mockListFolders = vi.fn().mockResolvedValue(['INBOX', 'Deleted Items']);
 
 vi.mock('../protocol/imap.js', () => {
   return {
@@ -9,6 +12,9 @@ vi.mock('../protocol/imap.js', () => {
       return {
         connect: mockImapConnect,
         deleteMessage: mockDeleteMessage,
+        moveMessage: mockMoveMessage,
+        findSpecialUseFolder: mockFindSpecialUseFolder,
+        listFolders: mockListFolders,
         onClose: null,
       };
     }),
@@ -39,24 +45,40 @@ describe('MailService.deleteEmail', () => {
   beforeEach(async () => {
     mockImapConnect.mockClear();
     mockDeleteMessage.mockClear();
+    mockMoveMessage.mockClear();
+    mockFindSpecialUseFolder.mockClear().mockResolvedValue('Deleted Items');
     service = new MailService(account, false);
     await service.connect();
   });
 
-  it('calls imap.deleteMessage with the provided uid and folder', async () => {
+  it('moves the message to the special-use Trash folder instead of deleting it', async () => {
     await service.deleteEmail('42', 'INBOX');
-    expect(mockDeleteMessage).toHaveBeenCalledWith('42', 'INBOX');
+    expect(mockMoveMessage).toHaveBeenCalledWith('42', 'INBOX', 'Deleted Items');
+    expect(mockDeleteMessage).not.toHaveBeenCalled();
   });
 
-  it('defaults folder to INBOX when not provided', async () => {
+  it('defaults the source folder to INBOX', async () => {
     await service.deleteEmail('99');
-    expect(mockDeleteMessage).toHaveBeenCalledWith('99', 'INBOX');
+    expect(mockMoveMessage).toHaveBeenCalledWith('99', 'INBOX', 'Deleted Items');
   });
 
-  it('invalidates the body cache after deletion', async () => {
-    // Pre-populate the cache by spying on invalidateBodyCache
+  it('invalidates the source body cache after moving to Trash', async () => {
     const invalidateSpy = vi.spyOn(service, 'invalidateBodyCache');
-    await service.deleteEmail('55', 'Trash');
-    expect(invalidateSpy).toHaveBeenCalledWith('Trash', '55');
+    await service.deleteEmail('55', 'INBOX');
+    expect(invalidateSpy).toHaveBeenCalledWith('INBOX', '55');
+  });
+
+  it('requires the explicit permanent method for irreversible deletion', async () => {
+    await service.permanentlyDeleteEmail('55', 'Deleted Items');
+    expect(mockDeleteMessage).toHaveBeenCalledWith('55', 'Deleted Items');
+    expect(mockMoveMessage).not.toHaveBeenCalled();
+  });
+
+  it('refuses to soft-delete a message that is already in Trash', async () => {
+    await expect(service.deleteEmail('55', 'Deleted Items')).rejects.toThrow(
+      'Use permanentlyDeleteEmail'
+    );
+    expect(mockDeleteMessage).not.toHaveBeenCalled();
+    expect(mockMoveMessage).not.toHaveBeenCalled();
   });
 });

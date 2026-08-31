@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { access, mkdir, readFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { writeTextFileAtomic } from '../utils/atomic-write.js';
+import { writeFileAtomic, writeTextFileAtomic } from '../utils/atomic-write.js';
 import { MAIL_MCP_LATEST_SPEC, prepareMailMcpNpxRuntime } from './npm-runtime.js';
 
 const execFileAsync = promisify(execFile);
@@ -35,6 +35,24 @@ export interface WindowsServiceInstallResult extends WindowsServicePaths {
 interface PowerShellResult {
   stdout: string;
   stderr: string;
+}
+
+interface ServiceFileSnapshot {
+  path: string;
+  content?: Buffer;
+}
+
+interface WindowsTaskSnapshot {
+  exists: boolean;
+  xmlBase64?: string;
+  wasRunning: boolean;
+}
+
+interface WindowsServiceSnapshot {
+  files: ServiceFileSnapshot[];
+  task: WindowsTaskSnapshot;
+  userToken?: string;
+  processToken?: string;
 }
 
 export interface WindowsServiceDependencies {
@@ -280,53 +298,30 @@ $launcherPath = $env:MAIL_MCP_LAUNCHER_PATH
 $stopFile = $env:MAIL_MCP_STOP_FILE
 $serviceHost = $env:MAIL_MCP_SERVICE_HOST
 $servicePort = [int]$env:MAIL_MCP_SERVICE_PORT
-$healthUrl = $env:MAIL_MCP_HEALTH_URL
 $userId = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+
+function Get-MailMcpPortListeners {
+    @(Get-NetTCPConnection -LocalPort $servicePort -State Listen -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.LocalAddress -eq $serviceHost -or
+            ($serviceHost -eq 'localhost' -and ($_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1'))
+        })
+}
 
 $existingTask = Get-ScheduledTask -TaskName $taskName -TaskPath '\\' -ErrorAction SilentlyContinue
 if ($null -ne $existingTask) {
     New-Item -ItemType File -Path $stopFile -Force | Out-Null
     Stop-ScheduledTask -TaskName $taskName -TaskPath '\\' -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 1
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        Start-Sleep -Milliseconds 200
+        $listeners = Get-MailMcpPortListeners
+    } while ($listeners.Count -gt 0 -and (Get-Date) -lt $deadline)
 }
 
-try {
-    $health = Invoke-RestMethod -Uri $healthUrl -TimeoutSec 2
-    if ($health.status -eq 'ok') {
-        $listeners = Get-NetTCPConnection -LocalPort $servicePort -State Listen -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.LocalAddress -eq $serviceHost -or
-                ($serviceHost -eq 'localhost' -and ($_.LocalAddress -eq '127.0.0.1' -or $_.LocalAddress -eq '::1'))
-            }
-        $stoppedManagedListener = $false
-        $listenerPids = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
-        foreach ($listenerPid in $listenerPids) {
-            $isCurrentMailMcp = $health.service -eq 'mail-mcp'
-            $isLegacyMailMcp = $false
-            if ($null -ne $existingTask -and [string]::IsNullOrWhiteSpace([string]$health.service)) {
-                $owner = Get-CimInstance Win32_Process -Filter "ProcessId = $listenerPid" -ErrorAction SilentlyContinue
-                $isLegacyMailMcp = $null -ne $owner -and $owner.CommandLine -match '(?i)mail-mcp'
-            }
-            if ($isCurrentMailMcp -or $isLegacyMailMcp) {
-                Stop-Process -Id $listenerPid -Force -ErrorAction Stop
-                $stoppedManagedListener = $true
-            }
-        }
-        if ($listeners -and -not $stoppedManagedListener) {
-            throw "Port $servicePort is occupied by a process that could not be verified as Mail MCP"
-        }
-        $deadline = (Get-Date).AddSeconds(10)
-        do {
-            Start-Sleep -Milliseconds 200
-            $remaining = Get-NetTCPConnection -LocalPort $servicePort -State Listen -ErrorAction SilentlyContinue
-        } while ($remaining -and (Get-Date) -lt $deadline)
-        if ($remaining) {
-            throw "The previous Mail MCP process did not release port $servicePort"
-        }
-    }
-}
-catch [System.Net.WebException] {
-    # No managed Mail MCP listener is running yet.
+$listeners = Get-MailMcpPortListeners
+if ($listeners.Count -gt 0) {
+    throw "Port $servicePort is occupied after stopping the managed task; the installer will not terminate listener processes automatically"
 }
 
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
@@ -340,6 +335,52 @@ $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -
 Register-ScheduledTask -TaskName $taskName -TaskPath '\\' -Action $action -Trigger @($logonTrigger, $watchdogTrigger) -Settings $settings -Principal $principal -Description 'One shared loopback Mail MCP service for local MCP clients' -Force | Out-Null
 
 Start-ScheduledTask -TaskName $taskName -TaskPath '\\'
+`;
+}
+
+function buildWindowsTaskSnapshotScript(): string {
+  return `$ErrorActionPreference = 'Stop'
+$task = Get-ScheduledTask -TaskName $env:MAIL_MCP_TASK_NAME -TaskPath '\\' -ErrorAction SilentlyContinue
+if ($null -eq $task) {
+    [Console]::Out.Write(([pscustomobject]@{
+        exists = $false
+        wasRunning = $false
+    } | ConvertTo-Json -Compress))
+    exit 0
+}
+$xml = Export-ScheduledTask -TaskName $env:MAIL_MCP_TASK_NAME -TaskPath '\\'
+$xmlBase64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($xml))
+[Console]::Out.Write(([pscustomobject]@{
+    exists = $true
+    xmlBase64 = $xmlBase64
+    wasRunning = $task.State -eq 'Running'
+} | ConvertTo-Json -Compress))
+`;
+}
+
+function buildWindowsTaskStopScript(): string {
+  return `$ErrorActionPreference = 'Stop'
+$taskName = $env:MAIL_MCP_TASK_NAME
+$stopFile = $env:MAIL_MCP_STOP_FILE
+$task = Get-ScheduledTask -TaskName $taskName -TaskPath '\\' -ErrorAction SilentlyContinue
+if ($null -ne $task) {
+    New-Item -ItemType File -Path $stopFile -Force | Out-Null
+    Stop-ScheduledTask -TaskName $taskName -TaskPath '\\' -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 1
+    Unregister-ScheduledTask -TaskName $taskName -TaskPath '\\' -Confirm:$false
+}
+`;
+}
+
+function buildWindowsTaskRestoreScript(): string {
+  return `$ErrorActionPreference = 'Stop'
+$xml = [Text.Encoding]::UTF8.GetString(
+    [Convert]::FromBase64String($env:MAIL_MCP_TASK_XML_B64)
+)
+Register-ScheduledTask -TaskName $env:MAIL_MCP_TASK_NAME -TaskPath '\\' -Xml $xml -Force | Out-Null
+if ($env:MAIL_MCP_TASK_WAS_RUNNING -eq '1') {
+    Start-ScheduledTask -TaskName $env:MAIL_MCP_TASK_NAME -TaskPath '\\'
+}
 `;
 }
 
@@ -411,6 +452,147 @@ async function readUserEnvironmentVariable(
   return value === '' ? undefined : value;
 }
 
+async function restoreUserEnvironmentVariable(
+  name: string,
+  value: string | undefined,
+  runner: NonNullable<WindowsServiceDependencies['runPowerShell']>
+): Promise<void> {
+  await runner(
+    `[Environment]::SetEnvironmentVariable(
+    $env:MAIL_MCP_ENV_NAME,
+    $(if ($env:MAIL_MCP_ENV_WAS_PRESENT -eq '1') { $env:MAIL_MCP_ENV_VALUE } else { $null }),
+    'User'
+)
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class MailMcpEnvironmentRestoreBroadcast {
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    public static extern IntPtr SendMessageTimeout(
+        IntPtr hWnd, uint message, UIntPtr wParam, string lParam,
+        uint flags, uint timeout, out UIntPtr result);
+}
+'@
+$result = [UIntPtr]::Zero
+[void][MailMcpEnvironmentRestoreBroadcast]::SendMessageTimeout(
+    [IntPtr]0xffff, 0x001A, [UIntPtr]::Zero, 'Environment', 0x0002, 5000, [ref]$result
+)`,
+    {
+      MAIL_MCP_ENV_NAME: name,
+      MAIL_MCP_ENV_WAS_PRESENT: value === undefined ? '0' : '1',
+      ...(value === undefined ? {} : { MAIL_MCP_ENV_VALUE: value }),
+    }
+  );
+}
+
+async function snapshotServiceFile(path: string): Promise<ServiceFileSnapshot> {
+  try {
+    return { path, content: await readFile(path) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { path };
+    throw error;
+  }
+}
+
+async function restoreServiceFile(snapshot: ServiceFileSnapshot): Promise<void> {
+  if (snapshot.content === undefined) {
+    await rm(snapshot.path, { force: true });
+    return;
+  }
+  await writeFileAtomic(snapshot.path, snapshot.content);
+}
+
+async function readWindowsTaskSnapshot(
+  taskName: string,
+  runner: NonNullable<WindowsServiceDependencies['runPowerShell']>
+): Promise<WindowsTaskSnapshot> {
+  const result = await runner(buildWindowsTaskSnapshotScript(), {
+    MAIL_MCP_TASK_NAME: taskName,
+  });
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch (error) {
+    throw new Error('Could not snapshot the existing Mail MCP scheduled task', { cause: error });
+  }
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error('Could not snapshot the existing Mail MCP scheduled task');
+  }
+  const task = parsed as Record<string, unknown>;
+  if (task.exists === false && task.wasRunning === false) {
+    return { exists: false, wasRunning: false };
+  }
+  if (
+    task.exists !== true
+    || typeof task.xmlBase64 !== 'string'
+    || task.xmlBase64.length === 0
+    || typeof task.wasRunning !== 'boolean'
+  ) {
+    throw new Error('The existing Mail MCP scheduled task snapshot is invalid');
+  }
+  try {
+    Buffer.from(task.xmlBase64, 'base64').toString('utf8');
+  } catch (error) {
+    throw new Error('The existing Mail MCP scheduled task XML snapshot is invalid', { cause: error });
+  }
+  return {
+    exists: true,
+    xmlBase64: task.xmlBase64,
+    wasRunning: task.wasRunning,
+  };
+}
+
+async function rollbackWindowsService(
+  snapshot: WindowsServiceSnapshot,
+  paths: WindowsServicePaths,
+  taskName: string,
+  bearerTokenEnvVar: string,
+  runner: NonNullable<WindowsServiceDependencies['runPowerShell']>
+): Promise<void> {
+  const failures: Error[] = [];
+  const attempt = async (operation: () => Promise<void>): Promise<void> => {
+    try {
+      await operation();
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  };
+
+  await attempt(async () => {
+    await runner(buildWindowsTaskStopScript(), {
+      MAIL_MCP_TASK_NAME: taskName,
+      MAIL_MCP_STOP_FILE: join(paths.serviceDirectory, 'stop'),
+    });
+  });
+  for (const file of snapshot.files.slice(0, 2)) {
+    await attempt(() => restoreServiceFile(file));
+  }
+  await attempt(() => restoreUserEnvironmentVariable(
+    bearerTokenEnvVar,
+    snapshot.userToken,
+    runner,
+  ));
+  if (snapshot.processToken === undefined) {
+    delete process.env[bearerTokenEnvVar];
+  } else {
+    process.env[bearerTokenEnvVar] = snapshot.processToken;
+  }
+  await attempt(() => restoreServiceFile(snapshot.files[2]));
+  if (snapshot.task.exists) {
+    await attempt(async () => {
+      await runner(buildWindowsTaskRestoreScript(), {
+        MAIL_MCP_TASK_NAME: taskName,
+        MAIL_MCP_TASK_XML_B64: snapshot.task.xmlBase64,
+        MAIL_MCP_TASK_WAS_RUNNING: snapshot.task.wasRunning ? '1' : '0',
+      });
+    });
+  }
+
+  if (failures.length > 0) {
+    throw new AggregateError(failures, 'Failed to restore the previous Windows service state');
+  }
+}
+
 async function persistUserEnvironmentVariable(
   name: string,
   value: string,
@@ -475,52 +657,77 @@ export async function installWindowsHttpService(
   const runner = dependencies.runPowerShell ?? runPowerShell;
   const npxCliPath = await (dependencies.resolveNpxCliPath ?? resolveNpxCliPath)();
   const existingBearerToken = await readUserEnvironmentVariable(bearerTokenEnvVar, runner);
+  const taskSnapshot = await readWindowsTaskSnapshot(taskName, runner);
   const bearerToken = existingBearerToken ?? randomBytes(32).toString('base64url');
   const urlHost = host === '::1' ? '[::1]' : host;
   const url = `http://${urlHost}:${port}/mcp`;
   const healthUrl = `http://${urlHost}:${port}/health`;
-
-  await mkdir(paths.serviceDirectory, { recursive: true });
-  await mkdir(paths.logDirectory, { recursive: true });
-  await prepareMailMcpNpxRuntime(home);
-  await writeTextFileAtomic(
-    paths.supervisorPath,
-    buildWindowsServiceSupervisor({
-      nodePath: process.execPath,
-      npxCliPath,
-      paths,
-      bearerTokenEnvVar,
-      host,
-      port,
-      runtimeArgs: options.runtimeArgs,
-      packageSpec: options.packageSpec,
-    })
-  );
-  await writeTextFileAtomic(
-    paths.launcherPath,
-    buildWindowsServiceLauncher({
-      nodePath: process.execPath,
-      paths,
-      bearerTokenEnvVar,
-    })
-  );
-  await persistUserEnvironmentVariable(bearerTokenEnvVar, bearerToken, runner);
-  process.env[bearerTokenEnvVar] = bearerToken;
-
-  await runner(buildWindowsTaskRegistrationScript(), {
-    MAIL_MCP_TASK_NAME: taskName,
-    MAIL_MCP_LAUNCHER_PATH: paths.launcherPath,
-    MAIL_MCP_STOP_FILE: join(paths.serviceDirectory, 'stop'),
-    MAIL_MCP_SERVICE_HOST: host,
-    MAIL_MCP_SERVICE_PORT: String(port),
-    MAIL_MCP_HEALTH_URL: healthUrl,
-  });
+  const stopFile = join(paths.serviceDirectory, 'stop');
+  const snapshot: WindowsServiceSnapshot = {
+    files: await Promise.all([
+      snapshotServiceFile(paths.launcherPath),
+      snapshotServiceFile(paths.supervisorPath),
+      snapshotServiceFile(stopFile),
+    ]),
+    task: taskSnapshot,
+    userToken: existingBearerToken,
+    processToken: process.env[bearerTokenEnvVar],
+  };
 
   try {
+    await mkdir(paths.serviceDirectory, { recursive: true });
+    await mkdir(paths.logDirectory, { recursive: true });
+    await prepareMailMcpNpxRuntime(home);
+    await writeTextFileAtomic(
+      paths.supervisorPath,
+      buildWindowsServiceSupervisor({
+        nodePath: process.execPath,
+        npxCliPath,
+        paths,
+        bearerTokenEnvVar,
+        host,
+        port,
+        runtimeArgs: options.runtimeArgs,
+        packageSpec: options.packageSpec,
+      })
+    );
+    await writeTextFileAtomic(
+      paths.launcherPath,
+      buildWindowsServiceLauncher({
+        nodePath: process.execPath,
+        paths,
+        bearerTokenEnvVar,
+      })
+    );
+    await persistUserEnvironmentVariable(bearerTokenEnvVar, bearerToken, runner);
+    process.env[bearerTokenEnvVar] = bearerToken;
+
+    await runner(buildWindowsTaskRegistrationScript(), {
+      MAIL_MCP_TASK_NAME: taskName,
+      MAIL_MCP_LAUNCHER_PATH: paths.launcherPath,
+      MAIL_MCP_STOP_FILE: stopFile,
+      MAIL_MCP_SERVICE_HOST: host,
+      MAIL_MCP_SERVICE_PORT: String(port),
+    });
     await (dependencies.waitForHealth ?? waitForHealth)(healthUrl);
   } catch (error) {
     const details = await startupFailureDetails(paths.logDirectory);
-    throw new Error(`${(error as Error).message}${details}`);
+    const installError = new Error(`${(error as Error).message}${details}`, { cause: error });
+    try {
+      await rollbackWindowsService(
+        snapshot,
+        paths,
+        taskName,
+        bearerTokenEnvVar,
+        runner,
+      );
+    } catch (rollbackError) {
+      throw new AggregateError(
+        [installError, rollbackError as Error],
+        'Windows service installation failed and the previous state could not be fully restored',
+      );
+    }
+    throw installError;
   }
 
   return {

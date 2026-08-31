@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { loadCredentials, saveCredentials } from './keychain.js';
 
 export interface OAuth2Tokens {
@@ -18,15 +19,37 @@ interface OAuth2TokenResponse {
 const refreshes = new Map<string, Promise<string>>();
 const OAUTH2_REFRESH_TIMEOUT_MS = 30_000;
 
-function parseTokenEndpoint(value: string, accountId: string): string {
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname
+    .replace(/^\[|\]$/g, '')
+    .replace(/\.$/, '')
+    .toLowerCase();
+  if (normalized === 'localhost' || normalized === '::1') return true;
+  return isIP(normalized) === 4 && normalized.startsWith('127.');
+}
+
+export function validateOAuth2TokenEndpoint(value: string): string {
   try {
     const endpoint = new URL(value);
-    if (endpoint.protocol !== 'https:' && endpoint.protocol !== 'http:') {
-      throw new Error('unsupported protocol');
+    if (endpoint.protocol === 'https:') return endpoint.href;
+    if (endpoint.protocol === 'http:' && isLoopbackHostname(endpoint.hostname)) {
+      return endpoint.href;
     }
-    return endpoint.href;
   } catch {
-    throw new Error(`OAuth2 credentials for account ${accountId} contain an invalid tokenEndpoint`);
+    // The stable validation error below deliberately does not echo a URL that
+    // may contain credentials or other sensitive query parameters.
+  }
+  throw new Error('OAuth2 token endpoint must use HTTPS, except for loopback HTTP development endpoints');
+}
+
+function parseTokenEndpoint(value: string, accountId: string): string {
+  try {
+    return validateOAuth2TokenEndpoint(value);
+  } catch (error) {
+    throw new Error(
+      `OAuth2 credentials for account ${accountId} contain an invalid tokenEndpoint: ${(error as Error).message}`,
+      { cause: error },
+    );
   }
 }
 
@@ -83,6 +106,7 @@ async function refreshAccessToken(accountId: string, tokens: OAuth2Tokens): Prom
   try {
     response = await fetch(tokens.tokenEndpoint, {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded',
       },

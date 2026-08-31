@@ -23,22 +23,31 @@ try {
   if (!accountId) throw new Error('No mail account is configured');
 
   const foldersResult = await client.callTool({
-    name: 'list_folders',
-    arguments: { accountId },
+    name: 'mail_query',
+    arguments: { accountId, operation: 'listFolders', input: {} },
   });
   const folders = JSON.parse(textFrom(foldersResult));
 
   const probeSubject = process.env.MAIL_MCP_PROBE_SUBJECT;
   const messagesResult = await client.callTool(probeSubject
     ? {
-        name: 'search_emails',
-        arguments: { accountId, folder: 'INBOX', count: 20, subject: probeSubject },
+        name: 'mail_query',
+        arguments: {
+          accountId,
+          operation: 'searchMessages',
+          input: { folder: 'INBOX', limit: 20, subject: probeSubject },
+        },
       }
     : {
-        name: 'list_emails',
-        arguments: { accountId, folder: 'INBOX', count: 20, headerOnly: true },
+        name: 'mail_query',
+        arguments: {
+          accountId,
+          operation: 'listMessages',
+          input: { folder: 'INBOX', limit: 20, headerOnly: true },
+        },
       });
-  const messages = JSON.parse(textFrom(messagesResult));
+  const messagePage = JSON.parse(textFrom(messagesResult));
+  const messages = messagePage.items;
 
   let fullRead = false;
   let attachmentRead = false;
@@ -46,8 +55,8 @@ try {
 
   for (const message of messages) {
     const readResult = await client.callTool({
-      name: 'read_email',
-      arguments: { accountId, folder: 'INBOX', uid: String(message.uid) },
+      name: 'mail_query',
+      arguments: { accountId, operation: 'readMessage', input: { locator: message.locator } },
     });
     const mailText = textFrom(readResult);
     fullRead = fullRead || mailText.length > 0;
@@ -60,8 +69,12 @@ try {
 
     const filename = attachmentLine.slice(2, attachmentLine.lastIndexOf(' ('));
     const attachmentResult = await client.callTool({
-      name: 'get_attachment',
-      arguments: { accountId, folder: 'INBOX', uid: String(message.uid), filename },
+      name: 'mail_query',
+      arguments: {
+        accountId,
+        operation: 'getAttachment',
+        input: { locator: message.locator, filename },
+      },
     });
     const resource = attachmentResult.content.find(item => item.type === 'resource');
     if (resource?.resource?.blob) {

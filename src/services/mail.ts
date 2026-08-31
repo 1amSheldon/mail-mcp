@@ -1,4 +1,11 @@
-import { ImapClient, MessageMetadata, MailboxStatus, SenderEnvelope } from '../protocol/imap.js';
+import {
+  ImapClient,
+  type CopyMessagesResult,
+  type MailboxMetadata,
+  type MailboxStatus,
+  type MessageMetadata,
+  type SenderEnvelope,
+} from '../protocol/imap.js';
 import {
   SmtpClient,
   SmtpRecipientRejectedError,
@@ -9,11 +16,32 @@ import type { EmailAccount } from '../config.js';
 import { ValidationError } from '../errors.js';
 import { MessageBodyCache } from '../utils/message-cache.js';
 import { redactSensitiveContent } from '../utils/redact.js';
+import { validateRecipients } from '../utils/validation.js';
+import {
+  decodeMessageLocator,
+  encodeMessageLocator,
+  type MessageLocator,
+} from '../domain/message-locator.js';
+import type { OutgoingAttachment, OutgoingMessage as SmtpOutgoingMessage } from '../domain/outgoing-message.js';
+import {
+  PaginationSnapshotStore,
+  type PaginationPage,
+  type PaginationScope,
+} from '../utils/pagination-store.js';
 import type { ParsedMail } from 'mailparser';
 
 const DEFAULT_SENT_FOLDER = 'Sent';
+const DEFAULT_DRAFTS_FOLDER = 'Drafts';
+const DEFAULT_TRASH_FOLDER = 'Trash';
+const MAX_PAGINATION_SNAPSHOT_ITEMS = 10_000;
 const MAX_READ_BODY_CHARS = 200_000;
 const INLINE_DATA_IMAGE_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/_=-]+/gi;
+
+const CONVENTIONAL_MAILBOX_NAMES = {
+  '\\Sent': ['Sent', 'Sent Items', 'Sent Mail', '\u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0435', '\u041e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0435 \u043f\u0438\u0441\u044c\u043c\u0430', 'Gesendet', 'Envoyés'],
+  '\\Drafts': ['Drafts', 'Draft', '\u0427\u0435\u0440\u043d\u043e\u0432\u0438\u043a\u0438', 'Entwürfe', 'Brouillons'],
+  '\\Trash': ['Trash', 'Bin', 'Deleted Items', 'Deleted Messages', '\u041a\u043e\u0440\u0437\u0438\u043d\u0430', '\u0423\u0434\u0430\u043b\u0435\u043d\u043d\u044b\u0435', 'Papierkorb', 'Corbeille', 'Papelera'],
+} as const;
 
 export type DeliveryStatus =
   | 'sent_and_saved'
@@ -22,7 +50,11 @@ export type DeliveryStatus =
   | 'smtp_partially_accepted_sent_not_confirmed'
   | 'smtp_rejected'
   | 'smtp_connection_failed'
-  | 'smtp_outcome_unknown';
+  | 'smtp_outcome_unknown'
+  | 'sent_provider_managed'
+  | 'partially_sent_provider_managed'
+  | 'sent_without_saved_copy'
+  | 'partially_sent_without_saved_copy';
 
 export interface SendDeliveryResult {
   status: DeliveryStatus;
@@ -39,15 +71,79 @@ export interface SendDeliveryResult {
   error?: string;
 }
 
-interface OutgoingMessage {
-  to: string;
-  subject: string;
-  body: string;
-  isHtml: boolean;
-  cc?: string;
-  bcc?: string;
-  extraHeaders?: Record<string, string>;
+export interface MailSendMessage extends SmtpOutgoingMessage {
+  includeSignature?: boolean;
 }
+
+export interface LocatedMessageMetadata extends Omit<MessageMetadata, 'id'> {
+  id: string;
+  locator: string;
+}
+
+export interface ListEmailsPageOptions {
+  folder?: string;
+  limit?: number;
+  cursor?: string;
+  headerOnly?: boolean;
+}
+
+export interface SearchEmailsQuery {
+  from?: string;
+  to?: string;
+  cc?: string;
+  subject?: string;
+  since?: string;
+  before?: string;
+  keywords?: string;
+  messageId?: string;
+}
+
+export interface SearchEmailsPageOptions {
+  folder?: string;
+  limit?: number;
+  cursor?: string;
+  headerOnly?: boolean;
+}
+
+export interface RawEmailResult {
+  locator: string;
+  mediaType: 'message/rfc822';
+  transferEncoding: 'base64';
+  size: number;
+  contentBase64: string;
+}
+
+export interface CopyEmailResult extends CopyMessagesResult {
+  sourceLocator: string;
+  destinationLocator?: string;
+}
+
+export interface DraftCreationResult {
+  folder: string;
+  uid?: number;
+  locator?: string;
+  messageId?: string;
+}
+
+export interface BatchOperationItemResult {
+  uid?: string;
+  locator?: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface BatchOperationResult {
+  processed: number;
+  succeeded: number;
+  failed: number;
+  items: BatchOperationItemResult[];
+}
+
+export type BatchOperation =
+  | { type: 'move'; targetFolder: string }
+  | { type: 'delete' }
+  | { type: 'copy'; targetFolder: string }
+  | { type: 'label'; addLabels?: string[]; removeLabels?: string[] };
 
 /**
  * Pure helper — appends `signature` to `body` when `includeSignature` is true and
@@ -80,8 +176,13 @@ export class MailService {
   private account: EmailAccount;
 
   private sentFolderPromise: Promise<string> | null = null;
+  private draftsFolderPromise: Promise<string> | null = null;
+  private trashFolderPromise: Promise<string> | null = null;
   private readonly bodyCache = new MessageBodyCache();
   private readonly bodyFetches = new Map<string, Promise<ParsedMail>>();
+  private readonly paginationStore = new PaginationSnapshotStore<number>({
+    maxItemsPerSnapshot: MAX_PAGINATION_SNAPSHOT_ITEMS,
+  });
 
   constructor(account: EmailAccount, private readonly redact: boolean = false) {
     this.account = account;
@@ -104,14 +205,76 @@ export class MailService {
   async disconnect() {
     this.smtpClient.disconnect();
     await this.imapClient.disconnect();
+    this.paginationStore.clear();
   }
 
-  async listEmails(folder: string = 'INBOX', count: number = 10, offset: number = 0, headerOnly: boolean = false): Promise<MessageMetadata[]> {
-    return this.imapClient.listMessages(folder, count, offset, headerOnly);
+  async listEmailsPage(options: ListEmailsPageOptions = {}): Promise<PaginationPage<LocatedMessageMetadata>> {
+    const folder = options.folder ?? 'INBOX';
+    const limit = options.limit ?? 10;
+    const identity = await this.imapClient.getMailboxIdentity(folder);
+    const scope = this.paginationScope(identity.path, identity.uidValidity, JSON.stringify({
+      kind: 'list',
+      headerOnly: options.headerOnly ?? false,
+    }));
+
+    const page = options.cursor
+      ? this.paginationStore.getNextPage(options.cursor, scope, limit)
+      : this.paginationStore.getFirstPage(
+          scope,
+          await this.imapClient.listMessageUids(identity.path, MAX_PAGINATION_SNAPSHOT_ITEMS),
+          limit,
+        );
+    return this.hydrateUidPage(page, identity.path, identity.uidValidity, options.headerOnly ?? false);
   }
 
-  async searchEmails(query: { from?: string, to?: string, cc?: string, subject?: string, since?: string, before?: string, keywords?: string, messageId?: string }, folder: string = 'INBOX', count: number = 10, offset: number = 0): Promise<MessageMetadata[]> {
-    const criteria: any = {};
+  async searchEmailsPage(
+    query: SearchEmailsQuery,
+    options: SearchEmailsPageOptions = {}
+  ): Promise<PaginationPage<LocatedMessageMetadata>> {
+    const folder = options.folder ?? 'INBOX';
+    const limit = options.limit ?? 10;
+    const identity = await this.imapClient.getMailboxIdentity(folder);
+    const normalizedQuery = this.normalizeSearchQuery(query);
+    const scope = this.paginationScope(
+      identity.path,
+      identity.uidValidity,
+      JSON.stringify({
+        kind: 'search',
+        query: normalizedQuery,
+        headerOnly: options.headerOnly ?? false,
+      })
+    );
+
+    const page = options.cursor
+      ? this.paginationStore.getNextPage(options.cursor, scope, limit)
+      : this.paginationStore.getFirstPage(
+          scope,
+          await this.imapClient.searchMessageUids(
+            this.buildSearchCriteria(normalizedQuery),
+            identity.path,
+            MAX_PAGINATION_SNAPSHOT_ITEMS,
+          ),
+          limit,
+        );
+    return this.hydrateUidPage(page, identity.path, identity.uidValidity, options.headerOnly ?? false);
+  }
+
+  private async hydrateUidPage(
+    page: PaginationPage<number>,
+    mailbox: string,
+    uidValidity: string,
+    headerOnly: boolean,
+  ): Promise<PaginationPage<LocatedMessageMetadata>> {
+    const messages = await this.imapClient.fetchMessagesByUids(page.items, mailbox, headerOnly);
+    return {
+      items: this.locateMessages(messages, mailbox, uidValidity),
+      nextCursor: page.nextCursor,
+      total: page.total,
+    };
+  }
+
+  private buildSearchCriteria(query: SearchEmailsQuery): Record<string, unknown> {
+    const criteria: Record<string, unknown> = {};
     if (query.from) criteria.from = query.from;
     if (query.to) criteria.to = query.to;
     if (query.cc) criteria.cc = query.cc;
@@ -120,23 +283,129 @@ export class MailService {
     if (query.before) criteria.before = query.before;
     if (query.keywords) criteria.body = query.keywords;
     if (query.messageId) criteria.header = { 'Message-ID': query.messageId };
+    return criteria;
+  }
 
-    return this.imapClient.searchMessages(criteria, folder, count, offset);
+  private normalizeSearchQuery(query: SearchEmailsQuery): SearchEmailsQuery {
+    return Object.fromEntries(
+      Object.entries(query)
+        .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
+        .sort(([left], [right]) => left.localeCompare(right))
+    ) as SearchEmailsQuery;
   }
 
   async resolveSentFolder(explicitFolder?: string): Promise<string> {
     if (explicitFolder) return explicitFolder;
     if (this.account.sentFolder) return this.account.sentFolder;
     if (!this.sentFolderPromise) {
-      this.sentFolderPromise = this.imapClient
-        .findSpecialUseFolder('\\Sent')
-        .then(folder => folder || DEFAULT_SENT_FOLDER)
-        .catch(() => DEFAULT_SENT_FOLDER);
+      this.sentFolderPromise = this.resolveMailboxFolder('\\Sent', DEFAULT_SENT_FOLDER);
     }
     return this.sentFolderPromise;
   }
 
-  private async sendAndRecord(message: OutgoingMessage): Promise<SendDeliveryResult> {
+  async resolveDraftsFolder(explicitFolder?: string): Promise<string> {
+    if (explicitFolder) return explicitFolder;
+    if (!this.draftsFolderPromise) {
+      this.draftsFolderPromise = this.resolveMailboxFolder('\\Drafts', DEFAULT_DRAFTS_FOLDER);
+    }
+    return this.draftsFolderPromise;
+  }
+
+  async resolveTrashFolder(explicitFolder?: string): Promise<string> {
+    if (explicitFolder) return explicitFolder;
+    if (!this.trashFolderPromise) {
+      this.trashFolderPromise = this.resolveMailboxFolder('\\Trash', DEFAULT_TRASH_FOLDER);
+    }
+    return this.trashFolderPromise;
+  }
+
+  private paginationScope(mailbox: string, uidValidity: string, queryKey: string): PaginationScope {
+    return {
+      accountId: this.account.id,
+      mailbox,
+      uidValidity,
+      queryKey,
+    };
+  }
+
+  private locateMessages(
+    messages: MessageMetadata[],
+    mailbox: string,
+    uidValidity: string
+  ): LocatedMessageMetadata[] {
+    return messages.map(message => {
+      const locator = encodeMessageLocator({
+        accountId: this.account.id,
+        mailbox,
+        uidValidity,
+        uid: message.uid,
+      });
+      return { ...this.redactMessageMetadata(message), id: locator, locator };
+    });
+  }
+
+  private redactText(text: string): string {
+    return this.redact ? redactSensitiveContent(text) : text;
+  }
+
+  private redactMessageMetadata(message: MessageMetadata): MessageMetadata {
+    if (!this.redact) return message;
+    return {
+      ...message,
+      ...(message.subject !== undefined ? { subject: this.redactText(message.subject) } : {}),
+      ...(message.from !== undefined ? { from: this.redactText(message.from) } : {}),
+      ...(message.snippet !== undefined ? { snippet: this.redactText(message.snippet) } : {}),
+    };
+  }
+
+  private async resolveLocator(locator: string): Promise<MessageLocator> {
+    const decoded = decodeMessageLocator(locator);
+    if (decoded.accountId !== this.account.id) {
+      throw new ValidationError('Message locator belongs to a different account.');
+    }
+    const identity = await this.imapClient.getMailboxIdentity(decoded.mailbox);
+    if (identity.path !== decoded.mailbox || identity.uidValidity !== decoded.uidValidity) {
+      throw new ValidationError('Message locator is stale because the mailbox identity changed.');
+    }
+    return decoded;
+  }
+
+  private async resolveMailboxFolder(
+    specialUse: keyof typeof CONVENTIONAL_MAILBOX_NAMES,
+    fallback: string
+  ): Promise<string> {
+    const specialFolder = await this.imapClient.findSpecialUseFolder(specialUse).catch(() => undefined);
+    if (specialFolder) return specialFolder;
+
+    const folders = await this.imapClient.listFolders().catch(() => [] as string[]);
+    const conventionalNames = CONVENTIONAL_MAILBOX_NAMES[specialUse];
+    for (const name of conventionalNames) {
+      const normalized = name.toLocaleLowerCase();
+      const match = folders.find(folder => {
+        const leaf = folder.split(/[\\/]/).at(-1) ?? folder;
+        return leaf.toLocaleLowerCase() === normalized;
+      });
+      if (match) return match;
+    }
+    return fallback;
+  }
+
+  private sentCopyPolicy(): 'manual' | 'provider' | 'none' {
+    if (this.account.sentPolicy === 'always') return 'manual';
+    if (this.account.sentPolicy === 'never') return 'none';
+    const hosts = [this.account.host, this.account.smtpHost]
+      .filter((host): host is string => typeof host === 'string')
+      .map(host => host.trim().toLowerCase());
+    const providerManaged = hosts.some(host =>
+      host === 'gmail.com' || host.endsWith('.gmail.com') ||
+      host === 'googlemail.com' || host.endsWith('.googlemail.com') ||
+      host === 'zoho.com' || host.endsWith('.zoho.com') ||
+      /^([a-z0-9-]+\.)*zoho\.(eu|in|jp|ca|com\.au)$/.test(host)
+    );
+    return providerManaged ? 'provider' : 'manual';
+  }
+
+  private async sendAndRecord(message: SmtpOutgoingMessage): Promise<SendDeliveryResult> {
     try {
       await this.ensureSmtp();
     } catch (error) {
@@ -155,24 +424,7 @@ export class MailService {
 
     let info;
     try {
-      info = message.extraHeaders
-        ? await this.smtpClient.send(
-            message.to,
-            message.subject,
-            message.body,
-            message.isHtml,
-            message.cc,
-            message.bcc,
-            message.extraHeaders
-          )
-        : await this.smtpClient.send(
-            message.to,
-            message.subject,
-            message.body,
-            message.isHtml,
-            message.cc,
-            message.bcc
-          );
+      info = await this.smtpClient.sendMessage(message);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       if (error instanceof SmtpRecipientRejectedError) {
@@ -220,8 +472,30 @@ export class MailService {
       };
     }
 
-    const sentFolder = await this.resolveSentFolder();
     const partial = info.rejected.length > 0;
+    const sentCopyPolicy = this.sentCopyPolicy();
+    if (sentCopyPolicy !== 'manual') {
+      const providerManaged = sentCopyPolicy === 'provider';
+      return {
+        status: providerManaged
+          ? (partial ? 'partially_sent_provider_managed' : 'sent_provider_managed')
+          : (partial ? 'partially_sent_without_saved_copy' : 'sent_without_saved_copy'),
+        smtpAccepted: true,
+        accepted: info.accepted,
+        rejected: info.rejected,
+        ...(info.messageId ? { messageId: info.messageId } : {}),
+        sentFolderSaved: false,
+        retrySafe: false,
+        nextAction: partial
+          ? 'Do not resend accepted recipients. Review the rejected recipient list.'
+          : 'Do not resend this message.',
+        warning: providerManaged
+          ? 'The provider manages Sent copies; manual IMAP append was skipped to prevent duplicates.'
+          : 'The account sentPolicy is never; no Sent copy was appended.',
+      };
+    }
+
+    const sentFolder = await this.resolveSentFolder();
     try {
       const appendResult = await this.imapClient.appendMessage(sentFolder, info.rawMessage, ['\\Seen']);
       return {
@@ -258,12 +532,56 @@ export class MailService {
     }
   }
 
-  async sendEmail(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<SendDeliveryResult> {
-    const effectiveBody = applySignature(body, this.account.signature, isHtml, includeSignature);
-    return this.sendAndRecord({ to, subject, body: effectiveBody, isHtml, cc, bcc });
+  async sendMessage(message: MailSendMessage): Promise<SendDeliveryResult> {
+    return this.sendAndRecord(this.effectiveOutgoingMessage(message));
   }
 
-  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<SendDeliveryResult> {
+  private effectiveOutgoingMessage(message: MailSendMessage): SmtpOutgoingMessage {
+    this.validateFromAddress(message.from);
+    if (this.account.allowedRecipients && this.account.allowedRecipients.length > 0) {
+      validateRecipients(
+        [message.to, message.cc, message.bcc],
+        this.account.allowedRecipients,
+        this.account.id,
+      );
+    }
+    const includeSignature = message.includeSignature ?? true;
+    const { includeSignature: _includeSignature, ...outgoing } = message;
+    void _includeSignature;
+    const effective: SmtpOutgoingMessage = {
+      ...outgoing,
+      ...(message.text !== undefined
+        ? { text: applySignature(message.text, this.account.signature, false, includeSignature) }
+        : {}),
+      ...(message.html !== undefined
+        ? { html: applySignature(message.html, this.account.signature, true, includeSignature) }
+        : {}),
+    };
+    return effective;
+  }
+
+  private validateFromAddress(from: string | undefined): void {
+    if (!from) return;
+    const address = (from.match(/<([^<>]+)>/)?.[1] ?? from).trim().toLowerCase();
+    const allowed = [this.account.user, ...(this.account.fromAliases ?? [])]
+      .map(candidate => candidate.trim().toLowerCase());
+    if (!allowed.includes(address)) {
+      throw new ValidationError('From must match the account address or a configured alias.');
+    }
+  }
+
+  async sendEmail(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<SendDeliveryResult> {
+    return this.sendMessage({
+      to,
+      subject,
+      ...(isHtml ? { html: body } : { text: body }),
+      ...(cc ? { cc } : {}),
+      ...(bcc ? { bcc } : {}),
+      includeSignature,
+    });
+  }
+
+  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[]): Promise<SendDeliveryResult> {
     const parsed = await this._cachedFetchBody(uid, folder);
 
     const originalMessageId = parsed.messageId;
@@ -281,9 +599,7 @@ export class MailService {
     }
 
     // Determine reply-to address (original sender)
-    const originalFrom = Array.isArray(parsed.from?.value)
-      ? parsed.from!.value[0]?.address
-      : (parsed.from as any)?.address;
+    const originalFrom = parsed.replyTo?.value[0]?.address ?? parsed.from?.value[0]?.address;
     if (!originalFrom) {
       throw new ValidationError('Cannot reply because the original message has no valid From address.');
     }
@@ -297,18 +613,123 @@ export class MailService {
 
     const effectiveBody = applySignature(body, this.account.signature, isHtml, includeSignature);
 
-    return this.sendAndRecord({
+    return this.sendMessage({
       to: replyTo,
       subject: replySubject,
-      body: effectiveBody,
-      isHtml,
-      cc,
-      bcc,
-      extraHeaders: Object.keys(extraHeaders).length > 0 ? extraHeaders : undefined,
+      ...(isHtml ? { html: effectiveBody } : { text: effectiveBody }),
+      ...(cc ? { cc } : {}),
+      ...(bcc ? { bcc } : {}),
+      ...(attachments && attachments.length > 0 ? { attachments } : {}),
+      threading: {
+        ...(extraHeaders['In-Reply-To'] ? { inReplyTo: extraHeaders['In-Reply-To'] } : {}),
+        ...(extraHeaders.References ? { references: extraHeaders.References } : {}),
+      },
+      includeSignature: false,
     });
   }
 
-  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<SendDeliveryResult> {
+  async replyLocatedEmail(
+    locator: string,
+    body: string,
+    isHtml: boolean = false,
+    cc?: string,
+    bcc?: string,
+    includeSignature: boolean = true,
+    attachments?: OutgoingAttachment[],
+  ): Promise<SendDeliveryResult> {
+    const resolved = await this.resolveLocator(locator);
+    return this.replyEmail(
+      resolved.uid.toString(),
+      resolved.mailbox,
+      body,
+      isHtml,
+      cc,
+      bcc,
+      includeSignature,
+      attachments,
+    );
+  }
+
+  async replyAllEmail(
+    locator: string,
+    body: string,
+    options: {
+      isHtml?: boolean;
+      bcc?: string;
+      includeSignature?: boolean;
+      includeOriginalAttachments?: boolean;
+      attachments?: OutgoingAttachment[];
+    } = {}
+  ): Promise<SendDeliveryResult> {
+    const resolved = await this.resolveLocator(locator);
+    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox);
+    const selfAddresses = [this.account.user, ...(this.account.fromAliases ?? [])]
+      .map(address => address.trim().toLowerCase());
+    const seen = new Set<string>(selfAddresses);
+    const unique = (addresses: Array<string | undefined>): string[] => {
+      const result: string[] = [];
+      for (const candidate of addresses) {
+        if (!candidate) continue;
+        const normalized = candidate.trim().toLowerCase();
+        if (!normalized || seen.has(normalized)) continue;
+        seen.add(normalized);
+        result.push(candidate);
+      }
+      return result;
+    };
+
+    const replyTargets = unique([
+      ...((parsed.replyTo?.value ?? parsed.from?.value ?? []).map(address => address.address)),
+    ]);
+    const originalTo = unique(this.addresses(parsed.to));
+    const originalCc = unique(this.addresses(parsed.cc));
+    const toRecipients = replyTargets.length > 0 ? replyTargets : originalTo;
+    const ccRecipients = replyTargets.length > 0 ? [...originalTo, ...originalCc] : originalCc;
+    if (toRecipients.length === 0) {
+      throw new ValidationError('Cannot reply all because the original message has no recipient other than this account.');
+    }
+
+    const originalMessageId = parsed.messageId;
+    const existingReferences = parsed.headers.get('references');
+    const references = originalMessageId
+      ? `${existingReferences ? String(existingReferences) + ' ' : ''}${originalMessageId}`
+      : undefined;
+    const subject = parsed.subject?.startsWith('Re: ')
+      ? parsed.subject
+      : `Re: ${parsed.subject ?? ''}`;
+    const originalAttachments: OutgoingAttachment[] = options.includeOriginalAttachments
+      ? (parsed.attachments ?? []).map(attachment => ({
+          contentBase64: attachment.content.toString('base64'),
+          filename: attachment.filename || 'attachment',
+          contentType: attachment.contentType,
+          contentDisposition: attachment.contentDisposition === 'inline' ? 'inline' : 'attachment',
+          ...(attachment.contentId ? { cid: attachment.contentId } : {}),
+        }))
+      : [];
+    const attachments = [...originalAttachments, ...(options.attachments ?? [])];
+
+    return this.sendMessage({
+      to: toRecipients.join(', '),
+      subject,
+      ...(options.isHtml ? { html: body } : { text: body }),
+      ...(ccRecipients.length > 0 ? { cc: ccRecipients.join(', ') } : {}),
+      ...(options.bcc ? { bcc: options.bcc } : {}),
+      ...(attachments.length > 0 ? { attachments } : {}),
+      threading: {
+        ...(originalMessageId ? { inReplyTo: originalMessageId } : {}),
+        ...(references ? { references } : {}),
+      },
+      includeSignature: options.includeSignature ?? true,
+    });
+  }
+
+  private addresses(value: ParsedMail['to'] | ParsedMail['cc']): Array<string | undefined> {
+    if (!value) return [];
+    const objects = Array.isArray(value) ? value : [value];
+    return objects.flatMap(object => object.value.map(address => address.address));
+  }
+
+  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], includeOriginalAttachments: boolean = false): Promise<SendDeliveryResult> {
     const parsed = await this._cachedFetchBody(uid, folder);
 
     // Build subject with "Fwd: " prefix
@@ -339,26 +760,86 @@ export class MailService {
 
     const combinedBody = body + forwardedBlock;
     const effectiveBody = applySignature(combinedBody, this.account.signature, isHtml, includeSignature);
+    const originalAttachments: OutgoingAttachment[] = includeOriginalAttachments
+      ? (parsed.attachments ?? []).map(attachment => ({
+          contentBase64: attachment.content.toString('base64'),
+          filename: attachment.filename || 'attachment',
+          contentType: attachment.contentType,
+          contentDisposition: attachment.contentDisposition === 'inline' ? 'inline' : 'attachment',
+          ...(attachment.contentId ? { cid: attachment.contentId } : {}),
+        }))
+      : [];
+    const outgoingAttachments = [...originalAttachments, ...(attachments ?? [])];
 
-    return this.sendAndRecord({ to, subject: fwdSubject, body: effectiveBody, isHtml, cc, bcc });
+    return this.sendMessage({
+      to,
+      subject: fwdSubject,
+      ...(isHtml ? { html: effectiveBody } : { text: effectiveBody }),
+      ...(cc ? { cc } : {}),
+      ...(bcc ? { bcc } : {}),
+      ...(outgoingAttachments.length > 0 ? { attachments: outgoingAttachments } : {}),
+      includeSignature: false,
+    });
+  }
+
+  async forwardLocatedEmail(
+    locator: string,
+    to: string,
+    body: string = '',
+    isHtml: boolean = false,
+    cc?: string,
+    bcc?: string,
+    includeSignature: boolean = true,
+    attachments?: OutgoingAttachment[],
+    includeOriginalAttachments: boolean = false,
+  ): Promise<SendDeliveryResult> {
+    const resolved = await this.resolveLocator(locator);
+    return this.forwardEmail(
+      resolved.uid.toString(),
+      resolved.mailbox,
+      to,
+      body,
+      isHtml,
+      cc,
+      bcc,
+      includeSignature,
+      attachments,
+      includeOriginalAttachments,
+    );
+  }
+
+  async createDraftMessage(message: MailSendMessage): Promise<DraftCreationResult> {
+    const effective = this.effectiveOutgoingMessage(message);
+    const composed = await this.smtpClient.composeMessage(effective, { stripBcc: false });
+    const draftsFolder = await this.resolveDraftsFolder();
+    const appended = await this.imapClient.appendMessage(draftsFolder, composed.rawMessage, ['\\Draft']);
+    let locator: string | undefined;
+    if (appended.uid !== undefined) {
+      const identity = await this.imapClient.getMailboxIdentity(draftsFolder);
+      locator = encodeMessageLocator({
+        accountId: this.account.id,
+        mailbox: identity.path,
+        uidValidity: identity.uidValidity,
+        uid: appended.uid,
+      });
+    }
+    return {
+      folder: draftsFolder,
+      ...(appended.uid !== undefined ? { uid: appended.uid } : {}),
+      ...(locator ? { locator } : {}),
+      ...(composed.messageId ? { messageId: composed.messageId } : {}),
+    };
   }
 
   async createDraft(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<void> {
-    const effectiveBody = applySignature(body, this.account.signature, isHtml, includeSignature);
-
-    const headers = [
-      `From: ${this.account.user}`,
-      `To: ${to}`,
-      ...(cc ? [`Cc: ${cc}`] : []),
-      ...(bcc ? [`Bcc: ${bcc}`] : []),
-      `Subject: ${subject}`,
-      'MIME-Version: 1.0',
-      `Content-Type: ${isHtml ? 'text/html' : 'text/plain'}; charset=utf-8`,
-      '',
-      effectiveBody
-    ].join('\r\n');
-
-    await this.imapClient.appendMessage('Drafts', headers, ['\\Draft']);
+    await this.createDraftMessage({
+      to,
+      subject,
+      ...(isHtml ? { html: body } : { text: body }),
+      ...(cc ? { cc } : {}),
+      ...(bcc ? { bcc } : {}),
+      includeSignature,
+    });
   }
 
   private async _cachedFetchBody(uid: string, folder: string): Promise<ParsedMail> {
@@ -449,14 +930,14 @@ export class MailService {
       });
     }
 
-    let header = `**From:** ${parsed.from?.text || 'Unknown'}\n`;
+    let header = `**From:** ${this.redactText(parsed.from?.text || 'Unknown')}\n`;
     const toText = Array.isArray(parsed.to) ? parsed.to.map(t => t.text).join(', ') : parsed.to?.text;
-    header += `**To:** ${toText || 'Unknown'}\n`;
+    header += `**To:** ${this.redactText(toText || 'Unknown')}\n`;
     if (parsed.cc) {
       const ccText = Array.isArray(parsed.cc) ? parsed.cc.map(t => t.text).join(', ') : parsed.cc.text;
-      header += `**Cc:** ${ccText}\n`;
+      header += `**Cc:** ${this.redactText(ccText)}\n`;
     }
-    header += `**Subject:** ${parsed.subject || 'No Subject'}\n`;
+    header += `**Subject:** ${this.redactText(parsed.subject || 'No Subject')}\n`;
     header += `**Date:** ${parsed.date?.toISOString() || 'Unknown'}\n`;
     
     // Check for thread ID in headers
@@ -492,12 +973,34 @@ export class MailService {
     if (content.length > MAX_READ_BODY_CHARS) {
       content = `${content.slice(0, MAX_READ_BODY_CHARS)}\n\n[Body truncated at ${MAX_READ_BODY_CHARS} characters]`;
     }
-    const body = this.redact ? redactSensitiveContent(content) : content;
+    const body = this.redactText(content);
     return header + body + attachmentInfo;
   }
 
+  async readLocatedEmail(locator: string): Promise<string> {
+    const resolved = await this.resolveLocator(locator);
+    return this.readEmail(resolved.uid.toString(), resolved.mailbox);
+  }
+
   async getThread(threadId: string, folder: string = 'INBOX'): Promise<MessageMetadata[]> {
-    return this.imapClient.fetchThreadMessages(threadId, folder);
+    const messages = await this.imapClient.fetchThreadMessages(threadId, folder);
+    return messages.map(message => this.redactMessageMetadata(message));
+  }
+
+  async readRawEmail(locator: string, maxBytes: number = 10 * 1024 * 1024): Promise<RawEmailResult> {
+    const resolved = await this.resolveLocator(locator);
+    const content = await this.imapClient.fetchRawMessage(
+      resolved.uid.toString(),
+      resolved.mailbox,
+      maxBytes
+    );
+    return {
+      locator,
+      mediaType: 'message/rfc822',
+      transferEncoding: 'base64',
+      size: content.length,
+      contentBase64: content.toString('base64'),
+    };
   }
 
   async downloadAttachment(uid: string, filename: string, folder: string = 'INBOX', maxBytes: number = 50 * 1024 * 1024): Promise<{ content: Buffer, contentType: string }> {
@@ -521,6 +1024,15 @@ export class MailService {
     };
   }
 
+  async downloadLocatedAttachment(
+    locator: string,
+    filename: string,
+    maxBytes: number = 50 * 1024 * 1024,
+  ): Promise<{ content: Buffer, contentType: string }> {
+    const resolved = await this.resolveLocator(locator);
+    return this.downloadAttachment(resolved.uid.toString(), filename, resolved.mailbox, maxBytes);
+  }
+
   async extractAttachmentText(uid: string, filename: string, folder: string = 'INBOX'): Promise<string> {
     const { content, contentType } = await this.downloadAttachment(uid, filename, folder);
     if (contentType === 'application/pdf') {
@@ -531,15 +1043,20 @@ export class MailService {
       const parser = new PDFParse({ data: content });
       try {
         const result = await parser.getText();
-        return result.text;
+        return this.redactText(result.text);
       } finally {
         await parser.destroy();
       }
     } else if (contentType.startsWith('text/')) {
-      return content.toString('utf-8');
+      return this.redactText(content.toString('utf-8'));
     } else {
       throw new Error(`Extraction not supported for content type: ${contentType}`);
     }
+  }
+
+  async extractLocatedAttachmentText(locator: string, filename: string): Promise<string> {
+    const resolved = await this.resolveLocator(locator);
+    return this.extractAttachmentText(resolved.uid.toString(), filename, resolved.mailbox);
   }
 
   async extractContacts(folder: string = 'INBOX', count: number = 100): Promise<ContactInfo[]> {
@@ -563,7 +1080,7 @@ export class MailService {
     // Build and sort
     const contacts: ContactInfo[] = Array.from(map.entries()).map(([email, data]) => ({
       email,
-      name: data.name,
+      name: this.redactText(data.name),
       count: data.count,
       lastSeen: data.lastDate.toISOString(),
     }));
@@ -580,6 +1097,55 @@ export class MailService {
     return this.imapClient.listFolders();
   }
 
+  async listMailboxMetadata(): Promise<MailboxMetadata[]> {
+    return this.imapClient.listMailboxMetadata();
+  }
+
+  async createMailbox(path: string): Promise<{ path: string; created: boolean; mailboxId?: string }> {
+    return this.imapClient.createMailbox(path);
+  }
+
+  async renameMailbox(path: string, newPath: string): Promise<{ path: string; newPath: string }> {
+    const result = await this.imapClient.renameMailbox(path, newPath);
+    this.clearMailboxResolutionCaches();
+    this.paginationStore.clear();
+    return result;
+  }
+
+  async deleteMailbox(path: string): Promise<{ path: string }> {
+    const result = await this.imapClient.deleteMailbox(path);
+    this.clearMailboxResolutionCaches();
+    this.paginationStore.clear();
+    return result;
+  }
+
+  async copyEmail(locator: string, targetFolder: string): Promise<CopyEmailResult> {
+    const source = await this.resolveLocator(locator);
+    const result = await this.imapClient.copyMessage(source.uid.toString(), source.mailbox, targetFolder);
+    const destinationUid = result.uidMap?.[source.uid.toString()];
+    let destinationLocator: string | undefined;
+    if (destinationUid !== undefined) {
+      const identity = await this.imapClient.getMailboxIdentity(result.destination || targetFolder);
+      destinationLocator = encodeMessageLocator({
+        accountId: this.account.id,
+        mailbox: identity.path,
+        uidValidity: identity.uidValidity,
+        uid: destinationUid,
+      });
+    }
+    return {
+      ...result,
+      sourceLocator: locator,
+      ...(destinationLocator ? { destinationLocator } : {}),
+    };
+  }
+
+  private clearMailboxResolutionCaches(): void {
+    this.sentFolderPromise = null;
+    this.draftsFolderPromise = null;
+    this.trashFolderPromise = null;
+  }
+
   async getMailboxStats(folders?: string[]): Promise<MailboxStatus[]> {
     const targetFolders = (!folders || folders.length === 0)
       ? await this.imapClient.listFolders()
@@ -588,26 +1154,105 @@ export class MailService {
   }
 
   async moveMessage(uid: string, sourceFolder: string, targetFolder: string): Promise<void> {
-    return this.imapClient.moveMessage(uid, sourceFolder, targetFolder);
+    await this.imapClient.moveMessage(uid, sourceFolder, targetFolder);
+    this.invalidateBodyCache(sourceFolder, uid);
   }
 
-  async deleteEmail(uid: string, folder: string = 'INBOX'): Promise<void> {
+  async moveLocatedEmail(locator: string, targetFolder: string): Promise<void> {
+    const resolved = await this.resolveLocator(locator);
+    await this.moveMessage(resolved.uid.toString(), resolved.mailbox, targetFolder);
+  }
+
+  async deleteEmail(uid: string, folder: string = 'INBOX', explicitTrashFolder?: string): Promise<void> {
+    const trashFolder = await this.resolveTrashFolder(explicitTrashFolder);
+    if (trashFolder.toLocaleLowerCase() === folder.toLocaleLowerCase()) {
+      throw new ValidationError('Message is already in Trash. Use permanentlyDeleteEmail for irreversible deletion.');
+    }
+    await this.imapClient.moveMessage(uid, folder, trashFolder);
+    this.invalidateBodyCache(folder, uid);
+  }
+
+  async deleteLocatedEmail(locator: string, explicitTrashFolder?: string): Promise<void> {
+    const resolved = await this.resolveLocator(locator);
+    await this.deleteEmail(resolved.uid.toString(), resolved.mailbox, explicitTrashFolder);
+  }
+
+  async permanentlyDeleteEmail(uid: string, folder: string = 'Trash'): Promise<void> {
     await this.imapClient.deleteMessage(uid, folder);
     this.invalidateBodyCache(folder, uid);
+  }
+
+  async permanentlyDeleteLocatedEmail(locator: string): Promise<void> {
+    const resolved = await this.resolveLocator(locator);
+    await this.permanentlyDeleteEmail(resolved.uid.toString(), resolved.mailbox);
   }
 
   async modifyLabels(uid: string, folder: string, addLabels: string[], removeLabels: string[]): Promise<void> {
     return this.imapClient.modifyLabels(uid, folder, addLabels, removeLabels);
   }
 
+  async modifyLocatedLabels(locator: string, addLabels: string[], removeLabels: string[]): Promise<void> {
+    const resolved = await this.resolveLocator(locator);
+    return this.modifyLabels(resolved.uid.toString(), resolved.mailbox, addLabels, removeLabels);
+  }
+
+  private async executeBatchGroup(
+    entries: readonly { uid: string; locator?: string }[],
+    folder: string,
+    operation: BatchOperation,
+  ): Promise<BatchOperationItemResult[]> {
+    if (entries.length === 0) return [];
+    const uids = entries.map(entry => entry.uid);
+    try {
+      switch (operation.type) {
+        case 'move':
+          await this.imapClient.batchMoveMessages(uids, folder, operation.targetFolder);
+          for (const uid of uids) this.invalidateBodyCache(folder, uid);
+          break;
+        case 'delete': {
+          const trashFolder = await this.resolveTrashFolder();
+          if (trashFolder.toLocaleLowerCase() === folder.toLocaleLowerCase()) {
+            throw new ValidationError('Message is already in Trash. Use permanentlyDeleteEmail for irreversible deletion.');
+          }
+          await this.imapClient.batchMoveMessages(uids, folder, trashFolder);
+          for (const uid of uids) this.invalidateBodyCache(folder, uid);
+          break;
+        }
+        case 'copy':
+          await this.imapClient.batchCopyMessages(uids, folder, operation.targetFolder);
+          break;
+        case 'label':
+          await this.imapClient.batchModifyLabels(
+            uids,
+            folder,
+            operation.addLabels ?? [],
+            operation.removeLabels ?? [],
+          );
+          break;
+        default:
+          throw new Error(`Unknown batch operation type: ${(operation as { type: string }).type}`);
+      }
+      return entries.map(entry => ({
+        ...(entry.uid !== undefined ? { uid: entry.uid } : {}),
+        ...(entry.locator !== undefined ? { locator: entry.locator } : {}),
+        success: true,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return entries.map(entry => ({
+        ...(entry.uid !== undefined ? { uid: entry.uid } : {}),
+        ...(entry.locator !== undefined ? { locator: entry.locator } : {}),
+        success: false,
+        error: message,
+      }));
+    }
+  }
+
   async batchOperations(
     uids: string[],
     folder: string,
-    operation:
-      | { type: 'move'; targetFolder: string }
-      | { type: 'delete' }
-      | { type: 'label'; addLabels?: string[]; removeLabels?: string[] }
-  ): Promise<{ processed: number }> {
+    operation: BatchOperation,
+  ): Promise<BatchOperationResult> {
     if (uids.length === 0) {
       throw new Error('No UIDs provided for batch operation');
     }
@@ -615,21 +1260,95 @@ export class MailService {
       throw new Error('Batch operations are limited to 100 emails at once');
     }
 
-    if (operation.type === 'move') {
-      await this.imapClient.batchMoveMessages(uids, folder, operation.targetFolder);
-    } else if (operation.type === 'delete') {
-      await this.imapClient.batchDeleteMessages(uids, folder);
-    } else if (operation.type === 'label') {
-      await this.imapClient.batchModifyLabels(
-        uids,
-        folder,
-        operation.addLabels || [],
-        operation.removeLabels || []
-      );
-    } else {
-      throw new Error(`Unknown batch operation type: ${(operation as any).type}`);
+    // One IMAP command per operation keeps mailbox work bounded. The result
+    // still contains one item per requested UID; if the command fails before
+    // IMAP reports success, every item is reported with the same error and no
+    // retry is attempted because the server may have applied the command.
+    const items = await this.executeBatchGroup(
+      uids.map(uid => ({ uid })),
+      folder,
+      operation,
+    );
+
+    const succeeded = items.filter(item => item.success).length;
+    return {
+      processed: items.length,
+      succeeded,
+      failed: items.length - succeeded,
+      items,
+    };
+  }
+
+  async batchLocatedOperations(
+    locators: string[],
+    operation: BatchOperation,
+  ): Promise<BatchOperationResult> {
+    if (locators.length === 0) {
+      throw new Error('No message locators provided for batch operation');
+    }
+    if (locators.length > 100) {
+      throw new Error('Batch operations are limited to 100 messages at once');
     }
 
-    return { processed: uids.length };
+    type ResolvedEntry = { index: number; locator: string; uid: string; mailbox: string };
+    const items: Array<BatchOperationItemResult | undefined> = new Array(locators.length);
+    const entries: ResolvedEntry[] = [];
+    const identities = new Map<string, Promise<{ path: string; uidValidity: string }>>();
+
+    for (const [index, locator] of locators.entries()) {
+      try {
+        const decoded = decodeMessageLocator(locator);
+        if (decoded.accountId !== this.account.id) {
+          throw new ValidationError('Message locator belongs to a different account.');
+        }
+        let identityPromise = identities.get(decoded.mailbox);
+        if (!identityPromise) {
+          identityPromise = this.imapClient.getMailboxIdentity(decoded.mailbox);
+          identities.set(decoded.mailbox, identityPromise);
+        }
+        const identity = await identityPromise;
+        if (identity.path !== decoded.mailbox || identity.uidValidity !== decoded.uidValidity) {
+          throw new ValidationError('Message locator is stale because the mailbox identity changed.');
+        }
+        entries.push({
+          index,
+          locator,
+          uid: decoded.uid.toString(),
+          mailbox: decoded.mailbox,
+        });
+      } catch (error) {
+        items[index] = {
+          locator,
+          success: false,
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+    }
+
+    const groups = new Map<string, ResolvedEntry[]>();
+    for (const entry of entries) {
+      const group = groups.get(entry.mailbox) ?? [];
+      group.push(entry);
+      groups.set(entry.mailbox, group);
+    }
+    for (const [mailbox, group] of groups) {
+      const groupItems = await this.executeBatchGroup(
+        group.map(entry => ({ uid: entry.uid, locator: entry.locator })),
+        mailbox,
+        operation,
+      );
+      group.forEach((entry, groupIndex) => {
+        items[entry.index] = groupItems[groupIndex];
+      });
+    }
+
+    const completedItems = items.filter((item): item is BatchOperationItemResult => item !== undefined);
+    const succeeded = completedItems.filter(item => item.success).length;
+    return {
+      processed: completedItems.length,
+      succeeded,
+      failed: completedItems.length - succeeded,
+      items: completedItems,
+    };
   }
 }

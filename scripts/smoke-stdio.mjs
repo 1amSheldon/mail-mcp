@@ -84,8 +84,10 @@ try {
   if (initialize.serverInfo.version !== packageVersion) {
     throw new Error(`serverInfo.version=${initialize.serverInfo.version} does not match package version=${packageVersion}`);
   }
-  if (!names.includes('send_email')) throw new Error('send_email is missing from tools/list');
-  if (!names.includes('verify_sent_message')) throw new Error('verify_sent_message is missing from tools/list');
+  const expectedTools = ['list_accounts', 'mail_query', 'mail_mutate'];
+  if (JSON.stringify(names) !== JSON.stringify(expectedTools)) {
+    throw new Error(`Expected ${expectedTools.join(', ')}, received ${names.join(', ')}`);
+  }
   if (duplicates.length > 0) throw new Error(`Duplicate tool names: ${duplicates.join(', ')}`);
 
   child.stdin.end();

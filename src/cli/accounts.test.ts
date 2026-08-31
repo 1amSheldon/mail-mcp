@@ -1,9 +1,18 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
+const readline = vi.hoisted(() => ({
+  question: vi.fn(),
+  close: vi.fn(),
+}));
+
+vi.mock('node:readline/promises', () => ({
+  createInterface: vi.fn(() => readline),
+}));
+
 // Mock dependencies before importing the module under test
 vi.mock('../config.js', () => ({
-  getAccounts: vi.fn(),
-  saveAccounts: vi.fn(),
+  getConfiguredAccounts: vi.fn(),
+  saveConfiguredAccounts: vi.fn(),
   ACCOUNTS_PATH: '/mock/.config/mail-mcp/accounts.json',
 }));
 
@@ -13,12 +22,13 @@ vi.mock('../security/keychain.js', () => ({
 }));
 
 import { handleAccountsCommand, inferSmtpHost } from './accounts.js';
-import { getAccounts, saveAccounts } from '../config.js';
-import { removeCredentials } from '../security/keychain.js';
+import { getConfiguredAccounts, saveConfiguredAccounts } from '../config.js';
+import { removeCredentials, saveCredentials } from '../security/keychain.js';
 
-const mockedGetAccounts = vi.mocked(getAccounts);
-const mockedSaveAccounts = vi.mocked(saveAccounts);
+const mockedGetAccounts = vi.mocked(getConfiguredAccounts);
+const mockedSaveAccounts = vi.mocked(saveConfiguredAccounts);
 const mockedRemoveCredentials = vi.mocked(removeCredentials);
+const mockedSaveCredentials = vi.mocked(saveCredentials);
 
 const TEST_ACCOUNT = {
   id: 'work',
@@ -99,6 +109,47 @@ describe('handleAccountsCommand', () => {
       expect(consoleSpy).toHaveBeenCalledWith(
         'Usage: mail-mcp accounts <add|list|remove>'
       );
+    });
+  });
+
+  describe('accounts add', () => {
+    it('validates the OAuth2 endpoint before asking for or storing secrets', async () => {
+      mockedGetAccounts.mockReturnValue([]);
+      mockedSaveCredentials.mockResolvedValue(undefined);
+      readline.question
+        .mockResolvedValueOnce('graph')
+        .mockResolvedValueOnce('Graph account')
+        .mockResolvedValueOnce('3')
+        .mockResolvedValueOnce('user@example.com')
+        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce('http://accounts.example.test/token')
+        .mockResolvedValueOnce('https://login.example.test/token')
+        .mockResolvedValueOnce('client-id')
+        .mockResolvedValueOnce('client-secret')
+        .mockResolvedValueOnce('refresh-token');
+
+      await expect(handleAccountsCommand(['accounts', 'add'])).resolves.toBe(true);
+
+      const prompts = readline.question.mock.calls.map(([query]) => query);
+      expect(prompts.filter((query) => query === 'OAuth2 token endpoint: ')).toHaveLength(2);
+      expect(prompts.indexOf('OAuth2 token endpoint: '))
+        .toBeLessThan(prompts.indexOf('OAuth2 client secret: '));
+      expect(consoleSpy).toHaveBeenCalledWith(
+        '  OAuth2 token endpoint must use HTTPS, except for loopback HTTP development endpoints.',
+      );
+      expect(mockedSaveCredentials).toHaveBeenCalledWith('graph', JSON.stringify({
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        refreshToken: 'refresh-token',
+        tokenEndpoint: 'https://login.example.test/token',
+      }));
+      expect(mockedSaveAccounts).toHaveBeenCalledWith([{
+        id: 'graph',
+        name: 'Graph account',
+        backend: 'microsoft-graph',
+        user: 'user@example.com',
+      }]);
+      expect(readline.close).toHaveBeenCalledOnce();
     });
   });
 

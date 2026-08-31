@@ -28,6 +28,11 @@ const client = new Client({ name: 'mail-mcp-http-smoke', version: '1.0.0' });
 try {
   await client.connect(transport);
   const result = await client.listTools();
+  const names = result.tools.map(tool => tool.name);
+  const expectedTools = ['list_accounts', 'mail_query', 'mail_mutate'];
+  if (JSON.stringify(names) !== JSON.stringify(expectedTools)) {
+    throw new Error(`Expected ${expectedTools.join(', ')}, received ${names.join(', ')}`);
+  }
   const healthDuringSession = await fetch(host.url.replace('/mcp', '/health'))
     .then(response => response.json());
   await transport.terminateSession();
@@ -39,7 +44,7 @@ try {
     transport: 'streamable-http',
     service: healthDuringSession.service,
     serverVersion: healthDuringSession.version,
-    toolCount: result.tools.length,
+    toolCount: names.length,
     activeSessionsDuringRequest: healthDuringSession.activeSessions,
     activeSessionsAfterClose: healthAfterSession.activeSessions,
   }));

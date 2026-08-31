@@ -45,6 +45,20 @@ vi.mock('./config.js', () => ({
       manageSievePort: 4190,
     },
   ]),
+  getConfiguredAccounts: vi.fn().mockResolvedValue([
+    {
+      id: 'work',
+      name: 'Work',
+      host: 'mail.example.com',
+      port: 993,
+      smtpHost: 'smtp.example.com',
+      smtpPort: 587,
+      user: 'user@example.com',
+      authType: 'login',
+      useTLS: true,
+      manageSievePort: 4190,
+    },
+  ]),
 }));
 
 vi.mock('./security/keychain.js', () => ({
@@ -73,96 +87,29 @@ import { SieveClient } from './protocol/sieve.js';
 // ---------------------------------------------------------------------------
 
 describe('SIEVE-01: tool registration', () => {
-  it('list_filters is in getTools(false)', () => {
+  it('advertises all filter operations through the two routers', () => {
     const server = new MailMCPServer(false);
     const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('list_filters');
-  });
-
-  it('get_filter is in getTools(false)', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('get_filter');
-  });
-
-  it('set_filter is in getTools(false)', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('set_filter');
-  });
-
-  it('delete_filter is in getTools(false)', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('delete_filter');
-  });
-});
-
-describe('SIEVE-02: tool annotations', () => {
-  it('list_filters has readOnlyHint: true', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'list_filters');
-    expect(tool.annotations.readOnlyHint).toBe(true);
-    expect(tool.annotations.destructiveHint).toBe(false);
-  });
-
-  it('get_filter has readOnlyHint: true', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'get_filter');
-    expect(tool.annotations.readOnlyHint).toBe(true);
-    expect(tool.annotations.destructiveHint).toBe(false);
-  });
-
-  it('set_filter has readOnlyHint: false and destructiveHint: true', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'set_filter');
-    expect(tool.annotations.readOnlyHint).toBe(false);
-    expect(tool.annotations.destructiveHint).toBe(true);
-  });
-
-  it('delete_filter has readOnlyHint: false and destructiveHint: true', () => {
-    const server = new MailMCPServer(false);
-    const tools = (server as any).getTools(false);
-    const tool = tools.find((t: any) => t.name === 'delete_filter');
-    expect(tool.annotations.readOnlyHint).toBe(false);
-    expect(tool.annotations.destructiveHint).toBe(true);
+    const query = tools.find((tool: any) => tool.name === 'mail_query');
+    const mutate = tools.find((tool: any) => tool.name === 'mail_mutate');
+    expect(query.inputSchema.properties.operation.enum).toEqual(expect.arrayContaining([
+      'listFilters', 'getFilter',
+    ]));
+    expect(mutate.inputSchema.properties.operation.enum).toEqual(expect.arrayContaining([
+      'setFilter', 'deleteFilter',
+    ]));
+    expect(query.annotations).toMatchObject({ readOnlyHint: true, destructiveHint: false });
+    expect(mutate.annotations).toMatchObject({ readOnlyHint: false, destructiveHint: true });
   });
 });
 
 describe('SIEVE-03: read-only mode filtering', () => {
-  it('list_filters IS in read-only tool list', () => {
+  it('mail_query is available and mail_mutate is absent', () => {
     const server = new MailMCPServer(true);
     const tools = (server as any).getTools(true);
     const names = tools.map((t: any) => t.name);
-    expect(names).toContain('list_filters');
-  });
-
-  it('get_filter IS in read-only tool list', () => {
-    const server = new MailMCPServer(true);
-    const tools = (server as any).getTools(true);
-    const names = tools.map((t: any) => t.name);
-    expect(names).toContain('get_filter');
-  });
-
-  it('set_filter is NOT in read-only tool list', () => {
-    const server = new MailMCPServer(true);
-    const tools = (server as any).getTools(true);
-    const names = tools.map((t: any) => t.name);
-    expect(names).not.toContain('set_filter');
-  });
-
-  it('delete_filter is NOT in read-only tool list', () => {
-    const server = new MailMCPServer(true);
-    const tools = (server as any).getTools(true);
-    const names = tools.map((t: any) => t.name);
-    expect(names).not.toContain('delete_filter');
+    expect(names).toContain('mail_query');
+    expect(names).not.toContain('mail_mutate');
   });
 
   it('set_filter returns isError: true in read-only mode via dispatchTool', async () => {

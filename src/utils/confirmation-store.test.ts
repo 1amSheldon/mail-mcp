@@ -1,5 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ConfirmationStore, CONFIRMATION_TTL_MS } from './confirmation-store.js';
+import {
+  ConfirmationStore,
+  CONFIRMATION_TTL_MS,
+  confirmationArgsHash,
+} from './confirmation-store.js';
 import type { PendingConfirmation } from './confirmation-store.js';
 
 describe('CONFIRMATION_TTL_MS', () => {
@@ -51,7 +55,7 @@ describe('ConfirmationStore', () => {
       const result = store.consume(id);
       expect(result).toBeDefined();
       expect(result!.toolName).toBe('send_email');
-      expect(result!.args).toEqual({ to: 'alice@example.com', subject: 'Hi' });
+      expect(result!.argsHash).toBe(confirmationArgsHash({ to: 'alice@example.com', subject: 'Hi' }));
     });
 
     it('returns undefined for a non-existent ID', () => {
@@ -78,12 +82,17 @@ describe('ConfirmationStore', () => {
       expect(store.consume(id)).toBeUndefined();
     });
 
-    it('stores args without mutating them', () => {
+    it('stores only an argument digest', () => {
       const args = { to: 'x@y.com', subject: 'Test', body: 'Hello' };
       const id = store.create('send_email', args);
       const result = store.consume(id);
-      expect(result!.args).toEqual(args);
-      expect(result!.args).not.toBe(args); // should be a copy or structurally equal
+      expect(result!.argsHash).toBe(confirmationArgsHash(args));
+      expect(result).not.toHaveProperty('args');
+    });
+
+    it('uses a stable digest regardless of object key order', () => {
+      expect(confirmationArgsHash({ subject: 'Hi', to: 'a@b.com' }))
+        .toBe(confirmationArgsHash({ to: 'a@b.com', subject: 'Hi' }));
     });
   });
 
@@ -92,12 +101,18 @@ describe('ConfirmationStore', () => {
       expect(store.size).toBe(0);
     });
 
-    it('includes stale entries (raw store count, like MessageBodyCache)', () => {
+    it('purges stale entries', () => {
       store.create('send_email', { to: 'a@b.com' });
       store.create('delete_email', { uid: '1' });
       vi.advanceTimersByTime(101); // both now stale
-      // size reports raw store count — stale entries not pruned until consume()
-      expect(store.size).toBe(2);
+      expect(store.size).toBe(0);
+    });
+
+    it('enforces a bounded pending confirmation capacity', () => {
+      const bounded = new ConfirmationStore(100, 1);
+      bounded.create('send_email', { to: 'a@b.com' });
+      expect(() => bounded.create('send_email', { to: 'b@c.com' }))
+        .toThrow('Too many pending confirmations');
     });
   });
 

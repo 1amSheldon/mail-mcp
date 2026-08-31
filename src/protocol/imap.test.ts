@@ -73,10 +73,10 @@ describe('ImapClient', () => {
     expect(client).toBeDefined();
   });
 
-  it('should list messages', async () => {
+  it('should fetch message metadata by UID', async () => {
     const client = new ImapClient(account);
     await client.connect();
-    const messages = await client.listMessages();
+    const messages = await client.fetchMessagesByUids([1]);
     expect(messages).toHaveLength(1);
     expect(messages[0].subject).toBe('Test Subject');
   });
@@ -94,14 +94,71 @@ describe('ImapClient', () => {
     const messages = await client.fetchThreadMessages('123');
     expect(messages).toHaveLength(1);
     expect(messages[0].threadId).toBe('123');
+    const latestInstance = (await import('imapflow')).ImapFlow as any;
+    const flow = latestInstance.mock.results.at(-1)?.value;
+    expect(flow.search).toHaveBeenCalledWith({ 'x-gm-thrid': '123' }, { uid: true });
   });
 
-  it('should search messages with criteria', async () => {
+  it('uses UIDs for every thread search so sequence numbers cannot select the wrong messages', async () => {
+    const { ImapFlow } = await import('imapflow');
+    const MockImapFlow = ImapFlow as any;
+    const search = vi.fn().mockImplementation((criteria: any, options?: { uid?: boolean }) => {
+      if (criteria['x-gm-thrid']) return Promise.resolve([]);
+
+      const header = Object.keys(criteria.header ?? {})[0];
+      const uidByHeader: Record<string, number> = {
+        References: 7001,
+        'In-Reply-To': 7002,
+        'Message-ID': 7003,
+      };
+      const sequenceByHeader: Record<string, number> = {
+        References: 11,
+        'In-Reply-To': 12,
+        'Message-ID': 13,
+      };
+      return Promise.resolve([options?.uid ? uidByHeader[header] : sequenceByHeader[header]]);
+    });
+    const fetch = vi.fn().mockImplementation(async function* (range: string) {
+      for (const uid of range.split(',').map(Number)) {
+        yield {
+          uid,
+          envelope: {
+            subject: `Message ${uid}`,
+            from: [{ address: 'sender@example.com' }],
+            date: new Date(uid),
+          },
+          internalDate: new Date(uid),
+        };
+      }
+    });
+    MockImapFlow.mockImplementationOnce(function () {
+      return {
+        connect: vi.fn().mockResolvedValue(undefined),
+        once: vi.fn(),
+        getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
+        search,
+        fetch,
+      };
+    });
+
     const client = new ImapClient(account);
     await client.connect();
-    const messages = await client.searchMessages({ from: 'sender@example.com', subject: 'Test' });
-    expect(messages).toHaveLength(1);
-    expect(messages[0].uid).toBe(1);
+    const messages = await client.fetchThreadMessages('thread-message-id');
+
+    expect(search).toHaveBeenCalledTimes(4);
+    expect(search).toHaveBeenNthCalledWith(1, { 'x-gm-thrid': 'thread-message-id' }, { uid: true });
+    expect(search).toHaveBeenNthCalledWith(2, { header: { References: 'thread-message-id' } }, { uid: true });
+    expect(search).toHaveBeenNthCalledWith(3, { header: { 'In-Reply-To': 'thread-message-id' } }, { uid: true });
+    expect(search).toHaveBeenNthCalledWith(4, { header: { 'Message-ID': 'thread-message-id' } }, { uid: true });
+    expect(fetch).toHaveBeenCalledWith('7001,7002,7003', { envelope: true, flags: true, internalDate: true }, { uid: true });
+    expect(messages.map(message => message.uid)).toEqual([7001, 7002, 7003]);
+  });
+
+  it('should search message UIDs with criteria', async () => {
+    const client = new ImapClient(account);
+    await client.connect();
+    const uids = await client.searchMessageUids({ from: 'sender@example.com', subject: 'Test' });
+    expect(uids).toEqual([1]);
   });
 
   describe('IMAP-04: listFolders', () => {
@@ -186,6 +243,45 @@ describe('ImapClient', () => {
     });
   });
 
+  describe('UID validation', () => {
+    it.each(['1:*', '1,2', '0', '01', '4294967296', '-1', 'abc', ''])(
+      'rejects non-scalar UID %j before any single-message operation',
+      async (uid) => {
+        const client = new ImapClient(account);
+        await client.connect();
+
+        await expect(client.moveMessage(uid, 'INBOX', 'Archive')).rejects.toThrow('Invalid message UID');
+        await expect(client.copyMessage(uid, 'INBOX', 'Archive')).rejects.toThrow('Invalid message UID');
+        await expect(client.modifyLabels(uid, 'INBOX', ['\\Seen'], [])).rejects.toThrow('Invalid message UID');
+        await expect(client.deleteMessage(uid, 'INBOX')).rejects.toThrow('Invalid message UID');
+        await expect(client.fetchMessageBody(uid, 'INBOX')).rejects.toThrow('Invalid message UID');
+        await expect(client.fetchRawMessage(uid, 'INBOX')).rejects.toThrow('Invalid message UID');
+        await expect(client.fetchAttachmentSize(uid, 'file.txt', 'INBOX')).rejects.toThrow('Invalid message UID');
+      },
+    );
+
+    it('validates every UID before encoding a batch sequence', async () => {
+      const client = new ImapClient(account);
+      await client.connect();
+      const invalidBatch = ['1', '1:*'];
+
+      await expect(client.batchMoveMessages(invalidBatch, 'INBOX', 'Archive')).rejects.toThrow('Invalid message UID');
+      await expect(client.batchCopyMessages(invalidBatch, 'INBOX', 'Archive')).rejects.toThrow('Invalid message UID');
+      await expect(client.batchDeleteMessages(invalidBatch, 'INBOX')).rejects.toThrow('Invalid message UID');
+      await expect(client.batchModifyLabels(invalidBatch, 'INBOX', ['\\Seen'], [])).rejects.toThrow('Invalid message UID');
+    });
+
+    it('rejects empty batch UID lists', async () => {
+      const client = new ImapClient(account);
+      await client.connect();
+
+      await expect(client.batchMoveMessages([], 'INBOX', 'Archive')).rejects.toThrow('At least one UID');
+      await expect(client.batchCopyMessages([], 'INBOX', 'Archive')).rejects.toThrow('At least one UID');
+      await expect(client.batchDeleteMessages([], 'INBOX')).rejects.toThrow('At least one UID');
+      await expect(client.batchModifyLabels([], 'INBOX', ['\\Seen'], [])).rejects.toThrow('At least one UID');
+    });
+  });
+
   it('should return empty array when search finds no messages', async () => {
     const { ImapFlow } = await import('imapflow');
     const MockImapFlow = ImapFlow as any;
@@ -202,8 +298,8 @@ describe('ImapClient', () => {
     });
     const emptyClient = new ImapClient(account);
     await emptyClient.connect();
-    const messages = await emptyClient.searchMessages({ from: 'nobody@example.com' });
-    expect(messages).toHaveLength(0);
+    const uids = await emptyClient.searchMessageUids({ from: 'nobody@example.com' });
+    expect(uids).toEqual([]);
   });
 
   describe('disconnect() liveness check', () => {
@@ -294,165 +390,6 @@ describe('ImapClient', () => {
       // client is null since we never called connect()
       await expect(client.disconnect()).resolves.toBeUndefined();
       expect((client as any).client).toBeNull();
-    });
-  });
-
-  describe('pagination', () => {
-    it('listMessages with offset=0 returns the newest results', async () => {
-      const { ImapFlow } = await import('imapflow');
-      const MockImapFlow = ImapFlow as any;
-      const fetchMock = vi.fn().mockImplementation(async function* () {
-        yield {
-          uid: 50,
-          envelope: { subject: 'Latest', from: [{ address: 'a@b.com' }], date: new Date() },
-          internalDate: new Date(),
-        };
-      });
-      MockImapFlow.mockImplementationOnce(function() {
-        return {
-          connect: vi.fn().mockResolvedValue(undefined),
-          once: vi.fn(),
-          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-          fetch: fetchMock,
-          mailbox: { exists: 50 },
-        };
-      });
-      const client = new ImapClient(account);
-      await client.connect();
-      const messages = await client.listMessages('INBOX', 5, 0);
-      // With offset=0, total=50, count=5: end=50, start=max(1,50-5+1)=46 → range '46:50'
-      expect(fetchMock).toHaveBeenCalledWith('46:50', expect.any(Object));
-      expect(messages).toHaveLength(1);
-    });
-
-    it('listMessages with offset=10, count=5, total=50 calls fetch with range "36:40"', async () => {
-      const { ImapFlow } = await import('imapflow');
-      const MockImapFlow = ImapFlow as any;
-      const fetchMock = vi.fn().mockImplementation(async function* () {});
-      MockImapFlow.mockImplementationOnce(function() {
-        return {
-          connect: vi.fn().mockResolvedValue(undefined),
-          once: vi.fn(),
-          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-          fetch: fetchMock,
-          mailbox: { exists: 50 },
-        };
-      });
-      const client = new ImapClient(account);
-      await client.connect();
-      await client.listMessages('INBOX', 5, 10);
-      // end=50-10=40, start=max(1,40-5+1)=36 → range '36:40'
-      expect(fetchMock).toHaveBeenCalledWith('36:40', expect.any(Object));
-    });
-
-    it('listMessages with offset >= total returns []', async () => {
-      const { ImapFlow } = await import('imapflow');
-      const MockImapFlow = ImapFlow as any;
-      const fetchMock = vi.fn().mockImplementation(async function* () {});
-      MockImapFlow.mockImplementationOnce(function() {
-        return {
-          connect: vi.fn().mockResolvedValue(undefined),
-          once: vi.fn(),
-          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-          fetch: fetchMock,
-          mailbox: { exists: 50 },
-        };
-      });
-      const client = new ImapClient(account);
-      await client.connect();
-      // offset=50 >= total=50: end=0 which is < 1, return []
-      const messages = await client.listMessages('INBOX', 5, 50);
-      expect(messages).toHaveLength(0);
-      expect(fetchMock).not.toHaveBeenCalled();
-    });
-
-    it('listMessages with offset leaving fewer than count messages clamps start to 1', async () => {
-      const { ImapFlow } = await import('imapflow');
-      const MockImapFlow = ImapFlow as any;
-      const fetchMock = vi.fn().mockImplementation(async function* () {});
-      MockImapFlow.mockImplementationOnce(function() {
-        return {
-          connect: vi.fn().mockResolvedValue(undefined),
-          once: vi.fn(),
-          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-          fetch: fetchMock,
-          mailbox: { exists: 50 },
-        };
-      });
-      const client = new ImapClient(account);
-      await client.connect();
-      // offset=48, count=5, total=50: end=50-48=2, start=max(1,2-5+1)=max(1,-2)=1 → range '1:2'
-      await client.listMessages('INBOX', 5, 48);
-      expect(fetchMock).toHaveBeenCalledWith('1:2', expect.any(Object));
-    });
-
-    it('searchMessages with offset=0 returns the newest results', async () => {
-      const { ImapFlow } = await import('imapflow');
-      const MockImapFlow = ImapFlow as any;
-      const fetchMock = vi.fn().mockImplementation(async function* () {
-        yield {
-          uid: 7,
-          envelope: { subject: 'Matched', from: [{ address: 'x@y.com' }], date: new Date() },
-          internalDate: new Date(),
-        };
-      });
-      MockImapFlow.mockImplementationOnce(function() {
-        return {
-          connect: vi.fn().mockResolvedValue(undefined),
-          once: vi.fn(),
-          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-          search: vi.fn().mockResolvedValue([1, 2, 3, 4, 5, 6, 7]),
-          fetch: fetchMock,
-          mailbox: { exists: 10 },
-        };
-      });
-      const client = new ImapClient(account);
-      await client.connect();
-      await client.searchMessages({}, 'INBOX', 2, 0);
-      // uids=[1,2,3,4,5,6,7], offset=0, count=2: end=7, start=max(0,7-2)=5 → slice(5,7)=[6,7]
-      expect(fetchMock).toHaveBeenCalledWith('6,7', expect.any(Object), expect.any(Object));
-    });
-
-    it('searchMessages with offset=3, count=2, uids=[1..7] calls fetch with UIDs "3,4"', async () => {
-      const { ImapFlow } = await import('imapflow');
-      const MockImapFlow = ImapFlow as any;
-      const fetchMock = vi.fn().mockImplementation(async function* () {});
-      MockImapFlow.mockImplementationOnce(function() {
-        return {
-          connect: vi.fn().mockResolvedValue(undefined),
-          once: vi.fn(),
-          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-          search: vi.fn().mockResolvedValue([1, 2, 3, 4, 5, 6, 7]),
-          fetch: fetchMock,
-          mailbox: { exists: 10 },
-        };
-      });
-      const client = new ImapClient(account);
-      await client.connect();
-      await client.searchMessages({}, 'INBOX', 2, 3);
-      // uids=[1,2,3,4,5,6,7], offset=3, count=2: end=7-3=4, start=max(0,4-2)=2 → slice(2,4)=[3,4]
-      expect(fetchMock).toHaveBeenCalledWith('3,4', expect.any(Object), expect.any(Object));
-    });
-
-    it('searchMessages with offset >= uids.length returns []', async () => {
-      const { ImapFlow } = await import('imapflow');
-      const MockImapFlow = ImapFlow as any;
-      const fetchMock = vi.fn().mockImplementation(async function* () {});
-      MockImapFlow.mockImplementationOnce(function() {
-        return {
-          connect: vi.fn().mockResolvedValue(undefined),
-          once: vi.fn(),
-          getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
-          search: vi.fn().mockResolvedValue([1, 2, 3]),
-          fetch: fetchMock,
-          mailbox: { exists: 10 },
-        };
-      });
-      const client = new ImapClient(account);
-      await client.connect();
-      const messages = await client.searchMessages({}, 'INBOX', 2, 5);
-      expect(messages).toHaveLength(0);
-      expect(fetchMock).not.toHaveBeenCalled();
     });
   });
 
@@ -737,7 +674,7 @@ describe('ImapClient', () => {
       expect(result[0].recent).toBe(2);
     });
 
-    it('returns status for multiple folders in parallel', async () => {
+    it('returns status for multiple folders concurrently', async () => {
       const client = new ImapClient(account);
       await client.connect();
       const result = await client.getMailboxStatus(['INBOX', 'Sent', 'Drafts']);
@@ -746,6 +683,35 @@ describe('ImapClient', () => {
       expect(names).toContain('INBOX');
       expect(names).toContain('Sent');
       expect(names).toContain('Drafts');
+    });
+
+    it('bounds concurrent status requests while preserving folder order', async () => {
+      const { ImapFlow } = await import('imapflow');
+      const MockImapFlow = ImapFlow as any;
+      let active = 0;
+      let maximumActive = 0;
+      MockImapFlow.mockImplementationOnce(function () {
+        return {
+          connect: vi.fn().mockResolvedValue(undefined),
+          once: vi.fn(),
+          status: vi.fn().mockImplementation(async (folder: string) => {
+            active += 1;
+            maximumActive = Math.max(maximumActive, active);
+            await new Promise(resolve => setTimeout(resolve, 1));
+            active -= 1;
+            return { messages: folder.length, unseen: 0, recent: 0, path: folder };
+          }),
+        };
+      });
+
+      const client = new ImapClient(account);
+      await client.connect();
+      const folders = Array.from({ length: 20 }, (_, index) => `Folder-${index}`);
+      const result = await client.getMailboxStatus(folders);
+
+      expect(maximumActive).toBeLessThanOrEqual(8);
+      expect(maximumActive).toBeGreaterThan(1);
+      expect(result.map(status => status.name)).toEqual(folders);
     });
 
     it('isolates per-folder errors — other folders still return data', async () => {

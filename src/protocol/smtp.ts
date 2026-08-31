@@ -1,7 +1,85 @@
 import nodemailer from 'nodemailer';
 import type { EmailAccount } from '../config.js';
+import {
+  prepareOutgoingMessage,
+  type OutgoingMessage,
+} from '../domain/outgoing-message.js';
 import { loadCredentials } from '../security/keychain.js';
 import { getValidAccessToken } from '../security/oauth2.js';
+
+export type SmtpSecurityMode = NonNullable<EmailAccount['smtpSecurity']>;
+
+export interface SmtpClientOptions {
+  securityMode?: SmtpSecurityMode;
+}
+
+function isLoopbackHost(host: string): boolean {
+  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, '');
+  return normalized === 'localhost' ||
+    normalized.endsWith('.localhost') ||
+    normalized === '::1' ||
+    /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
+export function resolveSmtpSecurityMode(
+  host: string,
+  port: number,
+  requestedMode?: SmtpSecurityMode
+): SmtpSecurityMode {
+  const mode = requestedMode ?? (port === 465 ? 'tls' : 'starttls');
+  if (mode === 'plain' && !isLoopbackHost(host)) {
+    throw new Error('Plain SMTP is allowed only for localhost');
+  }
+  return mode;
+}
+
+function smtpTransportSecurityOptions(mode: SmtpSecurityMode): {
+  secure: boolean;
+  requireTLS: boolean;
+  ignoreTLS: boolean;
+  tls?: { rejectUnauthorized: true };
+} {
+  return {
+    secure: mode === 'tls',
+    requireTLS: mode === 'starttls',
+    ignoreTLS: mode === 'plain',
+    ...(mode === 'plain' ? {} : { tls: { rejectUnauthorized: true as const } }),
+  };
+}
+
+/** Remove the top-level Bcc field while preserving its recipients in the SMTP envelope. */
+export function stripBccHeader(rawMessage: Buffer): Buffer {
+  const crlfSeparator = Buffer.from('\r\n\r\n');
+  const lfSeparator = Buffer.from('\n\n');
+  let separator = crlfSeparator;
+  let separatorIndex = rawMessage.indexOf(separator);
+  let newline = '\r\n';
+
+  if (separatorIndex < 0) {
+    separator = lfSeparator;
+    separatorIndex = rawMessage.indexOf(separator);
+    newline = '\n';
+  }
+  if (separatorIndex < 0) return rawMessage;
+
+  const headerLines = rawMessage.subarray(0, separatorIndex).toString('latin1').split(newline);
+  const retained: string[] = [];
+  let removingBcc = false;
+
+  for (const line of headerLines) {
+    if (!/^[ \t]/.test(line)) {
+      removingBcc = /^bcc\s*:/i.test(line);
+    }
+    if (!removingBcc) retained.push(line);
+  }
+
+  if (retained.length === headerLines.length) return rawMessage;
+  return Buffer.concat([
+    Buffer.from(retained.join(newline), 'latin1'),
+    separator,
+    rawMessage.subarray(separatorIndex + separator.length),
+  ]);
+}
 
 export interface SmtpSendResult {
   accepted: string[];
@@ -9,6 +87,12 @@ export interface SmtpSendResult {
   messageId: string;
   response?: string;
   rawMessage: Buffer;
+}
+
+export interface SmtpComposedMessage {
+  rawMessage: Buffer;
+  messageId: string;
+  envelope: Record<string, unknown>;
 }
 
 export class SmtpSendError extends Error {
@@ -39,7 +123,10 @@ export class SmtpClient {
   private connectPromise: Promise<void> | null = null;
   private readonly composer: nodemailer.Transporter;
 
-  constructor(private readonly account: EmailAccount) {
+  constructor(
+    private readonly account: EmailAccount,
+    private readonly options: SmtpClientOptions = {}
+  ) {
     this.composer = nodemailer.createTransport({
       streamTransport: true,
       buffer: true,
@@ -75,10 +162,16 @@ export class SmtpClient {
     }
 
     const smtpPort = this.account.smtpPort || 465;
+    const smtpHost = this.account.smtpHost || this.account.host;
+    const securityMode = resolveSmtpSecurityMode(
+      smtpHost,
+      smtpPort,
+      this.options.securityMode ?? this.account.smtpSecurity
+    );
     const candidate = nodemailer.createTransport({
-      host: this.account.smtpHost || this.account.host,
+      host: smtpHost,
       port: smtpPort,
-      secure: smtpPort === 465,
+      ...smtpTransportSecurityOptions(securityMode),
       auth: authConfig,
     });
 
@@ -109,37 +202,52 @@ export class SmtpClient {
     bcc?: string,
     extraHeaders?: Record<string, string>
   ): Promise<SmtpSendResult> {
+    const inReplyTo = extraHeaders
+      ? Object.entries(extraHeaders).find(([name]) => name.toLowerCase() === 'in-reply-to')?.[1]
+      : undefined;
+    const references = extraHeaders
+      ? Object.entries(extraHeaders).find(([name]) => name.toLowerCase() === 'references')?.[1]
+      : undefined;
+    const threading = inReplyTo || references
+      ? {
+          ...(inReplyTo ? { inReplyTo } : {}),
+          ...(references ? { references } : {}),
+        }
+      : undefined;
+    const headers = extraHeaders
+      ? Object.fromEntries(
+          Object.entries(extraHeaders).filter(([name]) => {
+            const lower = name.toLowerCase();
+            return lower !== 'in-reply-to' && lower !== 'references';
+          })
+        )
+      : undefined;
+
+    return this.sendMessage({
+      to,
+      subject,
+      ...(isHtml ? { html: body } : { text: body }),
+      ...(cc ? { cc } : {}),
+      ...(bcc ? { bcc } : {}),
+      ...(threading && Object.keys(threading).length > 0 ? { threading } : {}),
+      ...(headers && Object.keys(headers).length > 0 ? { headers } : {}),
+    });
+  }
+
+  async sendMessage(message: OutgoingMessage): Promise<SmtpSendResult> {
     if (!this.transporter) {
       throw new Error('SMTP client not connected');
     }
 
-    const mailOptions: Record<string, unknown> = {
-      from: this.account.user,
-      to,
-      subject,
-    };
-    if (cc) mailOptions.cc = cc;
-    if (bcc) mailOptions.bcc = bcc;
-    if (extraHeaders && Object.keys(extraHeaders).length > 0) {
-      mailOptions.headers = extraHeaders;
-    }
-
-    if (isHtml) {
-      mailOptions.html = body;
-    } else {
-      mailOptions.text = body;
-    }
-
-    const prepared = await this.composer.sendMail(mailOptions) as any;
-    const rawMessage = Buffer.isBuffer(prepared.message)
-      ? prepared.message
-      : Buffer.from(prepared.message);
-    const messageId = String(prepared.messageId || '');
+    const { rawMessage, messageId, envelope } = await this.composeMessage(message);
 
     try {
       const info = await this.transporter.sendMail({
         raw: rawMessage,
-        envelope: prepared.envelope,
+        envelope: {
+          ...envelope,
+          from: this.account.user,
+        },
       } as any) as any;
       return {
         accepted: (info.accepted ?? []).map(String),
@@ -175,5 +283,23 @@ export class SmtpClient {
         { cause: error }
       );
     }
+  }
+
+  async composeMessage(
+    message: OutgoingMessage,
+    options: { stripBcc?: boolean } = {},
+  ): Promise<SmtpComposedMessage> {
+    const mailOptions = await prepareOutgoingMessage(message, this.account.user, {
+      allowedAttachmentRoots: this.account.allowedAttachmentRoots ?? [],
+    });
+    const prepared = await this.composer.sendMail(mailOptions) as any;
+    const composedMessage = Buffer.isBuffer(prepared.message)
+      ? prepared.message
+      : Buffer.from(prepared.message);
+    return {
+      rawMessage: options.stripBcc === false ? composedMessage : stripBccHeader(composedMessage),
+      messageId: String(prepared.messageId || ''),
+      envelope: { ...(prepared.envelope ?? {}) },
+    };
   }
 }
