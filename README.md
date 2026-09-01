@@ -229,6 +229,8 @@ npx -y --prefer-online @1amsheldon/mail-mcp@latest --http --host 127.0.0.1 --por
 
 `GET /health` reports version, start time, and active session count. `POST /mcp` requires the bearer token. Keep the bind address on loopback unless an authenticated reverse proxy protects the server.
 
+If the managed service restarts after sleep or an automatic update, requests carrying an older MCP session ID are recovered without requiring the chat to be reopened. Within each service process, the mail connection cache, pagination snapshots, rate limits, and pending write confirmations are shared by ordinary and recovered requests.
+
 ## Updates
 
 Managed Codex and Claude installations run `@1amsheldon/mail-mcp@latest`. Updates replace package code only; account JSON and keychain credentials remain in their existing user directories.

@@ -6,6 +6,7 @@ import type { MicrosoftGraphClient } from './providers/microsoft/graph.js';
 import { TieredRateLimiter } from './utils/rate-limiter.js';
 import { PaginationSnapshotStore } from './utils/pagination-store.js';
 import type { AppleMailMessageSummary } from './providers/apple-mail/types.js';
+import { ConfirmationStore } from './utils/confirmation-store.js';
 
 export type RuntimeProviderClient =
   | AppleMailAdapter
@@ -37,6 +38,7 @@ export class MailMCPRuntimeState {
     maxPageSize: 100,
   });
   readonly rateLimiter = new TieredRateLimiter();
+  readonly confirmationStore = new ConfirmationStore();
 
   private shuttingDown = false;
   private shutdownPromise: Promise<void> | undefined;

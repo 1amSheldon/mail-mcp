@@ -16,6 +16,7 @@ const host = await startHttpHost({
   port: 0,
   bearerToken: token,
   serverVersion: packageVersion,
+  recoverUnknownSessions: true,
   createSession: () => new MailMCPServer(false, undefined, undefined, true, true, runtimeState),
   shutdownSharedResources: () => runtimeState.shutdown(),
 });

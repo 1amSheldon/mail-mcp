@@ -62,6 +62,7 @@ const mockSendEmail = vi.fn().mockResolvedValue(undefined);
 const mockDeleteEmail = vi.fn().mockResolvedValue(undefined);
 
 import { MailMCPServer } from './index.js';
+import { MailMCPRuntimeState } from './runtime-state.js';
 
 const WRITE_TOOL_NAMES = ['mail_mutate'];
 
@@ -135,6 +136,48 @@ describe('CONF-03: write tool schemas include confirmationId', () => {
 });
 
 describe('CONF-03b: public mutation router confirmation', () => {
+  it('shares confirmation tokens across HTTP session instances', async () => {
+    const runtimeState = new MailMCPRuntimeState();
+    const firstSession = new MailMCPServer(
+      false,
+      undefined,
+      undefined,
+      true,
+      false,
+      runtimeState,
+    );
+    const recoveredSession = new MailMCPServer(
+      false,
+      undefined,
+      undefined,
+      true,
+      false,
+      runtimeState,
+    );
+    const request = {
+      accountId: 'acc1',
+      operation: 'sendMessage',
+      input: {
+        to: 'alice@example.com',
+        subject: 'Project update',
+        body: 'Hello',
+      },
+    };
+
+    try {
+      const first = await (firstSession as any).dispatchTool('mail_mutate', false, request);
+      const { confirmationId } = JSON.parse(first.content[0].text);
+      const confirmed = await (recoveredSession as any).dispatchTool('mail_mutate', false, {
+        ...request,
+        confirmationId,
+      });
+
+      expect(confirmed.isError).not.toBe(true);
+    } finally {
+      await runtimeState.shutdown();
+    }
+  });
+
   it('does not retain a token when a routed request is invalid', async () => {
     const server = new MailMCPServer(false, undefined, undefined, true);
     const result = await (server as any).dispatchTool('mail_mutate', false, {
