@@ -86,8 +86,8 @@ function decodeCursor(cursor: string, secret: Buffer): CursorPayload {
     throw new Error('Invalid pagination cursor');
   }
 
-  const expectedSignature = Buffer.from(signCursor(encodedPayload, secret), 'base64url');
-  const receivedSignature = Buffer.from(signature, 'base64url');
+  const expectedSignature = Buffer.from(signCursor(encodedPayload, secret), 'ascii');
+  const receivedSignature = Buffer.from(signature, 'ascii');
   if (expectedSignature.length !== receivedSignature.length || !timingSafeEqual(expectedSignature, receivedSignature)) {
     throw new Error('Invalid pagination cursor');
   }
