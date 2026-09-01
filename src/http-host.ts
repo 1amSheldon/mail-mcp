@@ -24,6 +24,7 @@ export interface HttpHostOptions {
   sessionIdleTimeoutMs?: number;
   maxSessions?: number;
   serverVersion?: string;
+  recoverUnknownSessions?: boolean;
 }
 
 export interface HttpHostController {
@@ -133,6 +134,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   const urlHost = formatUrlHost(options.host);
   let shuttingDown = false;
   let closePromise: Promise<void> | undefined;
+  let activeRecoveryRequests = 0;
 
   const closeSession = (record: ActiveSession): Promise<void> => {
     if (record.closePromise) return record.closePromise;
@@ -157,6 +159,28 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     }
   }, Math.min(sessionIdleTimeoutMs, 60_000));
   cleanupTimer.unref();
+
+  const handleRecoveredPost = async (
+    req: IncomingMessage,
+    res: ServerResponse,
+    body: unknown,
+  ): Promise<void> => {
+    const mcpServer = options.createSession();
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: undefined,
+    });
+    activeRecoveryRequests++;
+    try {
+      await mcpServer.connect(transport);
+      await transport.handleRequest(req, res, body);
+    } finally {
+      await Promise.allSettled([
+        mcpServer.shutdown(),
+        transport.close(),
+      ]);
+      activeRecoveryRequests--;
+    }
+  };
 
   const httpServer = createServer(async (req, res) => {
     const pathname = new URL(req.url ?? '/', `http://${urlHost}`).pathname;
@@ -247,6 +271,29 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         return;
       }
 
+      if (!record && id && options.recoverUnknownSessions) {
+        if (req.method === 'GET' || req.method === 'DELETE') {
+          res.setHeader('allow', 'POST');
+          rpcError(res, 405, 'Session stream is no longer available; POST requests remain supported');
+          return;
+        }
+        if (req.method === 'POST') {
+          if (activeRecoveryRequests >= maxSessions) {
+            rpcError(res, 503, 'Too many active recovered MCP requests');
+            return;
+          }
+          let body: unknown;
+          try {
+            body = await readJsonBody(req);
+          } catch (error) {
+            respondToBodyError(res, error);
+            return;
+          }
+          await handleRecoveredPost(req, res, body);
+          return;
+        }
+      }
+
       if (!record) {
         rpcError(res, id ? 404 : 400, id ? 'Unknown MCP session' : 'Missing MCP session');
         return;
@@ -312,7 +359,10 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
 
       const drainDeadline = Date.now() + SHUTDOWN_DRAIN_TIMEOUT_MS;
       while (
-        Array.from(sessions.values()).some(session => session.activeRequests > 0) &&
+        (
+          Array.from(sessions.values()).some(session => session.activeRequests > 0)
+          || activeRecoveryRequests > 0
+        ) &&
         Date.now() < drainDeadline
       ) {
         await new Promise(resolve => setTimeout(resolve, 25));

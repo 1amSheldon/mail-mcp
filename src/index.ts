@@ -351,9 +351,9 @@ export class MailMCPServer {
     this.allowedTools = allowedTools;
     this.auditLogger = auditLogger;
     this.confirmMode = confirmMode;
-    this.confirmStore = new ConfirmationStore();
     this.redact = redact;
     this.runtimeState = runtimeState ?? new MailMCPRuntimeState();
+    this.confirmStore = this.runtimeState.confirmationStore;
     this.providerRuntime = new ProviderRuntime(this.runtimeState, { redact: this.redact });
     this.ownsRuntimeState = runtimeState === undefined;
     this.services = this.runtimeState.services;
@@ -1738,6 +1738,7 @@ Options:
       createSession: createServer,
       shutdownSharedResources: () => runtimeState!.shutdown(),
       serverVersion: PACKAGE_VERSION,
+      recoverUnknownSessions: true,
     });
     console.error(`Mail MCP server running on ${httpHost.url}`);
   }

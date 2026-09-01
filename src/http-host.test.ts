@@ -101,6 +101,73 @@ describe('Streamable HTTP host', () => {
     expect(health.activeSessions).toBe(0);
   });
 
+  it('recovers POST requests whose session was lost after a service restart', async () => {
+    host = await startHttpHost({
+      host: '127.0.0.1',
+      port: 0,
+      bearerToken: 'test-token',
+      recoverUnknownSessions: true,
+      createSession: () => new TestMcpSession(),
+    });
+
+    const headers = {
+      accept: 'application/json, text/event-stream',
+      authorization: 'Bearer test-token',
+      'content-type': 'application/json',
+      'mcp-protocol-version': '2025-11-25',
+    };
+    const initialized = await fetch(host.url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'restart-recovery-test', version: '1.0.0' },
+        },
+      }),
+    });
+    const oldSessionId = initialized.headers.get('mcp-session-id');
+    expect(oldSessionId).toBeTruthy();
+    await initialized.body?.cancel();
+
+    const port = host.port;
+    await host.close();
+    host = await startHttpHost({
+      host: '127.0.0.1',
+      port,
+      bearerToken: 'test-token',
+      recoverUnknownSessions: true,
+      createSession: () => new TestMcpSession(),
+    });
+
+    const recovered = await fetch(host.url, {
+      method: 'POST',
+      headers: { ...headers, 'mcp-session-id': oldSessionId! },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    });
+    expect(recovered.status).toBe(200);
+    expect(await recovered.text()).toContain('ping_mail');
+
+    const staleStream = await fetch(host.url, {
+      method: 'GET',
+      headers: {
+        accept: 'text/event-stream',
+        authorization: 'Bearer test-token',
+        'mcp-protocol-version': '2025-11-25',
+        'mcp-session-id': oldSessionId!,
+      },
+    });
+    expect(staleStream.status).toBe(405);
+    await staleStream.body?.cancel();
+
+    const health = await fetch(host.url.replace('/mcp', '/health')).then(response => response.json());
+    expect(health.activeSessions).toBe(0);
+  });
+
   it('returns 400 for malformed JSON on an existing session', async () => {
     host = await startHttpHost({
       host: '127.0.0.1',

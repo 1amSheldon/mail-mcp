@@ -1,6 +1,6 @@
 {
   "name": "@1amsheldon/mail-mcp",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "Email MCP server for Codex and Claude with IMAP, SMTP, Apple Mail, Microsoft, and Mailtrap",
   "keywords": [
     "mcp",
