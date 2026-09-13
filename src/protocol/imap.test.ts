@@ -11,6 +11,7 @@ vi.mock('imapflow', () => {
     ImapFlow: vi.fn().mockImplementation(function() {
       return {
         connect: vi.fn().mockResolvedValue(undefined),
+        on: vi.fn(),
         once: vi.fn(),
         logout: vi.fn().mockResolvedValue(undefined),
         getMailboxLock: vi.fn().mockResolvedValue({
@@ -134,6 +135,7 @@ describe('ImapClient', () => {
     MockImapFlow.mockImplementationOnce(function () {
       return {
         connect: vi.fn().mockResolvedValue(undefined),
+        on: vi.fn(),
         once: vi.fn(),
         getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
         search,
@@ -190,6 +192,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           append: vi.fn().mockResolvedValue(false),
@@ -288,6 +291,7 @@ describe('ImapClient', () => {
     MockImapFlow.mockImplementationOnce(function() {
       return {
         connect: vi.fn().mockResolvedValue(undefined),
+        on: vi.fn(),
         once: vi.fn(),
         logout: vi.fn().mockResolvedValue(undefined),
         getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
@@ -310,6 +314,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function() {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           logout: logoutMock,
           usable: true,
@@ -331,6 +336,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function() {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           logout: logoutMock,
           usable: false,
@@ -351,6 +357,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function() {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           logout: vi.fn().mockResolvedValue(undefined),
           usable: true,
@@ -371,6 +378,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function() {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           logout: vi.fn().mockResolvedValue(undefined),
           usable: false,
@@ -400,6 +408,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetch: vi.fn().mockImplementation(async function* () {}),
@@ -419,6 +428,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetch: vi.fn().mockImplementation(async function* () {
@@ -454,6 +464,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetch: vi.fn().mockImplementation(async function* () {
@@ -481,6 +492,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetch: fetchMock,
@@ -500,6 +512,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetch: vi.fn().mockImplementation(async function* () {
@@ -532,6 +545,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: mockRelease }),
           fetchOne: vi.fn().mockResolvedValue({
@@ -556,6 +570,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetchOne: vi.fn().mockResolvedValue({
@@ -579,6 +594,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetchOne: vi.fn().mockResolvedValue({
@@ -610,6 +626,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetchOne: vi.fn().mockResolvedValue({
@@ -633,6 +650,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetchOne: vi.fn().mockResolvedValue({ bodyStructure: undefined }),
@@ -650,6 +668,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           getMailboxLock: vi.fn().mockResolvedValue({ release: vi.fn() }),
           fetchOne: vi.fn().mockResolvedValue(null),
@@ -693,6 +712,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           status: vi.fn().mockImplementation(async (folder: string) => {
             active += 1;
@@ -720,6 +740,7 @@ describe('ImapClient', () => {
       MockImapFlow.mockImplementationOnce(function () {
         return {
           connect: vi.fn().mockResolvedValue(undefined),
+          on: vi.fn(),
           once: vi.fn(),
           logout: vi.fn().mockResolvedValue(undefined),
           usable: true,
