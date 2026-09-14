@@ -14,6 +14,7 @@ vi.mock('imapflow', () => {
     ImapFlow: vi.fn().mockImplementation(function () {
       return {
         connect: vi.fn().mockResolvedValue(undefined),
+        on: vi.fn(),
         once: vi.fn(),
         logout: vi.fn().mockResolvedValue(undefined),
         getMailboxLock: mockGetMailboxLock,

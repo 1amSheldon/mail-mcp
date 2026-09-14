@@ -106,10 +106,19 @@ export class ImapClient {
       logger: false
     });
 
-    await this.client.connect();
+    // Listen before connecting: an unhandled error event terminates Node.
+    // ImapFlow closes failed connections; onClose evicts them from the cache.
+    this.client.on('error', (error: Error & { code?: string }) => {
+      // Server error messages can contain credentials or other private data.
+      const code = typeof error.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code)
+        ? error.code
+        : 'UNKNOWN';
+      console.error(`[IMAP] connection error (${code})`);
+    });
     this.client.once('close', () => {
       this.onClose?.();
     });
+    await this.client.connect();
   }
 
   async disconnect(): Promise<void> {
