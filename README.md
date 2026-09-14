@@ -241,6 +241,16 @@ The Windows service checks npm every six hours. It stops accepting new requests,
 
 If an older installation pins an exact version, run its installer command again.
 
+Re-running `--install-codex` on an existing Windows HTTP installation preserves its bearer token. When the connection settings are unchanged, existing chats can continue after the service updates without restarting Codex.
+
+## Connection diagnostics
+
+```bash
+npx -y --prefer-online @1amsheldon/mail-mcp@latest --validate-accounts
+```
+
+Checks configured IMAP connections and SMTP hosts without sending mail. Prints a result for each connection and a total of passed, failed, and skipped probes. Exits with code `1` if a probe fails or no IMAP accounts are configured; otherwise exits with `0`. This command does not validate Apple Mail, Microsoft API, or Mailtrap accounts.
+
 ## Develop
 
 ```bash
