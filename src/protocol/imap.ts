@@ -106,18 +106,19 @@ export class ImapClient {
       logger: false
     });
 
-    await this.client.connect();
-    // imapflow emits 'error' when the connection drops outside a command, for
-    // example from its inactivity watchdog (socketTimeout, 5 minutes by default).
-    // Without a listener Node turns that into an uncaught exception and the whole
-    // server exits. The 'close' that follows lets the owner drop this client and
-    // reconnect on the next call, so logging is all that is needed here.
-    this.client.on('error', (error: Error) => {
-      console.error(`[IMAP ${this.account.id}] connection error: ${error.message}`);
+    // Listen before connecting: an unhandled error event terminates Node.
+    // ImapFlow closes failed connections; onClose evicts them from the cache.
+    this.client.on('error', (error: Error & { code?: string }) => {
+      // Server error messages can contain credentials or other private data.
+      const code = typeof error.code === 'string' && /^[A-Z0-9_]{1,40}$/.test(error.code)
+        ? error.code
+        : 'UNKNOWN';
+      console.error(`[IMAP] connection error (${code})`);
     });
     this.client.once('close', () => {
       this.onClose?.();
     });
+    await this.client.connect();
   }
 
   async disconnect(): Promise<void> {

@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
+import { ImapFlow } from 'imapflow';
 import { ImapClient } from './imap.js';
 import type { EmailAccount } from '../config.js';
 
@@ -23,6 +24,10 @@ vi.mock('imapflow', () => ({
 }));
 
 describe('ImapClient connection errors', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    flows.length = 0;
+  });
   const account: EmailAccount = {
     id: 'test-account',
     name: 'Test',
@@ -54,5 +59,37 @@ describe('ImapClient connection errors', () => {
     flow.emit('close');
 
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('handles error events during connection and preserves connect rejection', async () => {
+    const failure = Object.assign(new Error('Connection failed'), { code: 'ECONNECTION' });
+    const flow = Object.assign(new EventEmitter(), {
+      connect: vi.fn(async () => {
+        expect(() => flow.emit('error', failure)).not.toThrow();
+        flow.emit('close');
+        throw failure;
+      }),
+    });
+    vi.mocked(ImapFlow).mockImplementationOnce(function () { return flow as unknown as ImapFlow; });
+    const client = new ImapClient(account);
+    client.onClose = vi.fn();
+
+    await expect(client.connect()).rejects.toBe(failure);
+    expect(client.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not log server-controlled error text or unsafe error codes', async () => {
+    const log = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const client = new ImapClient(account);
+    await client.connect();
+    const flow = flows[flows.length - 1];
+
+    flow.emit('error', Object.assign(new Error('password=secret'), { code: 'ETIMEOUT' }));
+    flow.emit('error', Object.assign(new Error('password=secret'), { code: '\npassword=secret' }));
+
+    expect(log.mock.calls).toEqual([
+      ['[IMAP] connection error (ETIMEOUT)'],
+      ['[IMAP] connection error (UNKNOWN)'],
+    ]);
   });
 });
