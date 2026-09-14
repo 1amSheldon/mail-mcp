@@ -819,6 +819,58 @@ describe('CONN-02: IMAP reconnect via close-event + getService retry', () => {
     expect((server as any).services.get('acc1')).toBe(second);
   });
 
+  it('does not cache a connection that closes during setup', async () => {
+    const server = new MailMCPServer(false);
+    const service = {
+      imap: { onClose: null as (() => void) | null },
+      connect: vi.fn(async () => { service.imap.onClose?.(); }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(MailService).mockImplementationOnce(function () { return service as any; });
+
+    await expect((server as any)._createAndCacheService('acc1')).rejects.toThrow('closed during connection');
+    expect((server as any).services.has('acc1')).toBe(false);
+    expect(service.disconnect).toHaveBeenCalledOnce();
+  });
+
+  it('cleans up a failed connection without replacing the original error', async () => {
+    const server = new MailMCPServer(false);
+    const failure = new Error('Authentication failed');
+    const service = {
+      imap: { onClose: null },
+      connect: vi.fn().mockRejectedValue(failure),
+      disconnect: vi.fn().mockRejectedValue(new Error('Cleanup failed')),
+    };
+    vi.mocked(MailService).mockImplementationOnce(function () { return service as any; });
+
+    await expect((server as any)._createAndCacheService('acc1')).rejects.toBe(failure);
+    expect(service.disconnect).toHaveBeenCalledOnce();
+    expect((server as any).services.has('acc1')).toBe(false);
+  });
+
+  it('rejects new service requests after runtime shutdown', async () => {
+    const server = new MailMCPServer(false);
+    await (server as any).runtimeState.shutdown();
+    const create = vi.spyOn(server as any, '_createAndCacheService');
+
+    await expect((server as any).getService('acc1')).rejects.toThrow('shutting down');
+    expect(create).not.toHaveBeenCalled();
+  });
+
+  it('cleans up a connection that finishes after shutdown starts', async () => {
+    const server = new MailMCPServer(false);
+    const service = {
+      imap: { onClose: null },
+      connect: vi.fn(async () => { await (server as any).runtimeState.shutdown(); }),
+      disconnect: vi.fn().mockResolvedValue(undefined),
+    };
+    vi.mocked(MailService).mockImplementationOnce(function () { return service as any; });
+
+    await expect((server as any)._createAndCacheService('acc1')).rejects.toThrow('shutting down');
+    expect(service.disconnect).toHaveBeenCalledOnce();
+    expect((server as any).services.size).toBe(0);
+  });
+
   it('two consecutive connect failures throw NetworkError with "after reconnect attempt"', async () => {
     vi.useFakeTimers();
     const { NetworkError } = await import('./errors.js');
@@ -965,17 +1017,19 @@ describe('CONN-03: --validate-accounts health check', () => {
     ]);
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await runValidateAccounts();
+    await expect(runValidateAccounts()).resolves.toBe(true);
 
     const output = consoleSpy.mock.calls.map(c => c[0]);
     consoleSpy.mockRestore();
     expect(output).toContain('[PASS] acc1 IMAP');
     expect(output).toContain('[PASS] acc1 SMTP');
+    expect(output).toContain('Validation: 2 passed, 0 failed, 0 skipped.');
     expect(smtpDisconnect).toHaveBeenCalledTimes(1);
   });
 
   it('prints [FAIL] for failed IMAP with error message', async () => {
     const { runValidateAccounts } = await import('./index.js');
+    const imapDisconnect = vi.fn().mockResolvedValue(undefined);
     vi.mocked(getAccounts).mockResolvedValue([
       { id: 'acc1', name: 'Test', user: 'test@test.com', host: 'imap.test.com', port: 993, useTLS: true, authType: 'password' } as any,
     ]);
@@ -983,17 +1037,40 @@ describe('CONN-03: --validate-accounts health check', () => {
     vi.mocked(MockImapClientCtor).mockImplementation(function() {
       return {
         connect: vi.fn().mockRejectedValue(new Error('Authentication failed')),
-        disconnect: vi.fn().mockResolvedValue(undefined),
+        disconnect: imapDisconnect,
         onClose: null,
       } as any;
     });
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await runValidateAccounts();
+    await expect(runValidateAccounts()).resolves.toBe(false);
 
     const output = consoleSpy.mock.calls.map(c => c[0]);
     consoleSpy.mockRestore();
     expect(output.some(msg => msg.startsWith('[FAIL] acc1 IMAP') && msg.includes('Authentication failed'))).toBe(true);
+    expect(imapDisconnect).toHaveBeenCalledOnce();
+    expect(output).toContain('Validation: 0 passed, 1 failed, 1 skipped.');
+  });
+
+  it('reports SMTP failure and still checks the remaining accounts', async () => {
+    const { runValidateAccounts } = await import('./index.js');
+    const smtpDisconnect = vi.fn();
+    vi.mocked(getAccounts).mockResolvedValue(['first', 'second'].map(id => ({
+      id, name: id, user: 'test@test.com', host: 'imap.test.com', port: 993,
+      useTLS: true, authType: 'login', smtpHost: 'smtp.test.com',
+    })));
+    vi.mocked(MockSmtpClientCtor).mockImplementationOnce(function () {
+      return { connect: vi.fn().mockRejectedValue(new Error('SMTP unavailable')), disconnect: smtpDisconnect } as any;
+    });
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      await expect(runValidateAccounts()).resolves.toBe(false);
+      expect(log).toHaveBeenCalledWith('[PASS] second SMTP');
+      expect(log).toHaveBeenCalledWith('Validation: 3 passed, 1 failed, 0 skipped.');
+      expect(smtpDisconnect).toHaveBeenCalledOnce();
+    } finally {
+      log.mockRestore();
+    }
   });
 
   it('prints [SKIP] for account without smtpHost', async () => {
@@ -1015,7 +1092,7 @@ describe('CONN-03: --validate-accounts health check', () => {
     vi.mocked(getAccounts).mockResolvedValue([]);
 
     const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    await runValidateAccounts();
+    await expect(runValidateAccounts()).resolves.toBe(false);
 
     const output = consoleSpy.mock.calls.map(c => c[0]);
     consoleSpy.mockRestore();

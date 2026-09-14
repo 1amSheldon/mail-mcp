@@ -415,25 +415,36 @@ export class MailMCPServer {
 
   private async _createAndCacheService(accountId: string): Promise<MailService> {
     const accounts = await getAccounts();
+    if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
     const account = accounts.find(a => a.id === accountId);
     if (!account) {
       throw new Error(`Account ${accountId} not found in configuration.`);
     }
     const service = new MailService(account, this.redact);
-    await service.connect();
-    this.services.set(accountId, service);
+    let closed = false;
 
     // Remove closed connections so the next call reconnects.
     service.imap.onClose = () => {
+      closed = true;
       if (!this.runtimeState.isShuttingDown && this.services.get(accountId) === service) {
         this.services.delete(accountId);
       }
     };
-
-    return service;
+    try {
+      await service.connect();
+      if (closed) throw new Error('IMAP closed during connection');
+      if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
+      this.services.set(accountId, service);
+      return service;
+    } catch (error) {
+      // Cleanup must not hide the connection failure that the caller needs.
+      await service.disconnect().catch(() => {});
+      throw error;
+    }
   }
 
   private async getService(accountId: string): Promise<MailService> {
+    if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
     if (this.services.has(accountId)) {
       return this.services.get(accountId)!;
     }
@@ -445,6 +456,7 @@ export class MailMCPServer {
         try {
           return await this._createAndCacheService(accountId);
         } catch (firstErr) {
+          if (this.runtimeState.isShuttingDown) throw firstErr;
           // IMAP connection setup is safe to retry because no SMTP send has started.
           await new Promise(r => setTimeout(r, 1_000));
           try {
@@ -1446,21 +1458,29 @@ export class MailMCPServer {
   }
 }
 
-export async function runValidateAccounts(): Promise<void> {
+export async function runValidateAccounts(): Promise<boolean> {
   const accounts = await getAccounts();
   if (accounts.length === 0) {
     console.log('No accounts configured.');
-    return;
+    return false;
   }
 
+  let passed = 0;
+  let failed = 0;
+  let skipped = 0;
   for (const account of accounts) {
     // IMAP probe
     try {
       const imap = new ImapClient(account);
-      await imap.connect();
-      await imap.disconnect();
+      try {
+        await imap.connect();
+      } finally {
+        await imap.disconnect();
+      }
+      passed++;
       console.log(`[PASS] ${account.id} IMAP`);
     } catch (e) {
+      failed++;
       console.log(`[FAIL] ${account.id} IMAP - ${(e as Error).message}`);
     }
 
@@ -1469,16 +1489,21 @@ export async function runValidateAccounts(): Promise<void> {
       const smtp = new SmtpClient(account);
       try {
         await smtp.connect();
+        passed++;
         console.log(`[PASS] ${account.id} SMTP`);
       } catch (e) {
+        failed++;
         console.log(`[FAIL] ${account.id} SMTP - ${(e as Error).message}`);
       } finally {
         smtp.disconnect();
       }
     } else {
+      skipped++;
       console.log(`[SKIP] ${account.id} SMTP - no smtpHost configured`);
     }
   }
+  console.log(`Validation: ${passed} passed, ${failed} failed, ${skipped} skipped.`);
+  return failed === 0;
 }
 
 async function main() {
@@ -1530,8 +1555,7 @@ Options:
   }
 
   if (values['validate-accounts']) {
-    await runValidateAccounts();
-    process.exit(0);
+    process.exit(await runValidateAccounts() ? 0 : 1);
   }
 
   const readOnly = (values['read-only'] as boolean | undefined) ?? false;
@@ -1600,7 +1624,9 @@ Options:
         console.log(`Health check: ${service.healthUrl}`);
         console.log(`Codex skill: ${bundle.skill.skillPath}`);
         console.log('Service status: healthy');
-        console.log('Restart Codex to load the bearer token from the user environment.');
+        console.log(bundle.config.changed || !service.reusedBearerToken
+          ? 'Restart Codex to load the connection settings and bearer token.'
+          : 'Service updated. Existing Codex connections can continue without restarting.');
         process.exit(0);
       }
 
