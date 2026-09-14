@@ -1,4 +1,4 @@
-import nodemailer from 'nodemailer';
+import nodemailer, { type Transporter } from 'nodemailer';
 import type { EmailAccount } from '../config.js';
 import {
   prepareOutgoingMessage,
@@ -119,9 +119,9 @@ export class SmtpRecipientRejectedError extends Error {
 }
 
 export class SmtpClient {
-  private transporter: nodemailer.Transporter | null = null;
+  private transporter: Transporter | null = null;
   private connectPromise: Promise<void> | null = null;
-  private readonly composer: nodemailer.Transporter;
+  private readonly composer: Transporter;
 
   constructor(
     private readonly account: EmailAccount,

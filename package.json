@@ -68,7 +68,7 @@
     "cross-keychain": "^1.1.0",
     "imapflow": "^1.6.5",
     "mailparser": "^3.9.15",
-    "nodemailer": "^9.0.5",
+    "nodemailer": "^10.0.9",
     "pdf-parse": "^2.4.5",
     "rate-limiter-flexible": "^10.0.1",
     "smol-toml": "^1.8.0",
