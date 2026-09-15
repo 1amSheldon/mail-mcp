@@ -239,6 +239,10 @@ Version 2 changes the MCP tool surface from individual operation names to `mail_
 
 The Windows service checks npm every six hours. It stops accepting new requests, gives in-flight requests up to eight seconds to finish, and then restarts on the new package. Stdio clients update when the MCP process next starts.
 
+Windows logon and watchdog tasks use a windowless launcher. Managed services created by older versions migrate their scheduled-task action when the updated service next starts; the previous task definition is saved as `~/.config/mail-mcp/service/task-before-windowless.xml`.
+
+If a Windows installation predates 2.1.3, run `npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex` once from outside a source checkout to replace the old supervisor as well. The new supervisor installs package updates without lifecycle scripts and launches Node directly, avoiding the `npx`/`cmd.exe` process chain that can open Windows Terminal. Accounts and credentials are preserved.
+
 If an older installation pins an exact version, run its installer command again.
 
 Re-running `--install-codex` on an existing Windows HTTP installation preserves its bearer token. When the connection settings are unchanged, existing chats can continue after the service updates without restarting Codex.

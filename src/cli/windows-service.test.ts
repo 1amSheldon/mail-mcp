@@ -3,13 +3,16 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Script } from 'node:vm';
+import { EventEmitter } from 'node:events';
 import {
   buildWindowsServiceLauncher,
+  buildWindowlessServiceLauncher,
   buildWindowsServiceSupervisor,
   buildWindowsTaskRegistrationScript,
   getWindowsServicePaths,
   HTTP_BEARER_TOKEN_ENV,
   installWindowsHttpService,
+  migrateWindowlessServiceTask,
 } from './windows-service.js';
 
 describe('managed Windows HTTP service', () => {
@@ -46,7 +49,11 @@ describe('managed Windows HTTP service', () => {
       paths: getWindowsServicePaths('C:\\Users\\test'),
     });
 
-    expect(supervisor).toContain('--package=@1amsheldon/mail-mcp@latest');
+    expect(supervisor).toContain('@1amsheldon/mail-mcp@latest');
+    expect(supervisor).toContain('npm-cli.js');
+    expect(supervisor).toContain('--ignore-scripts');
+    expect(supervisor).not.toContain('npx-cli.js');
+    expect(supervisor).not.toContain('cmd.exe');
     expect(supervisor).toContain('"--http"');
     expect(supervisor).toContain('"127.0.0.1"');
     expect(supervisor).toContain('"--auto-update-seconds"');
@@ -77,10 +84,87 @@ describe('managed Windows HTTP service', () => {
     expect(script).toContain('-MultipleInstances IgnoreNew');
     expect(script).toContain('Get-MailMcpPortListeners');
     expect(script).toContain('after stopping the managed task');
-    expect(script).toContain('will not terminate listener processes automatically');
+    expect(script).toContain('will not terminate unverified listener processes');
     expect(script).not.toContain('Stop-Process');
-    expect(script).not.toContain('OwningProcess');
+    expect(script).toContain('CommandLine -match $expectedSupervisor');
+    expect(script).toContain('CreationDate -gt $candidate.CreationDate');
+    expect(script).toContain('-WindowStyle Hidden -Wait -PassThru');
     expect(script).toContain('Start-ScheduledTask');
+    expect(script).toContain('System32\\wscript.exe');
+    expect(script).toContain('//B //NoLogo //E:JScript');
+    expect(script).not.toContain("-Execute 'powershell.exe'");
+  });
+
+  it('installs without lifecycle shells, then runs the entrypoint directly', async () => {
+    let finished = false;
+    const spawn = vi.fn((_command, args, options) => {
+      expect(options).toMatchObject({ shell: false, windowsHide: true });
+      const child = new EventEmitter();
+      queueMicrotask(() => {
+        if (!args.includes('install')) finished = true;
+        child.emit('exit', 0);
+      });
+      return child;
+    });
+    const supervisor = buildWindowsServiceSupervisor({
+      nodePath: 'node.exe', npxCliPath: 'npm/bin/npx-cli.js',
+      paths: getWindowsServicePaths('test-home'),
+    });
+    new Script(supervisor).runInNewContext({
+      require: (name: string) => {
+        if (name === 'node:child_process') return { spawn };
+        if (name === 'node:path') return { join };
+        if (name === 'node:fs') return {
+          mkdirSync: vi.fn(), rmSync: vi.fn(), existsSync: () => finished,
+          statSync: () => ({ size: 0 }), openSync: () => 1, closeSync: vi.fn(), appendFileSync: vi.fn(),
+        };
+        if (name === 'node:http') return {
+          get: () => {
+            const request = new EventEmitter();
+            queueMicrotask(() => request.emit('error', new Error('offline')));
+            return request;
+          },
+        };
+        throw new Error(name);
+      },
+      process: { env: {}, on: vi.fn() }, setTimeout,
+      setInterval: () => ({ unref: vi.fn() }),
+    });
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
+    expect(spawn.mock.calls[0][1]).toEqual(expect.arrayContaining(['install', '--ignore-scripts']));
+    expect(spawn.mock.calls[1][1][0]).toMatch(/dist[\\/]index\.js$/);
+    expect(spawn.mock.calls[1][1]).toContain('--http');
+  });
+
+  it('starts PowerShell hidden at process creation and waits for its exit', () => {
+    const launcherPath = 'C:\\Users\\Test user\\service\\start.ps1';
+    const run = vi.fn().mockReturnValue(7);
+    const quit = vi.fn();
+    new Script(buildWindowlessServiceLauncher(launcherPath)).runInNewContext({
+      ActiveXObject: function () { return { Run: run }; },
+      WScript: { Quit: quit },
+    });
+    expect(run).toHaveBeenCalledWith(
+      expect.stringContaining(`-File "${launcherPath}"`), 0, true
+    );
+    expect(quit).toHaveBeenCalledWith(7);
+    expect(() => buildWindowlessServiceLauncher('bad"path')).toThrow('Invalid launcher path');
+  });
+
+  it('migrates only the exact old managed task without restarting the service', async () => {
+    const runPowerShell = vi.fn().mockResolvedValue({ stdout: '', stderr: '' });
+    await migrateWindowlessServiceTask({ platform: 'linux', runPowerShell });
+    expect(runPowerShell).not.toHaveBeenCalled();
+    await migrateWindowlessServiceTask({ platform: 'win32', runPowerShell });
+    const [script, environment] = runPowerShell.mock.calls[0];
+    expect(script).toContain("-ne 'powershell.exe'");
+    expect(script).toContain('Arguments -cne $expected');
+    expect(script).toContain('Export-ScheduledTask');
+    expect(script).toContain('Set-ScheduledTask');
+    expect(script).not.toContain('Stop-ScheduledTask');
+    expect(script).not.toContain('Start-ScheduledTask');
+    expect(environment.MAIL_MCP_TASK_NAME).toBe('Mail MCP Local Service');
+    expect(environment.MAIL_MCP_WINDOWLESS_SOURCE).toContain(', 0, true)');
   });
 
   it('writes the launcher and supervisor, reuses the user token, registers the task, and waits for health', async () => {
@@ -120,7 +204,7 @@ describe('managed Windows HTTP service', () => {
     const launcher = await readFile(result.launcherPath, 'utf8');
     const supervisor = await readFile(result.supervisorPath, 'utf8');
     expect(launcher).toContain('supervisor.cjs');
-    expect(supervisor).toContain('--package=@1amsheldon/mail-mcp@latest');
+    expect(supervisor).toContain('@1amsheldon/mail-mcp@latest');
     expect(launcher).not.toContain('existing-test-token');
     expect(supervisor).not.toContain('existing-test-token');
     expect(calls.some(call => call.environment?.MAIL_MCP_ENV_VALUE === 'existing-test-token')).toBe(true);
