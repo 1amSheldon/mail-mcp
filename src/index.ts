@@ -43,6 +43,7 @@ import { startAutoUpdateMonitor, type AutoUpdateMonitor } from './auto-update.js
 import {
   HTTP_BEARER_TOKEN_ENV,
   installWindowsHttpService,
+  migrateWindowlessServiceTask,
   SHARED_HTTP_HOST,
   SHARED_HTTP_PORT,
 } from './cli/windows-service.js';
@@ -1730,6 +1731,9 @@ Options:
       throw new Error('--auto-update-seconds requires --http');
     }
     autoUpdateIntervalMs = autoUpdateSeconds * 1000;
+    await migrateWindowlessServiceTask().catch(error => {
+      console.error(`Could not update the background launcher: ${(error as Error).message}`);
+    });
   }
   const runtimeState = httpMode ? new MailMCPRuntimeState() : undefined;
   const createServer = () => new MailMCPServer(

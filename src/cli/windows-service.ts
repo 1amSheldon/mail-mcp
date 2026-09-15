@@ -19,6 +19,7 @@ const SERVICE_START_TIMEOUT_MS = 90_000;
 export interface WindowsServicePaths {
   serviceDirectory: string;
   launcherPath: string;
+  windowlessLauncherPath: string;
   supervisorPath: string;
   logDirectory: string;
   runtimePrefix: string;
@@ -80,6 +81,7 @@ export function getWindowsServicePaths(home: string = homedir()): WindowsService
   return {
     serviceDirectory,
     launcherPath: join(serviceDirectory, 'start.ps1'),
+    windowlessLauncherPath: join(serviceDirectory, 'start.js'),
     supervisorPath: join(serviceDirectory, 'supervisor.cjs'),
     logDirectory: join(home, '.config', 'mail-mcp', 'logs'),
     runtimePrefix: join(home, '.cache', 'mail-mcp', 'npm-runtime'),
@@ -105,6 +107,15 @@ Set-Item -LiteralPath "Env:$tokenEnvironmentVariable" -Value $token
 & ${powershellLiteral(options.nodePath)} ${powershellLiteral(options.paths.supervisorPath)}
 exit $LASTEXITCODE
 `;
+}
+
+export function buildWindowlessServiceLauncher(launcherPath: string): string {
+  if (/["\r\n\0]/.test(launcherPath)) throw new Error('Invalid launcher path');
+  const command = `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "${launcherPath}"`;
+  // Windows Script Host hides the console before PowerShell processes its flags.
+  const literal = JSON.stringify(command).replace(/[\u007f-\uffff]/g,
+    character => `\\u${character.charCodeAt(0).toString(16).padStart(4, '0')}`);
+  return `var shell = new ActiveXObject("WScript.Shell");\nWScript.Quit(shell.Run(${literal}, 0, true));\n`;
 }
 
 export function buildWindowsServiceSupervisor(options: {
@@ -141,13 +152,9 @@ export function buildWindowsServiceSupervisor(options: {
 
   const healthHost = host === '::1' ? '[::1]' : host;
   const healthUrl = `http://${healthHost}:${port}/health`;
+  const entrypoint = join(options.paths.runtimePrefix, 'node_modules', '@1amsheldon', 'mail-mcp', 'dist', 'index.js');
   const argumentsList = [
-    '-y',
-    '--prefer-online',
-    '--prefix',
-    options.paths.runtimePrefix,
-    `--package=${packageSpec}`,
-    'mail-mcp',
+    entrypoint,
     '--http',
     '--host',
     host,
@@ -166,7 +173,12 @@ export function buildWindowsServiceSupervisor(options: {
 
   const configuration = {
     nodePath: options.nodePath,
-    arguments: [options.npxCliPath, ...argumentsList],
+    arguments: argumentsList,
+    entrypoint,
+    installArguments: [join(dirname(options.npxCliPath), 'npm-cli.js'), 'install',
+      '--prefix', options.paths.runtimePrefix, '--ignore-scripts', '--omit=dev',
+      '--no-audit', '--no-fund', '--no-package-lock', '--prefer-online',
+      '--fetch-retries=0', '--fetch-timeout=15000', packageSpec],
     healthUrl,
     logDirectory: options.paths.logDirectory,
     stopFile: join(options.paths.serviceDirectory, 'stop'),
@@ -234,7 +246,7 @@ function stop() {
 process.on('SIGINT', stop);
 process.on('SIGTERM', stop);
 
-async function runChild() {
+async function runChild(args = config.arguments) {
   rotateLog(stdoutLog);
   rotateLog(stderrLog);
   const stdout = fs.openSync(stdoutLog, 'a');
@@ -242,7 +254,7 @@ async function runChild() {
   const startedAt = Date.now();
   const exitCode = await new Promise(resolve => {
     let settled = false;
-    child = spawn(config.nodePath, config.arguments, {
+    child = spawn(config.nodePath, args, {
       env: process.env,
       shell: false,
       stdio: ['ignore', stdout, stderr],
@@ -270,9 +282,27 @@ async function main() {
   fs.rmSync(config.stopFile, { force: true });
   if (await serviceIsHealthy()) return;
 
+  const stopWatcher = setInterval(() => {
+    if (fs.existsSync(config.stopFile)) stop();
+  }, 250);
+  stopWatcher.unref();
   let restartDelayMs = 2000;
+  let refreshPackage = true;
   while (!stopping && !fs.existsSync(config.stopFile)) {
+    if (refreshPackage) {
+      const installation = await runChild(config.installArguments);
+      if (stopping || fs.existsSync(config.stopFile)) break;
+      if (installation.exitCode !== 0) {
+        writeSupervisorLog('Package refresh failed; using the installed runtime if available');
+        if (!fs.existsSync(config.entrypoint)) {
+          await delay(60000);
+          continue;
+        }
+      }
+      refreshPackage = false;
+    }
     const result = await runChild();
+    refreshPackage = result.exitCode === 75;
     if (stopping || fs.existsSync(config.stopFile)) break;
     if (result.exitCode === 75 || result.uptimeMs >= 5 * 60 * 1000) {
       restartDelayMs = 2000;
@@ -291,10 +321,38 @@ main().catch(error => {
 `;
 }
 
+export async function migrateWindowlessServiceTask(
+  dependencies: Pick<WindowsServiceDependencies, 'platform' | 'runPowerShell'> = {}
+): Promise<void> {
+  if ((dependencies.platform ?? process.platform) !== 'win32') return;
+  const paths = getWindowsServicePaths();
+  const runner = dependencies.runPowerShell ?? runPowerShell;
+  await runner(`$ErrorActionPreference = 'Stop'
+$task = Get-ScheduledTask -TaskName $env:MAIL_MCP_TASK_NAME -TaskPath '\\' -ErrorAction SilentlyContinue
+if ($null -eq $task -or @($task.Actions).Count -ne 1) { exit 0 }
+$expected = '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $env:MAIL_MCP_PS_LAUNCHER + '"'
+if ([IO.Path]::GetFileName($task.Actions[0].Execute) -ne 'powershell.exe' -or $task.Actions[0].Arguments -cne $expected) { exit 0 }
+$scriptHost = Join-Path $env:SystemRoot 'System32\\wscript.exe'
+if (-not (Test-Path -LiteralPath $scriptHost)) { throw 'Windows Script Host is unavailable' }
+$backup = Export-ScheduledTask -TaskName $env:MAIL_MCP_TASK_NAME -TaskPath '\\'
+[IO.File]::WriteAllText($env:MAIL_MCP_TASK_BACKUP, $backup)
+[IO.File]::WriteAllText($env:MAIL_MCP_WINDOWLESS_LAUNCHER, $env:MAIL_MCP_WINDOWLESS_SOURCE, [Text.Encoding]::ASCII)
+$action = New-ScheduledTaskAction -Execute $scriptHost -Argument ('//B //NoLogo //E:JScript "' + $env:MAIL_MCP_WINDOWLESS_LAUNCHER + '"')
+Set-ScheduledTask -TaskName $env:MAIL_MCP_TASK_NAME -TaskPath '\\' -Action $action | Out-Null
+`, {
+    MAIL_MCP_TASK_NAME: WINDOWS_SERVICE_TASK_NAME,
+    MAIL_MCP_PS_LAUNCHER: paths.launcherPath,
+    MAIL_MCP_WINDOWLESS_LAUNCHER: paths.windowlessLauncherPath,
+    MAIL_MCP_WINDOWLESS_SOURCE: buildWindowlessServiceLauncher(paths.launcherPath),
+    MAIL_MCP_TASK_BACKUP: join(paths.serviceDirectory, 'task-before-windowless.xml'),
+  });
+}
+
 export function buildWindowsTaskRegistrationScript(): string {
   return `$ErrorActionPreference = 'Stop'
 $taskName = $env:MAIL_MCP_TASK_NAME
 $launcherPath = $env:MAIL_MCP_LAUNCHER_PATH
+$supervisorPath = $env:MAIL_MCP_SUPERVISOR_PATH
 $stopFile = $env:MAIL_MCP_STOP_FILE
 $serviceHost = $env:MAIL_MCP_SERVICE_HOST
 $servicePort = [int]$env:MAIL_MCP_SERVICE_PORT
@@ -311,21 +369,35 @@ function Get-MailMcpPortListeners {
 $existingTask = Get-ScheduledTask -TaskName $taskName -TaskPath '\\' -ErrorAction SilentlyContinue
 if ($null -ne $existingTask) {
     New-Item -ItemType File -Path $stopFile -Force | Out-Null
-    Stop-ScheduledTask -TaskName $taskName -TaskPath '\\' -ErrorAction SilentlyContinue
     $deadline = (Get-Date).AddSeconds(10)
     do {
         Start-Sleep -Milliseconds 200
         $listeners = Get-MailMcpPortListeners
     } while ($listeners.Count -gt 0 -and (Get-Date) -lt $deadline)
+    $expectedSupervisor = '(?i)^"?' + [regex]::Escape($env:MAIL_MCP_NODE_PATH) + '"?\\s+"?' + [regex]::Escape($supervisorPath) + '"?\\s*$'
+    foreach ($listener in $listeners) {
+        $candidate = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $listener.OwningProcess)
+        for ($depth = 0; $null -ne $candidate -and $depth -lt 8; $depth++) {
+            if ($candidate.Name -eq 'node.exe' -and $candidate.CommandLine -match $expectedSupervisor) {
+                $kill = Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\\taskkill.exe') -ArgumentList @('/PID', [string]$candidate.ProcessId, '/T', '/F') -WindowStyle Hidden -Wait -PassThru
+                if ($kill.ExitCode -ne 0) { throw 'Could not stop the verified Mail MCP supervisor' }
+                break
+            }
+            $parent = Get-CimInstance Win32_Process -Filter ('ProcessId = ' + $candidate.ParentProcessId)
+            if ($null -ne $parent -and $parent.CreationDate -gt $candidate.CreationDate) { break }
+            $candidate = $parent
+        }
+    }
+    Stop-ScheduledTask -TaskName $taskName -TaskPath '\\' -ErrorAction SilentlyContinue
 }
 
 $listeners = Get-MailMcpPortListeners
 if ($listeners.Count -gt 0) {
-    throw "Port $servicePort is occupied after stopping the managed task; the installer will not terminate listener processes automatically"
+    throw "Port $servicePort is occupied after stopping the managed task; the installer will not terminate unverified listener processes"
 }
 
-$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument (
-    '-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $launcherPath + '"'
+$action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\\wscript.exe') -Argument (
+    '//B //NoLogo //E:JScript "' + $launcherPath + '"'
 )
 $logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
 $watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 5)
@@ -666,6 +738,7 @@ export async function installWindowsHttpService(
   const snapshot: WindowsServiceSnapshot = {
     files: await Promise.all([
       snapshotServiceFile(paths.launcherPath),
+      snapshotServiceFile(paths.windowlessLauncherPath),
       snapshotServiceFile(paths.supervisorPath),
       snapshotServiceFile(stopFile),
     ]),
@@ -699,12 +772,18 @@ export async function installWindowsHttpService(
         bearerTokenEnvVar,
       })
     );
+    await writeTextFileAtomic(
+      paths.windowlessLauncherPath,
+      buildWindowlessServiceLauncher(paths.launcherPath)
+    );
     await persistUserEnvironmentVariable(bearerTokenEnvVar, bearerToken, runner);
     process.env[bearerTokenEnvVar] = bearerToken;
 
     await runner(buildWindowsTaskRegistrationScript(), {
       MAIL_MCP_TASK_NAME: taskName,
-      MAIL_MCP_LAUNCHER_PATH: paths.launcherPath,
+      MAIL_MCP_LAUNCHER_PATH: paths.windowlessLauncherPath,
+      MAIL_MCP_SUPERVISOR_PATH: paths.supervisorPath,
+      MAIL_MCP_NODE_PATH: process.execPath,
       MAIL_MCP_STOP_FILE: stopFile,
       MAIL_MCP_SERVICE_HOST: host,
       MAIL_MCP_SERVICE_PORT: String(port),
