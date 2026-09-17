@@ -29,6 +29,9 @@ import {
   type PaginationScope,
 } from '../utils/pagination-store.js';
 import type { ParsedMail } from 'mailparser';
+import { simpleParser } from 'mailparser';
+import { DraftWorkflow, contentFingerprint, matchesSentDraft } from './drafts.js';
+import type { SmtpComposedMessage } from '../protocol/smtp.js';
 
 const DEFAULT_SENT_FOLDER = 'Sent';
 const DEFAULT_DRAFTS_FOLDER = 'Drafts';
@@ -119,6 +122,7 @@ export interface CopyEmailResult extends CopyMessagesResult {
 }
 
 export interface DraftCreationResult {
+  draftId?: string;
   folder: string;
   uid?: number;
   locator?: string;
@@ -399,13 +403,14 @@ export class MailService {
     const providerManaged = hosts.some(host =>
       host === 'gmail.com' || host.endsWith('.gmail.com') ||
       host === 'googlemail.com' || host.endsWith('.googlemail.com') ||
+      host === 'imap.exmail.qq.com' || host === 'smtp.exmail.qq.com' ||
       host === 'zoho.com' || host.endsWith('.zoho.com') ||
       /^([a-z0-9-]+\.)*zoho\.(eu|in|jp|ca|com\.au)$/.test(host)
     );
     return providerManaged ? 'provider' : 'manual';
   }
 
-  private async sendAndRecord(message: SmtpOutgoingMessage): Promise<SendDeliveryResult> {
+  private async sendAndRecord(message: SmtpOutgoingMessage, raw?: SmtpComposedMessage): Promise<SendDeliveryResult> {
     try {
       await this.ensureSmtp();
     } catch (error) {
@@ -424,7 +429,7 @@ export class MailService {
 
     let info;
     try {
-      info = await this.smtpClient.sendMessage(message);
+      info = raw ? await this.smtpClient.sendRawMessage(raw) : await this.smtpClient.sendMessage(message);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
       if (error instanceof SmtpRecipientRejectedError) {
@@ -495,8 +500,9 @@ export class MailService {
       };
     }
 
-    const sentFolder = await this.resolveSentFolder();
+    let sentFolder: string | undefined;
     try {
+      sentFolder = await this.resolveSentFolder();
       const appendResult = await this.imapClient.appendMessage(sentFolder, info.rawMessage, ['\\Seen']);
       return {
         status: partial ? 'partially_sent_and_saved' : 'sent_and_saved',
@@ -823,7 +829,9 @@ export class MailService {
         uid: appended.uid,
       });
     }
+    const draftId = locator ? await this.draftWorkflow().adopt(locator, composed.messageId) : undefined;
     return {
+      ...(draftId ? { draftId } : {}),
       folder: draftsFolder,
       ...(appended.uid !== undefined ? { uid: appended.uid } : {}),
       ...(locator ? { locator } : {}),
@@ -840,6 +848,60 @@ export class MailService {
       ...(bcc ? { bcc } : {}),
       includeSignature,
     });
+  }
+
+  private draftWorkflow(): DraftWorkflow {
+    return new DraftWorkflow(this.account, {
+      folder: () => this.resolveDraftsFolder(),
+      read: async locator => Buffer.from((await this.readRawEmail(locator, 50 * 1024 * 1024)).contentBase64, 'base64'),
+      search: async messageId => {
+        const folder = await this.resolveDraftsFolder();
+        const identity = await this.imapClient.getMailboxIdentity(folder);
+        const uids = await this.imapClient.searchMessageUids({ header: { 'Message-ID': messageId } }, folder);
+        const exact: string[] = [];
+        for (const uid of uids) {
+          const raw = await this.imapClient.fetchRawMessage(String(uid), folder, 50 * 1024 * 1024);
+          if ((await simpleParser(raw)).messageId === messageId) exact.push(encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid }));
+        }
+        return exact;
+      },
+      append: async raw => {
+        const folder = await this.resolveDraftsFolder();
+        const result = await this.imapClient.appendMessage(folder, raw, ['\\Draft']);
+        const identity = await this.imapClient.getMailboxIdentity(folder);
+        return { folder, uid: result.uid, ...(result.uid !== undefined ? { locator: encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid: result.uid }) } : {}) };
+      },
+      trash: locator => this.deleteLocatedEmail(locator),
+      compose: message => this.smtpClient.composeMessage(this.effectiveOutgoingMessage({ ...message, includeSignature: false }), { stripBcc: false }),
+      send: (message, raw) => this.sendAndRecord(this.effectiveOutgoingMessage({ ...message, includeSignature: false }), raw),
+      verify: async (raw, messageId, since) => {
+        if (this.account.sentPolicy === 'never') return undefined;
+        const folder = await this.resolveSentFolder();
+        const expected = await contentFingerprint(raw);
+        for (const delay of [0, 1000, 2000, 4000]) {
+          if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+          const exact = await this.imapClient.searchMessageUids({ header: { 'Message-ID': messageId } }, folder);
+          const recent = await this.imapClient.searchMessageUids({ since: new Date(since.getTime() - 60000) }, folder);
+          const uids = [...new Set([...exact, ...recent.sort((a, b) => b - a).slice(0, 100)])];
+          const matches: number[] = [];
+          for (const uid of uids) {
+            const candidate = await this.imapClient.fetchRawMessage(String(uid), folder, 50 * 1024 * 1024);
+            if (await matchesSentDraft(candidate, messageId, since, expected)) matches.push(uid);
+          }
+          if (matches.length === 1) return { folder, uid: matches[0] };
+          if (matches.length > 1) return undefined;
+        }
+        return undefined;
+      },
+    });
+  }
+
+  async updateDraft(target: string, changes: Record<string, unknown>) {
+    return this.draftWorkflow().update(target, changes);
+  }
+
+  async sendDraft(target: string) {
+    return this.draftWorkflow().send(target);
   }
 
   private async _cachedFetchBody(uid: string, folder: string): Promise<ParsedMail> {

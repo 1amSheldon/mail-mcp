@@ -128,6 +128,7 @@ export function buildWindowsServiceSupervisor(options: {
   runtimeArgs?: readonly string[];
   autoUpdateIntervalSeconds?: number;
   packageSpec?: string;
+  localEntrypoint?: string;
 }): string {
   const bearerTokenEnvVar = options.bearerTokenEnvVar ?? HTTP_BEARER_TOKEN_ENV;
   const host = options.host ?? SHARED_HTTP_HOST;
@@ -152,7 +153,7 @@ export function buildWindowsServiceSupervisor(options: {
 
   const healthHost = host === '::1' ? '[::1]' : host;
   const healthUrl = `http://${healthHost}:${port}/health`;
-  const entrypoint = join(options.paths.runtimePrefix, 'node_modules', '@1amsheldon', 'mail-mcp', 'dist', 'index.js');
+  const entrypoint = options.localEntrypoint ?? join(options.paths.runtimePrefix, 'node_modules', '@1amsheldon', 'mail-mcp', 'dist', 'index.js');
   const argumentsList = [
     entrypoint,
     '--http',
@@ -162,8 +163,7 @@ export function buildWindowsServiceSupervisor(options: {
     String(port),
     '--bearer-token-env',
     bearerTokenEnvVar,
-    '--auto-update-seconds',
-    String(autoUpdateIntervalSeconds),
+    ...(options.localEntrypoint ? [] : ['--auto-update-seconds', String(autoUpdateIntervalSeconds)]),
     ...runtimeArgs,
   ];
   const invalidArgument = argumentsList.find(value => /[\r\n\0]/.test(value));
@@ -175,6 +175,7 @@ export function buildWindowsServiceSupervisor(options: {
     nodePath: options.nodePath,
     arguments: argumentsList,
     entrypoint,
+    localSource: Boolean(options.localEntrypoint),
     installArguments: [join(dirname(options.npxCliPath), 'npm-cli.js'), 'install',
       '--prefix', options.paths.runtimePrefix, '--ignore-scripts', '--omit=dev',
       '--no-audit', '--no-fund', '--no-package-lock', '--prefer-online',
@@ -289,7 +290,7 @@ async function main() {
   let restartDelayMs = 2000;
   let refreshPackage = true;
   while (!stopping && !fs.existsSync(config.stopFile)) {
-    if (refreshPackage) {
+    if (refreshPackage && !config.localSource) {
       const installation = await runChild(config.installArguments);
       if (stopping || fs.existsSync(config.stopFile)) break;
       if (installation.exitCode !== 0) {
@@ -712,6 +713,7 @@ export async function installWindowsHttpService(
     port?: number;
     runtimeArgs?: readonly string[];
     packageSpec?: string;
+    localEntrypoint?: string;
   } = {},
   dependencies: WindowsServiceDependencies = {}
 ): Promise<WindowsServiceInstallResult> {
@@ -750,7 +752,7 @@ export async function installWindowsHttpService(
   try {
     await mkdir(paths.serviceDirectory, { recursive: true });
     await mkdir(paths.logDirectory, { recursive: true });
-    await prepareMailMcpNpxRuntime(home);
+    if (!options.localEntrypoint) await prepareMailMcpNpxRuntime(home);
     await writeTextFileAtomic(
       paths.supervisorPath,
       buildWindowsServiceSupervisor({
@@ -762,6 +764,7 @@ export async function installWindowsHttpService(
         port,
         runtimeArgs: options.runtimeArgs,
         packageSpec: options.packageSpec,
+        localEntrypoint: options.localEntrypoint,
       })
     );
     await writeTextFileAtomic(

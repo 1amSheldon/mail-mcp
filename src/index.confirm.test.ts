@@ -47,6 +47,8 @@ vi.mock('./services/mail.js', () => {
       disconnect: vi.fn().mockResolvedValue(undefined),
       listEmails: vi.fn().mockResolvedValue([]),
       sendEmail: mockSend,
+      sendDraft: mockSend,
+      updateDraft: vi.fn().mockResolvedValue({ status: 'draft_updated', draftId: 'draft-test' }),
       deleteEmail: mockDel,
       moveMessage: mockMove,
       modifyLabels: mockModify,
@@ -136,6 +138,16 @@ describe('CONF-03: write tool schemas include confirmationId', () => {
 });
 
 describe('CONF-03b: public mutation router confirmation', () => {
+  it.each(['updateDraft', 'sendDraft'])('requires confirmation and dispatches %s', async operation => {
+    const server = new MailMCPServer(false, undefined, undefined, true);
+    const request = { accountId: 'acc1', operation, input: { draftId: 'draft-test', ...(operation === 'updateDraft' ? { changes: { subject: 'Revised' } } : {}) } };
+    const first = await (server as any).dispatchTool('mail_mutate', false, request);
+    const challenge = JSON.parse(first.content[0].text);
+    expect(challenge.confirmationRequired).toBe(true);
+    const confirmed = await (server as any).dispatchTool('mail_mutate', false, { ...request, confirmationId: challenge.confirmationId });
+    expect(confirmed.isError).not.toBe(true);
+    expect(JSON.parse(confirmed.content[0].text).status).toBe(operation === 'updateDraft' ? 'draft_updated' : 'sent_and_saved');
+  });
   it('shares confirmation tokens across HTTP session instances', async () => {
     const runtimeState = new MailMCPRuntimeState();
     const firstSession = new MailMCPServer(

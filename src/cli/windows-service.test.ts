@@ -76,6 +76,17 @@ describe('managed Windows HTTP service', () => {
     })).toThrow('must bind to loopback');
   });
 
+  it('runs local source with both npm refresh and runtime auto-update disabled', () => {
+    const supervisor = buildWindowsServiceSupervisor({
+      nodePath: 'node.exe', npxCliPath: 'npx-cli.js',
+      paths: getWindowsServicePaths('C:\\Users\\test'), localEntrypoint: 'C:\\src\\mail-mcp\\dist\\index.js',
+    });
+    expect(supervisor).toContain('"localSource": true');
+    expect(supervisor).not.toContain('"--auto-update-seconds"');
+    expect(supervisor).toContain('!config.localSource');
+    expect(() => new Script(supervisor)).not.toThrow();
+  });
+
   it('registers logon and watchdog triggers with duplicate suppression', () => {
     const script = buildWindowsTaskRegistrationScript();
 

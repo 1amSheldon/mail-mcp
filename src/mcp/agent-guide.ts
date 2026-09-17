@@ -54,6 +54,17 @@ Use \`mail_mutate\` with one of these operations:
 
 ## Common input shapes
 
+IMAP drafts: createDraft also returns a stable draftId. updateDraft input is { draftId, changes },
+where changes may contain to, cc, bcc, subject, textBody, htmlBody and attachments.
+Omitted fields are preserved; attachments replaces the entire list (use [] to clear).
+When either body field changes, only the supplied body formats are retained.
+sendDraft input is { draftId }; locator is accepted instead to adopt an existing draft.
+These operations always read the latest server version, preserve attachments and reply headers,
+and return the current locator. Never guess a missing draft by subject.
+Schedule sendDraft with a stable draftId only after user approval. Cancel the local schedule
+when the user reports scheduling or sending in their webmail. Webmail schedules are not discovered automatically.
+Do not resend accepted or unknown outcomes, including retained drafts awaiting archive verification.
+
 List messages with \`{ "folder": "INBOX", "limit": 25 }\`. Continue with the returned cursor. Read or mutate a message using its returned \`locator\`; do not rebuild locators. Send with \`{ "to": "user@example.com", "subject": "Subject", "body": "Body" }\`. Attachments, recipient lists, filters, and provider requests use the fields described by the selected account's capabilities and validation errors.`;
 
 export const MAIL_AGENT_GUIDE_RESOURCE: Resource = {

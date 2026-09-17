@@ -121,6 +121,8 @@ export type ConfiguredAccount = z.infer<typeof configuredAccountSchema>;
 export type AccountBackend = Exclude<ConfiguredAccount['backend'], undefined>;
 
 export interface AccountCapabilityDescriptor {
+  readonly updateDraft?: boolean;
+  readonly sendDraft?: boolean;
   readonly backend: AccountBackend;
   readonly credentialSource: 'keychain' | 'native';
   readonly readMail: boolean;
@@ -132,6 +134,8 @@ export interface AccountCapabilityDescriptor {
 
 export const ACCOUNT_BACKEND_CAPABILITIES = {
   'imap-smtp': {
+    updateDraft: true,
+    sendDraft: true,
     backend: 'imap-smtp',
     credentialSource: 'keychain',
     readMail: true,

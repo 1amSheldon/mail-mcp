@@ -16,7 +16,7 @@ export const MAIL_QUERY_OPERATIONS = [
 ] as const;
 
 export const MAIL_MUTATION_OPERATIONS = [
-  'sendMessage', 'createDraft', 'createMailbox', 'renameMailbox', 'deleteMailbox',
+  'sendMessage', 'createDraft', 'updateDraft', 'sendDraft', 'createMailbox', 'renameMailbox', 'deleteMailbox',
   'copyMessage', 'moveMessage', 'modifyLabels', 'registerOAuth2', 'batchMessages',
   'reply', 'replyAll', 'forward', 'moveToTrash', 'permanentlyDelete', 'markRead',
   'markUnread', 'star', 'unstar', 'setFilter', 'deleteFilter',
@@ -55,6 +55,8 @@ const STANDARD_QUERY_ROUTES = {
 const STANDARD_MUTATION_ROUTES = {
   sendMessage: 'send_email',
   createDraft: 'create_draft',
+  updateDraft: 'update_draft',
+  sendDraft: 'send_draft',
   createMailbox: 'create_mailbox',
   renameMailbox: 'rename_mailbox',
   deleteMailbox: 'delete_mailbox',
