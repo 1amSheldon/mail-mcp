@@ -30,7 +30,7 @@ export async function setup(project: TestProject) {
     },
   });
 
-  await new Promise<void>((resolve) => server.listen(0, 'localhost', resolve));
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   // SMTPServer wraps a net.Server in server.server; address() is on the inner server
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const port = ((server as any).server.address() as { port: number }).port;

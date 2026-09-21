@@ -1,7 +1,18 @@
 import { inject } from 'vitest';
 import nodemailer from 'nodemailer';
+import { SmtpClient } from '../../src/protocol/smtp.js';
 
 describe('SMTP send/receive cycle', () => {
+  it('delivers prepared server MIME through the raw draft transport', async () => {
+    const client = new SmtpClient({ id: 'raw', name: 'Raw', host: 'localhost', port: 993, user: 'sender@test.local', authType: 'login', useTLS: false });
+    (client as any).transporter = nodemailer.createTransport({ host: 'localhost', port: inject('smtpPort'), secure: false, ignoreTLS: true });
+    try {
+      const composed = await client.composeMessage({ from: 'sender@test.local', to: 'recipient@test.local', bcc: 'hidden@test.local', subject: 'Raw draft', html: '<p>Draft</p>', attachments: [{ filename: 'test.txt', contentBase64: 'dGVzdA==' }] });
+      const result = await client.sendRawMessage(composed);
+      expect(result.accepted).toContain('hidden@test.local');
+      expect(result.accepted).toContain('recipient@test.local');
+    } finally { await client.disconnect(); }
+  });
   it('delivers a message end-to-end without mocked transport', async () => {
     const port = inject('smtpPort');
     const transporter = nodemailer.createTransport({

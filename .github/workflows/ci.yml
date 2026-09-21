@@ -43,6 +43,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Integration tests
+        run: npm run test:integration
+
       - name: Stdio smoke
         run: npm run smoke:stdio
 

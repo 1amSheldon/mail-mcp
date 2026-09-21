@@ -47,6 +47,8 @@ vi.mock('./services/mail.js', () => {
       disconnect: vi.fn().mockResolvedValue(undefined),
       listEmails: vi.fn().mockResolvedValue([]),
       sendEmail: mockSend,
+      sendDraft: mockSend,
+      updateDraft: vi.fn().mockResolvedValue({ status: 'draft_updated', draftId: 'draft-test' }),
       deleteEmail: mockDel,
       moveMessage: mockMove,
       modifyLabels: mockModify,
@@ -63,10 +65,35 @@ const mockDeleteEmail = vi.fn().mockResolvedValue(undefined);
 
 import { MailMCPServer } from './index.js';
 import { MailMCPRuntimeState } from './runtime-state.js';
+import { MailService } from './services/mail.js';
 
 const WRITE_TOOL_NAMES = ['mail_mutate'];
 
 const READ_TOOL_NAMES = ['list_accounts', 'mail_query'];
+
+describe('draft router delivery results', () => {
+  it.each(['smtp_rejected', 'smtp_connection_failed', 'smtp_outcome_unknown'])('marks %s as a tool error', async status => {
+    const server = new MailMCPServer(false);
+    const service = await (server as any).getService('acc1');
+    vi.mocked(service.sendDraft).mockResolvedValueOnce({ status, retrySafe: false });
+    const result = await server.dispatchTool('mail_mutate', false, {
+      accountId: 'acc1', operation: 'sendDraft', input: { draftId: 'draft-test' },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status, retrySafe: false });
+  });
+
+  it('rejects conflicting targets before opening an account', async () => {
+    const server = new MailMCPServer(false);
+    const previousCalls = vi.mocked(MailService).mock.calls.length;
+    const result = await server.dispatchTool('mail_mutate', false, {
+      accountId: 'acc1', operation: 'sendDraft', input: { draftId: 'draft-test', locator: 'other' },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not both');
+    expect(vi.mocked(MailService).mock.calls.length).toBe(previousCalls);
+  });
+});
 
 describe('CONF-01: MailMCPServer confirmMode constructor', () => {
   it('constructs with confirmMode=false by default (4th param omitted)', () => {
@@ -136,6 +163,16 @@ describe('CONF-03: write tool schemas include confirmationId', () => {
 });
 
 describe('CONF-03b: public mutation router confirmation', () => {
+  it.each(['updateDraft', 'sendDraft'])('requires confirmation and dispatches %s', async operation => {
+    const server = new MailMCPServer(false, undefined, undefined, true);
+    const request = { accountId: 'acc1', operation, input: { draftId: 'draft-test', ...(operation === 'updateDraft' ? { changes: { subject: 'Revised' } } : {}) } };
+    const first = await (server as any).dispatchTool('mail_mutate', false, request);
+    const challenge = JSON.parse(first.content[0].text);
+    expect(challenge.confirmationRequired).toBe(true);
+    const confirmed = await (server as any).dispatchTool('mail_mutate', false, { ...request, confirmationId: challenge.confirmationId });
+    expect(confirmed.isError).not.toBe(true);
+    expect(JSON.parse(confirmed.content[0].text).status).toBe(operation === 'updateDraft' ? 'draft_updated' : 'sent_and_saved');
+  });
   it('shares confirmation tokens across HTTP session instances', async () => {
     const runtimeState = new MailMCPRuntimeState();
     const firstSession = new MailMCPServer(

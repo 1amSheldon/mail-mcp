@@ -76,6 +76,17 @@ describe('managed Windows HTTP service', () => {
     })).toThrow('must bind to loopback');
   });
 
+  it('runs local source with both npm refresh and runtime auto-update disabled', () => {
+    const supervisor = buildWindowsServiceSupervisor({
+      nodePath: 'node.exe', npxCliPath: 'npx-cli.js',
+      paths: getWindowsServicePaths('C:\\Users\\test'), localEntrypoint: 'C:\\src\\mail-mcp\\dist\\index.js',
+    });
+    expect(supervisor).toContain('"localSource": true');
+    expect(supervisor).not.toContain('"--auto-update-seconds"');
+    expect(supervisor).toContain('!config.localSource');
+    expect(() => new Script(supervisor)).not.toThrow();
+  });
+
   it('registers logon and watchdog triggers with duplicate suppression', () => {
     const script = buildWindowsTaskRegistrationScript();
 
@@ -95,7 +106,7 @@ describe('managed Windows HTTP service', () => {
     expect(script).not.toContain("-Execute 'powershell.exe'");
   });
 
-  it('installs without lifecycle shells, then runs the entrypoint directly', async () => {
+  it.each([undefined, 'local/dist/index.js'])('runs hidden direct Node processes (local entrypoint: %s)', async localEntrypoint => {
     let finished = false;
     const spawn = vi.fn((_command, args, options) => {
       expect(options).toMatchObject({ shell: false, windowsHide: true });
@@ -109,6 +120,7 @@ describe('managed Windows HTTP service', () => {
     const supervisor = buildWindowsServiceSupervisor({
       nodePath: 'node.exe', npxCliPath: 'npm/bin/npx-cli.js',
       paths: getWindowsServicePaths('test-home'),
+      localEntrypoint,
     });
     new Script(supervisor).runInNewContext({
       require: (name: string) => {
@@ -130,10 +142,14 @@ describe('managed Windows HTTP service', () => {
       process: { env: {}, on: vi.fn() }, setTimeout,
       setInterval: () => ({ unref: vi.fn() }),
     });
-    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(2));
-    expect(spawn.mock.calls[0][1]).toEqual(expect.arrayContaining(['install', '--ignore-scripts']));
-    expect(spawn.mock.calls[1][1][0]).toMatch(/dist[\\/]index\.js$/);
-    expect(spawn.mock.calls[1][1]).toContain('--http');
+    await vi.waitFor(() => expect(spawn).toHaveBeenCalledTimes(localEntrypoint ? 1 : 2));
+    if (!localEntrypoint) {
+      expect(spawn.mock.calls[0][1]).toEqual(expect.arrayContaining(['install', '--ignore-scripts']));
+    }
+    const runtimeArgs = spawn.mock.calls.at(-1)![1];
+    expect(runtimeArgs[0]).toMatch(/dist[\\/]index\.js$/);
+    expect(runtimeArgs).toContain('--http');
+    if (localEntrypoint) expect(runtimeArgs).not.toContain('--auto-update-seconds');
   });
 
   it('starts PowerShell hidden at process creation and waits for its exit', () => {

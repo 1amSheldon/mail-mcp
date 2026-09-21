@@ -1,6 +1,6 @@
 {
   "name": "@1amsheldon/mail-mcp",
-  "version": "2.1.3",
+  "version": "3.0.0",
   "description": "Email MCP server for Codex and Claude with IMAP, SMTP, Apple Mail, Microsoft, and Mailtrap",
   "keywords": [
     "mcp",
@@ -58,8 +58,10 @@
     "smoke:stdio": "node scripts/smoke-stdio.mjs",
     "smoke:http": "node scripts/smoke-http.mjs",
     "probe:mail-read": "node scripts/probe-mail-read.mjs",
+    "probe:draft-workflow": "node scripts/probe-draft-workflow.mjs",
+    "backup:windows-service": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-windows-service.ps1",
     "smoke:import": "node -e \"import('./dist/index.js')\"",
-    "release:check": "npm run build && npm run check:english && npm test && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
+    "release:check": "npm run build && npm run check:english && npm test && npm run test:integration && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
     "prepack": "npm run build",
     "prepublishOnly": "npm run release:check"
   },

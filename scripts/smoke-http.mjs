@@ -34,6 +34,15 @@ try {
   if (JSON.stringify(names) !== JSON.stringify(expectedTools)) {
     throw new Error(`Expected ${expectedTools.join(', ')}, received ${names.join(', ')}`);
   }
+  const mutation = result.tools.find(tool => tool.name === 'mail_mutate');
+  const operations = mutation.inputSchema.properties.operation.enum;
+  if (!operations.includes('updateDraft') || !operations.includes('sendDraft')) {
+    throw new Error('Server draft operations are missing from the published catalog');
+  }
+  const guide = await client.readResource({ uri: 'mail://agent-guide' });
+  if (!guide.contents.some(content => content.text?.includes('sendDraft'))) {
+    throw new Error('Server draft instructions are missing');
+  }
   const healthDuringSession = await fetch(host.url.replace('/mcp', '/health'))
     .then(response => response.json());
   await transport.terminateSession();
@@ -46,6 +55,7 @@ try {
     service: healthDuringSession.service,
     serverVersion: healthDuringSession.version,
     toolCount: names.length,
+    toolCatalogBytes: Buffer.byteLength(JSON.stringify(result.tools)),
     activeSessionsDuringRequest: healthDuringSession.activeSessions,
     activeSessionsAfterClose: healthAfterSession.activeSessions,
   }));

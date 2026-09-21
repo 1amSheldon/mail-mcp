@@ -5,6 +5,33 @@ description: Operate mail-mcp accounts from Codex through its compact query and 
 
 # Mail MCP
 
+## Keyword search
+
+For IMAP accounts, call `mail_query` / `searchMessages` with `keywordsAll`,
+`keywordsAny`, and/or `excludeKeywords` arrays. `keywordScope` is `body` (default),
+`subject`, or `all`. Combine with sender, recipient, date, `unread`, and `flagged`
+filters. Array entries are literal words or phrases (20 per list, 256 characters each).
+Use `headerOnly: true` when snippets are unnecessary. Repeat the same filters with
+the returned `nextCursor` as `cursor`; changing filters starts a new search.
+The `keywords` string remains a single literal body phrase. Search is server-side;
+do not download a whole mailbox to filter it locally. Other backends use their own operations.
+
+## Server draft workflow
+
+For IMAP/SMTP, createDraft returns draftId plus the usual locator. Preserve draftId for scheduled work.
+Use mail_mutate updateDraft with input { draftId, changes }; changes supports to, cc, bcc, subject,
+textBody, htmlBody and attachments. Unspecified fields remain unchanged. Attachments is a full
+replacement list, with [] clearing it. Changing a body format drops unspecified body alternatives.
+Use mail_mutate sendDraft with input { draftId } after the user authorizes sending the latest
+server draft. A locator can be supplied instead to adopt an existing draft. Do not recompose it.
+The user may edit drafts in webmail. Missing or ambiguous identity requires selecting the current
+draft again, never guessing by subject. A local schedule sends the then-current server version.
+Cancel the corresponding local schedule when the user reports webmail sending or scheduling.
+No automatic discovery of webmail scheduled mail is promised. Accepted or uncertain SMTP results
+must never trigger a resend, even when the draft is retained because archive verification failed.
+Archive-confirmed sends move the unchanged source draft to Trash; updates move the old revision
+to Trash only after verifying the replacement. Review conflicts instead of deleting either copy.
+
 Use the server's `mail://agent-guide` resource when available; it is the runtime source of truth.
 
 1. Call `list_accounts` before choosing an operation. The server has one read router, `mail_query`, and one write router, `mail_mutate`.

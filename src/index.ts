@@ -26,7 +26,7 @@ import {
   prepareMailMcpNpxRuntime,
 } from './cli/npm-runtime.js';
 import { MailService } from './services/mail.js';
-import type { MailSendMessage, SendDeliveryResult } from './services/mail.js';
+import type { MailSendMessage } from './services/mail.js';
 import { MailMCPError, NetworkError } from './errors.js';
 import { TieredRateLimiter } from './utils/rate-limiter.js';
 import { ImapClient } from './protocol/imap.js';
@@ -97,6 +97,7 @@ export function parseCliArgs(args: string[]) {
       'install-claude': { type: 'boolean', default: false },
       'install-claude-code': { type: 'boolean', default: false },
       'install-codex': { type: 'boolean', default: false },
+      'install-codex-local': { type: 'boolean', default: false },
       'install-codex-stdio': { type: 'boolean', default: false },
       'auto-update-seconds': { type: 'string' },
       'version': { type: 'boolean', default: false },
@@ -119,7 +120,7 @@ export function parseAllowedTools(raw: string | undefined): Set<string> | undefi
   return allowedTools;
 }
 
-function formatDeliveryResult(result: SendDeliveryResult) {
+function formatDeliveryResult(result: { status?: unknown }) {
   const isError = result.status === 'smtp_rejected' ||
     result.status === 'smtp_connection_failed' ||
     result.status === 'smtp_outcome_unknown';
@@ -233,6 +234,10 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       return `Send email to ${args.to as string} with subject '${args.subject as string}'`;
     case 'create_draft':
       return `Save draft to ${args.to as string} with subject '${args.subject as string}'`;
+    case 'update_draft':
+      return `Update server draft ${args.draftId ?? args.locator}`;
+    case 'send_draft':
+      return `Send the latest server version of draft ${args.draftId ?? args.locator}`;
     case 'reply_email':
       return args.locator
         ? `Reply to message ${args.locator as string}`
@@ -849,6 +854,12 @@ export class MailMCPServer {
           since: args.since as string | undefined,
           before: args.before as string | undefined,
           keywords: args.keywords as string | undefined,
+          keywordsAll: args.keywordsAll as string[] | undefined,
+          keywordsAny: args.keywordsAny as string[] | undefined,
+          excludeKeywords: args.excludeKeywords as string[] | undefined,
+          keywordScope: args.keywordScope as 'body' | 'subject' | 'all' | undefined,
+          unread: args.unread as boolean | undefined,
+          flagged: args.flagged as boolean | undefined,
         }, {
           folder: args.folder as string | undefined,
           limit: args.limit as number | undefined,
@@ -1024,6 +1035,20 @@ export class MailMCPServer {
               args.bcc as string | undefined,
               args.includeSignature !== false,
             );
+        return trackResult(formatDeliveryResult(result));
+      }
+
+      if (name === 'update_draft' || name === 'send_draft') {
+        if (args.draftId !== undefined && args.locator !== undefined) {
+          throw new Error('Provide draftId or locator, not both');
+        }
+        const target = args.draftId ?? args.locator;
+        if (typeof target !== 'string' || !target.trim()) throw new Error('draftId or locator is required');
+        const changes = name === 'update_draft' ? requireObject(args.changes, 'changes') : undefined;
+        const service = await this.getService(args.accountId as string);
+        const result = name === 'send_draft'
+          ? await service.sendDraft(target)
+          : await service.updateDraft(target, changes!);
         return trackResult(formatDeliveryResult(result));
       }
 
@@ -1548,6 +1573,7 @@ Options:
   --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
   --install-claude-code       Register an auto-updating user-scoped MCP server in Claude Code
   --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
+  --install-codex-local       Install this local build as the Windows service without npm auto-updates
   --install-codex-stdio       Write an auto-updating per-client stdio command to Codex config
   --auto-update-seconds N     Managed HTTP service update check interval (minimum: 60)
   --version                   Show version number
@@ -1587,7 +1613,8 @@ Options:
     await prepareMailMcpNpxRuntime();
   }
 
-  if (values['install-codex']) {
+  if (values['install-codex-local'] && process.platform !== 'win32') throw new Error('Local service installer requires Windows');
+  if (values['install-codex'] || values['install-codex-local']) {
     const { join } = await import('node:path');
     const { homedir } = await import('node:os');
 
@@ -1607,6 +1634,7 @@ Options:
         try {
           service = await installWindowsHttpService({
             runtimeArgs: installRuntimeArgs,
+            ...(values['install-codex-local'] ? { localEntrypoint: (await import('node:url')).fileURLToPath(import.meta.url) } : {}),
             host: SHARED_HTTP_HOST,
             port: SHARED_HTTP_PORT,
             bearerTokenEnvVar: HTTP_BEARER_TOKEN_ENV,

@@ -378,6 +378,50 @@ describe('IMAP-03: search operation', () => {
     const server = new MailMCPServer(false);
     expectPublicOperation(server, 'mail_query', 'searchMessages');
   });
+
+  it('forwards extended keyword and status filters to the IMAP service', async () => {
+    const server = new MailMCPServer(false);
+    const searchEmailsPage = vi.fn().mockResolvedValue({ items: [], nextCursor: null, total: 0 });
+    vi.spyOn(server as any, 'getService').mockResolvedValue({ searchEmailsPage });
+
+    await server.dispatchTool('search_emails', false, {
+      accountId: 'test',
+      folder: 'INBOX',
+      limit: 10,
+      keywords: 'legacy',
+      keywordsAll: ['alpha'],
+      keywordsAny: ['beta', 'gamma'],
+      excludeKeywords: ['spam'],
+      keywordScope: 'all',
+      unread: true,
+      flagged: false,
+      since: '2026-09-01',
+      before: '2026-09-21',
+      headerOnly: true,
+    });
+
+    expect(searchEmailsPage).toHaveBeenCalledWith({
+      from: undefined,
+      to: undefined,
+      cc: undefined,
+      messageId: undefined,
+      subject: undefined,
+      since: '2026-09-01',
+      before: '2026-09-21',
+      keywords: 'legacy',
+      keywordsAll: ['alpha'],
+      keywordsAny: ['beta', 'gamma'],
+      excludeKeywords: ['spam'],
+      keywordScope: 'all',
+      unread: true,
+      flagged: false,
+    }, {
+      folder: 'INBOX',
+      limit: 10,
+      cursor: undefined,
+      headerOnly: true,
+    });
+  });
 });
 
 describe('DELIVERY-VERIFY: verify_sent_message tool', () => {

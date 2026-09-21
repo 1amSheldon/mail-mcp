@@ -241,6 +241,12 @@ export class SmtpClient {
 
     const { rawMessage, messageId, envelope } = await this.composeMessage(message);
 
+    return this.sendRawMessage({ rawMessage, messageId, envelope });
+  }
+
+  async sendRawMessage({ rawMessage, messageId, envelope }: SmtpComposedMessage): Promise<SmtpSendResult> {
+    if (!this.transporter) throw new Error('SMTP client not connected');
+
     try {
       const info = await this.transporter.sendMail({
         raw: rawMessage,
