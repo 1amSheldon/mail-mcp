@@ -42,7 +42,8 @@ describe.skipIf(!hasImapCredentials)('IMAP operations (requires TEST_IMAP_HOST)'
   }, 15000);
 
   it('lists messages from INBOX', async () => {
-    const messages = await client.listMessages('INBOX', 10, 0);
+    const uids = await client.listMessageUids('INBOX');
+    const messages = await client.fetchMessagesByUids(uids.slice(0, 10), 'INBOX', true);
     expect(Array.isArray(messages)).toBe(true);
     if (messages.length > 0) {
       expect(typeof messages[0].uid).toBe('number');
@@ -50,7 +51,7 @@ describe.skipIf(!hasImapCredentials)('IMAP operations (requires TEST_IMAP_HOST)'
   }, 15000);
 
   it('search returns results for broad query', async () => {
-    const results = await client.searchMessages({ since: new Date('2000-01-01') }, 'INBOX', 10, 0);
+    const results = await client.searchMessageUids({ since: new Date('2000-01-01') }, 'INBOX');
     expect(Array.isArray(results)).toBe(true);
   }, 15000);
 });

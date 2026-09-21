@@ -1,52 +1,5 @@
 # mail-mcp
 
-## Fork: server drafts and local Windows installation
-
-This fork adds IMAP/SMTP `updateDraft` and `sendDraft` through `mail_mutate`.
-`createDraft` now returns a stable `draftId` in addition to its existing fields.
-
-```json
-{"accountId":"work","operation":"updateDraft","input":{"draftId":"returned-id","changes":{"subject":"Revised subject","textBody":"Revised body"}}}
-```
-
-Send with `operation: "sendDraft"` and `input: { "draftId": "returned-id" }`.
-Both operations also accept `locator` instead of `draftId` to adopt an existing server draft.
-Changes supports `to`, `cc`, `bcc`, `subject`, `textBody`, `htmlBody`, and `attachments`.
-Omitted fields are kept; attachments replaces the entire list, and [] clears it.
-Supplying a body format removes unspecified alternatives, preventing stale HTML/plain text.
-Send reads the latest server content, keeps MIME bodies and reply headers, refreshes Date and
-Message-ID, and strips Bcc from the wire while retaining envelope recipients.
-
-State is stored next to accounts.json under draft-state, never in the repository. Repeated sends
-return their saved result; interrupted sends require inspection, not automatic retry. A dead-process
-lock requires inspection and explicit removal of that specific lock file. Replacements interrupted
-during cleanup are retained for manual inspection. IMAP has no atomic compare-and-swap; a final
-read detects edits during preparation but cannot eliminate the final read/write race with webmail.
-Web clients that replace both UID and Message-ID require selecting the current draft again.
-Unchanged drafts are moved to Trash only after delivery and archive confirmation.
-Tencent Exmail automatic Sent copies and its prefixed Message-ID are recognized by sendDraft.
-
-On Windows, build this checkout and install the local source service:
-
-```powershell
-npm ci
-npm run release:check
-node dist/index.js --install-codex-local
-```
-
-This reuses the existing loopback service, account file and system credentials. It disables npm
-refresh and runtime auto-update for this installation only. To update, stop the service task,
-pull the desired fork revision, rebuild/test, and rerun the local installer. The normal
-`--install-codex` path remains available to return to the upstream npm service.
-Keep a backup of Codex config and the service directory/task before switching builds.
-Use Codex scheduling for approved draft sends; webmail and Codex must not both schedule one draft.
-
-`npm run backup:windows-service` writes a timestamped local backup under the mail-mcp configuration
-directory. `npm run probe:draft-workflow -- --check` checks the installed tool schema and account
-connection without writing mail. With an explicit `--prepare`, the probe creates and updates a
-self-addressed test draft but never sends it. Both probe modes require `MAIL_MCP_ACCOUNT_ID` and the
-existing `MAIL_MCP_BEARER_TOKEN` environment variable.
-
 [![npm](https://img.shields.io/npm/v/@1amsheldon/mail-mcp)](https://www.npmjs.com/package/@1amsheldon/mail-mcp)
 [![CI](https://github.com/1amSheldon/mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/1amSheldon/mail-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-111111.svg)](LICENSE)
@@ -160,9 +113,40 @@ The important rules are short:
 
 IMAP cursor snapshots are capped at 10,000 UIDs and hydrate only the requested page. Page size is capped at 100.
 
+### Keyword search
+
+Use `mail_query` with `searchMessages` for IMAP accounts:
+
+```json
+{
+  "accountId": "work",
+  "operation": "searchMessages",
+  "input": {
+    "folder": "INBOX",
+    "keywordsAny": ["invoice", "payment overdue"],
+    "excludeKeywords": ["newsletter"],
+    "keywordScope": "all",
+    "unread": true,
+    "since": "2026-09-01",
+    "limit": 20,
+    "headerOnly": true
+  }
+}
+```
+
+- `keywordsAll`: every word or phrase must match.
+- `keywordsAny`: at least one word or phrase must match.
+- `excludeKeywords`: none may match.
+- `keywordScope`: `body` (default), `subject`, or `all` (headers and body).
+- `unread` and `flagged`: filter message state; `false` selects read or unflagged messages.
+
+Combine these with `from`, `to`, `cc`, `subject`, `messageId`, `since`, and `before`. Different filter groups are combined with AND. Array elements are literal substrings, not regular expressions or an AI relevance score. Each list accepts up to 20 terms of up to 256 characters. Matching and language behavior depend on the IMAP provider. The existing `keywords` string searches a literal phrase in the body.
+
+Search runs on the mail server and fetches only the requested result page. Use `headerOnly: true` to avoid body snippets. To continue, repeat the same filters with `cursor` set to `nextCursor`; changing filters requires a new search. Apple Mail and Microsoft use their provider-specific search operations.
+
 ## MCP surface
 
-Version 2 exposes three tools instead of publishing a separate JSON schema for every operation:
+The server exposes three tools instead of publishing a separate JSON schema for every operation:
 
 | Tool | Purpose |
 | --- | --- |
@@ -170,7 +154,7 @@ Version 2 exposes three tools instead of publishing a separate JSON schema for e
 | `mail_query` | Read, search, inspect, and render mail data |
 | `mail_mutate` | Draft, send, organize, delete, and configure mail |
 
-This is one MCP server. Its 41 query operations and 50 mutation operations are routed through those two tools rather than registered as separate tools or servers. The serialized tool catalog drops from 39,637 bytes to 3,524 bytes while keeping the same backend operations. The workflow and operation index are available on demand through the `mail://agent-guide` MCP resource and the `mail_agent_workflow` prompt.
+Operations are routed through those two tools rather than registered as separate tools or servers. Detailed input rules are loaded on demand through the `mail://agent-guide` resource and the `mail_agent_workflow` prompt, keeping the initial tool catalog small.
 
 Both routers use the same envelope:
 
@@ -251,6 +235,28 @@ Nested audit fields are sanitized. Provider errors are reduced to safe codes and
 
 ## Delivery states
 
+### Server drafts
+
+For IMAP/SMTP accounts, `createDraft` returns a stable `draftId`. Keep it to edit or send the same draft later:
+
+```json
+{"accountId":"work","operation":"updateDraft","input":{"draftId":"returned-id","changes":{"subject":"Revised subject","textBody":"Ready for review."}}}
+```
+
+```json
+{"accountId":"work","operation":"sendDraft","input":{"draftId":"returned-id"}}
+```
+
+Both calls use `mail_mutate`. Supply `locator` instead of `draftId` to use an existing server draft. Updates accept `to`, `cc`, `bcc`, `subject`, `textBody`, `htmlBody`, and `attachments`. Omitted fields stay unchanged. An attachment list replaces the old list; `[]` clears it. Changing a body format removes unspecified alternatives so old HTML cannot override new plain text.
+
+Sending reads the latest server content, preserves MIME bodies and reply headers, and excludes Bcc headers from the transmitted message while keeping those recipients in the SMTP envelope. The unchanged draft moves to Trash only after full recipient acceptance and a confirmed Sent copy. Partial or uncertain delivery retains the draft and must not trigger an automatic resend.
+
+Delivery records in `~/.config/mail-mcp/draft-state` prevent repeated calls from resending a recorded attempt, including after a restart. Keep this directory when moving an installation. This protection applies to this installation, not independent sends from webmail or another computer. Do not schedule the same draft in both places.
+
+Interrupted replacements and stale process locks require inspection; the service does not guess which copy to delete or resend. IMAP cannot atomically compare and replace a draft, so avoid editing it in webmail during an update or send. If webmail replaces both its UID and Message-ID, select the current draft again.
+
+### SMTP results
+
 SMTP acceptance and the Sent-folder copy are independent. Send, reply, and forward return structured results:
 
 | Status | Meaning |
@@ -284,6 +290,8 @@ Managed Codex and Claude installations run `@1amsheldon/mail-mcp@latest`. Update
 
 Version 2 changes the MCP tool surface from individual operation names to `mail_query` and `mail_mutate`. Restart the MCP client after upgrading so it refreshes the tool list. Stored accounts and credentials do not need migration.
 
+Version 3 keeps the same three-tool interface and adds server draft editing/sending and keyword filters. Accounts and credentials stay in place; draft delivery records are created on first use. Refresh the client's tool catalog or restart the client to discover the new operations.
+
 The Windows service checks npm every six hours. It stops accepting new requests, gives in-flight requests up to eight seconds to finish, and then restarts on the new package. Stdio clients update when the MCP process next starts.
 
 Windows logon and watchdog tasks use a windowless launcher. Managed services created by older versions migrate their scheduled-task action when the updated service next starts; the previous task definition is saved as `~/.config/mail-mcp/service/task-before-windowless.xml`.
@@ -315,6 +323,13 @@ npm pack --dry-run
 `release:check` builds the package, enforces English repository text, runs the complete test suite, exercises stdio and HTTP transports, checks importability, and runs `npm audit`.
 
 The default suite uses protocol and provider mocks. It does not access a real mailbox, send mail, call Microsoft or Mailtrap, or automate Mail.app. `--validate-accounts` opens configured IMAP and SMTP connections without sending a message.
+
+### Local Windows build
+
+
+After building and testing, `node dist/index.js --install-codex-local` runs that checkout as the shared Windows service. This disables npm refresh and runtime auto-update for that installation. Rebuild and rerun the installer to update it. Use `--install-codex` to return to the published npm package. Account definitions and credentials are reused.
+
+`npm run backup:windows-service` backs up the task, service files, and Codex configuration under the local mail-mcp configuration directory. Keep these backups private. `npm run probe:draft-workflow -- --check` checks the draft operation catalog and lists folders without writing mail. It requires `MAIL_MCP_ACCOUNT_ID` and `MAIL_MCP_BEARER_TOKEN`. The separate `--prepare` mode creates and updates a test draft and must be explicitly requested; it never sends.
 
 ## Release
 

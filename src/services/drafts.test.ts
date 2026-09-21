@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { simpleParser } from 'mailparser';
@@ -60,11 +60,24 @@ describe('server draft workflow', () => {
     expect(outgoing.rawMessage.subarray(outgoing.rawMessage.indexOf('\r\n\r\n') + 4)).toEqual(f.raw.subarray(f.raw.indexOf('\r\n\r\n') + 4));
     expect(parsed.messageId).not.toBe((await simpleParser(f.raw)).messageId);
   });
+  it('removes resend-only routing headers and canonicalizes From before SMTP', async () => {
+    const f = await fixture();
+    f.messages.set(locator(1), replaceHeaders(f.raw, {
+      Sender: 'evil@example.com', 'Resent-From': 'evil@example.com', 'Resent-To': 'other@example.com',
+      'Resent-Date': new Date().toUTCString(), 'Resent-Message-ID': '<evil@example.com>',
+    }));
+    await f.workflow.send(locator(1));
+    const wire = vi.mocked(f.port.send).mock.calls[0][1].rawMessage.toString('latin1');
+    expect(wire).toMatch(/^From: me@example\.com$/m);
+    expect(wire).not.toMatch(/^Sender:/mi);
+    expect(wire).not.toMatch(/^Resent-/mi);
+  });
   it('deduplicates across process restarts and historical locators', async () => {
     const f = await fixture(); const first = await f.workflow.send(locator(1));
     const restarted = new DraftWorkflow(account, f.port, new DraftStore(account.id, f.root));
     expect(await restarted.send(first.draftId as string)).toEqual(first);
     expect(await restarted.send(locator(1))).toEqual(first); expect(f.port.send).toHaveBeenCalledTimes(1);
+    await expect(restarted.update(first.draftId, { subject: 'after send' })).rejects.toThrow('recorded delivery attempt');
   });
   it('updates headers without changing MIME body, returning stable ID and new locator', async () => {
     const f = await fixture(); const id = await f.workflow.adopt(locator(1), (await simpleParser(f.raw)).messageId);
@@ -94,9 +107,12 @@ describe('server draft workflow', () => {
   it('preserves original on append failure and detects concurrent edits after append', async () => {
     const f = await fixture(); vi.mocked(f.port.append).mockRejectedValueOnce(new Error('Append failed'));
     await expect(f.workflow.update(locator(1), { subject: 'change' })).rejects.toThrow('Append failed'); expect(f.messages.has(locator(1))).toBe(true);
-    const append = f.port.append;
-    f.port.append = async raw => { const result = await append(raw); f.messages.set(locator(1), replaceHeaders(f.raw, { Subject: 'Concurrent edit' })); return result; };
-    await expect(f.workflow.update(locator(1), { subject: 'change' })).rejects.toThrow('concurrently'); expect(f.port.trash).not.toHaveBeenCalled();
+    await expect(f.workflow.update(locator(1), { subject: 'change' })).rejects.toThrow('pending cleanup'); expect(f.port.trash).not.toHaveBeenCalled();
+
+    const g = await fixture();
+    const append = g.port.append;
+    g.port.append = async raw => { const result = await append(raw); g.messages.set(locator(1), replaceHeaders(g.raw, { Subject: 'Concurrent edit' })); return result; };
+    await expect(g.workflow.update(locator(1), { subject: 'change' })).rejects.toThrow('concurrently'); expect(g.port.trash).not.toHaveBeenCalled();
   });
   it.each(['smtp_rejected','smtp_outcome_unknown','partially_sent_provider_managed'] as const)('retains and deduplicates %s', async status => {
     const f = await fixture(); vi.mocked(f.port.send).mockResolvedValue({ status, smtpAccepted: status === 'smtp_outcome_unknown' ? null : status !== 'smtp_rejected', accepted: [], rejected: ['to@example.com'], sentFolderSaved: false, retrySafe: false, nextAction: 'Inspect' });
@@ -121,6 +137,8 @@ describe('server draft workflow', () => {
   it('rejects non-draft locator and unsupported patch fields', async () => {
     const f = await fixture(); await expect(f.workflow.send(locator(1, 'INBOX'))).rejects.toThrow('not an account draft');
     await expect(f.workflow.update(locator(1), { from: 'other@example.com' })).rejects.toThrow('Unsupported');
+    await expect(f.workflow.update(locator(1), {})).rejects.toThrow('non-empty object');
+    await expect(f.workflow.update(locator(1), { attachments: [{ filename: 'bad', contentBase64: 3 }] })).rejects.toThrow('Invalid attachments');
   });
   it('replaces attachments while retaining both body alternatives', async () => {
     const f = await fixture(); const r = await f.workflow.update(locator(1), { attachments: [{ filename: 'new.txt', contentBase64: 'bmV3' }] });
@@ -139,5 +157,50 @@ describe('server draft workflow', () => {
     expect((await f.workflow.send(locator(1))).retrySafe).toBe(true);
     expect((await f.workflow.send(locator(1))).draftCleanup).toBe('moved_to_trash');
     expect(f.port.send).toHaveBeenCalledTimes(2);
+  });
+  it('fails closed on malformed persisted state', async () => {
+    const f = await fixture();
+    await writeFile((f.store as unknown as { file: string }).file, JSON.stringify({ records: [{ draftId: 'broken' }] }));
+    await expect(f.workflow.send(locator(1))).rejects.toThrow('Invalid draft state');
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+  it('checks the allowlist against the latest web-edited recipients before SMTP', async () => {
+    const f = await fixture();
+    const id = await f.workflow.adopt(locator(1), (await simpleParser(f.raw)).messageId);
+    f.messages.delete(locator(1)); f.messages.set(locator(9), replaceHeaders(f.raw, { To: 'blocked@example.com' }));
+    const restricted = new DraftWorkflow({ ...account, allowedRecipients: ['@allowed.example'] }, f.port, new DraftStore(account.id, f.root));
+    await expect(restricted.send(id)).rejects.toThrow('not in the allowed recipients list');
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+  it('preserves custom metadata when rebuilding MIME body or attachments', async () => {
+    const f = await fixture();
+    f.messages.set(locator(1), replaceHeaders(f.raw, { Importance: 'high', 'List-Unsubscribe': '<mailto:unsubscribe@example.com>', 'X-Trace': 'keep-me' }));
+    const result = await f.workflow.update(locator(1), { textBody: 'Rebuilt body' });
+    const updated = await simpleParser(f.messages.get(result.locator as string)!);
+    const updatedHeaders = f.messages.get(result.locator as string)!.subarray(0, f.messages.get(result.locator as string)!.indexOf('\r\n\r\n')).toString('latin1');
+    expect(updatedHeaders).toContain('Importance: high');
+    expect(updatedHeaders).toContain('List-Unsubscribe: <mailto:unsubscribe@example.com>');
+    expect(updated.headers.get('x-trace')).toBe('keep-me');
+    expect(updated.text).toContain('Rebuilt body');
+  });
+  it('rejects duplicate singleton routing headers before SMTP', async () => {
+    const f = await fixture();
+    const at = f.raw.indexOf('\r\n\r\n');
+    const duplicate = Buffer.concat([f.raw.subarray(0, at), Buffer.from('\r\nFrom: evil@example.com', 'latin1'), f.raw.subarray(at)]);
+    f.messages.set(locator(1), duplicate);
+    await expect(f.workflow.send(locator(1))).rejects.toThrow('Duplicate from header');
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+  it('retains a generated Message-ID when updating a draft that had none', async () => {
+    const f = await fixture();
+    f.messages.set(locator(1), replaceHeaders(f.raw, { 'Message-ID': undefined }));
+    const updated = await f.workflow.update(locator(1), { subject: 'Generated ID' });
+    const updatedRaw = f.messages.get(updated.locator as string)!;
+    const generatedId = (await simpleParser(updatedRaw)).messageId;
+    expect(generatedId).toMatch(/^<.+@example\.com>$/);
+    f.messages.delete(updated.locator as string); f.messages.set(locator(9), updatedRaw);
+    await f.workflow.send(updated.draftId as string);
+    expect(f.port.send).toHaveBeenCalledTimes(1);
+    expect((await simpleParser(vi.mocked(f.port.send).mock.calls[0][1].rawMessage)).subject).toBe('Generated ID');
   });
 });

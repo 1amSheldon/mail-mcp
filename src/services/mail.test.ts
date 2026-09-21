@@ -1,5 +1,9 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
 
+const { mockDraftAdopt } = vi.hoisted(() => ({
+  mockDraftAdopt: vi.fn().mockResolvedValue('test-draft-id'),
+}));
+
 const mockImapConnect = vi.fn().mockResolvedValue(undefined);
 const mockImapAppendMessage = vi.fn().mockResolvedValue({ uid: 101 });
 const mockGetMailboxIdentity = vi.fn().mockResolvedValue({ path: 'Drafts', uidValidity: '1' });
@@ -95,6 +99,16 @@ vi.mock('../protocol/smtp.js', () => {
   };
 });
 
+vi.mock('./drafts.js', async () => {
+  const actual = await vi.importActual<typeof import('./drafts.js')>('./drafts.js');
+  return {
+    ...actual,
+    DraftWorkflow: vi.fn(function () {
+      return { adopt: mockDraftAdopt };
+    }),
+  };
+});
+
 import { MailService, applySignature } from './mail.js';
 
 beforeEach(() => {
@@ -107,6 +121,7 @@ beforeEach(() => {
   });
   mockImapAppendMessage.mockReset().mockResolvedValue({ uid: 101 });
   mockFindSpecialUseFolder.mockReset().mockResolvedValue('Sent');
+  mockDraftAdopt.mockReset().mockResolvedValue('test-draft-id');
 });
 
 describe('MailService SMTP connection behavior', () => {
@@ -276,6 +291,47 @@ describe('MailService searchable delivery identifiers', () => {
       cc: 'cc@example.com',
       header: { 'Message-ID': '<delivery@example.com>' },
     }, 'Sent', 10_000);
+  });
+
+  it('maps bounded keyword groups and status filters without fetching message text', async () => {
+    const account = { id: 'test', name: 'Test', user: 'test@example.com' } as any;
+    const service = new MailService(account, false);
+    mockGetMailboxIdentity.mockResolvedValueOnce({ path: 'INBOX', uidValidity: '2' });
+    mockSearchMessageUids.mockClear();
+    mockFetchMessagesByUids.mockClear();
+    await service.searchEmailsPage({
+      keywords: 'legacy-body-term',
+      keywordsAll: ['alpha', 'beta'],
+      keywordsAny: ['red', 'blue'],
+      excludeKeywords: ['spam'],
+      keywordScope: 'all',
+      unread: true,
+      flagged: false,
+    }, { folder: 'INBOX', limit: 5, headerOnly: true });
+    expect(mockSearchMessageUids).toHaveBeenCalledWith({
+      body: 'legacy-body-term',
+      flagged: false,
+      not: {
+        or: [
+          { not: { text: 'alpha' } },
+          { not: { text: 'beta' } },
+          { text: 'spam' },
+        ],
+      },
+      or: [{ text: 'blue' }, { text: 'red' }],
+      seen: false,
+    }, 'INBOX', 10_000);
+    expect(mockFetchMessagesByUids).toHaveBeenCalledWith([], 'INBOX', true);
+  });
+
+  it('rejects invalid search filters before reading mailbox identity', async () => {
+    const account = { id: 'test', name: 'Test', user: 'test@example.com' } as any;
+    const service = new MailService(account, false);
+    mockGetMailboxIdentity.mockClear();
+    await expect(service.searchEmailsPage({
+      keywordsAny: Array.from({ length: 21 }, (_, index) => String(index)),
+    })).rejects.toThrow('at most 20 words');
+    expect(mockGetMailboxIdentity).not.toHaveBeenCalled();
   });
 });
 
@@ -1087,6 +1143,30 @@ describe('MailService createDraft with signature', () => {
     const rawMessage: string = mockImapAppendMessage.mock.calls[0][1];
     expect(rawMessage).not.toContain('-- \n');
     expect(rawMessage).toContain('Body text');
+  });
+
+  it('returns the saved locator when local draft adoption fails', async () => {
+    const account = { ...baseAccount, draftsFolder: 'Drafts' };
+    const service = new MailService(account, false);
+    await service.connect();
+    mockFindSpecialUseFolder.mockResolvedValueOnce('Drafts');
+    mockDraftAdopt.mockRejectedValueOnce(new Error('local state unavailable'));
+
+    const result = await service.createDraftMessage({
+      to: 'to@example.com',
+      subject: 'Draft',
+      text: 'Body text',
+    });
+
+    expect(mockImapAppendMessage).toHaveBeenCalledOnce();
+    expect(result).toMatchObject({
+      folder: 'Drafts',
+      uid: 101,
+      locator: expect.stringContaining('imap:v1:'),
+      messageId: '<draft@example.com>',
+    });
+    expect(result.draftId).toBeUndefined();
+    expect(result.warning).toContain('Do not create another copy');
   });
 });
 

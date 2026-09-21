@@ -65,10 +65,35 @@ const mockDeleteEmail = vi.fn().mockResolvedValue(undefined);
 
 import { MailMCPServer } from './index.js';
 import { MailMCPRuntimeState } from './runtime-state.js';
+import { MailService } from './services/mail.js';
 
 const WRITE_TOOL_NAMES = ['mail_mutate'];
 
 const READ_TOOL_NAMES = ['list_accounts', 'mail_query'];
+
+describe('draft router delivery results', () => {
+  it.each(['smtp_rejected', 'smtp_connection_failed', 'smtp_outcome_unknown'])('marks %s as a tool error', async status => {
+    const server = new MailMCPServer(false);
+    const service = await (server as any).getService('acc1');
+    vi.mocked(service.sendDraft).mockResolvedValueOnce({ status, retrySafe: false });
+    const result = await server.dispatchTool('mail_mutate', false, {
+      accountId: 'acc1', operation: 'sendDraft', input: { draftId: 'draft-test' },
+    });
+    expect(result.isError).toBe(true);
+    expect(JSON.parse(result.content[0].text)).toMatchObject({ status, retrySafe: false });
+  });
+
+  it('rejects conflicting targets before opening an account', async () => {
+    const server = new MailMCPServer(false);
+    const previousCalls = vi.mocked(MailService).mock.calls.length;
+    const result = await server.dispatchTool('mail_mutate', false, {
+      accountId: 'acc1', operation: 'sendDraft', input: { draftId: 'draft-test', locator: 'other' },
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain('not both');
+    expect(vi.mocked(MailService).mock.calls.length).toBe(previousCalls);
+  });
+});
 
 describe('CONF-01: MailMCPServer confirmMode constructor', () => {
   it('constructs with confirmMode=false by default (4th param omitted)', () => {

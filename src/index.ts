@@ -26,7 +26,7 @@ import {
   prepareMailMcpNpxRuntime,
 } from './cli/npm-runtime.js';
 import { MailService } from './services/mail.js';
-import type { MailSendMessage, SendDeliveryResult } from './services/mail.js';
+import type { MailSendMessage } from './services/mail.js';
 import { MailMCPError, NetworkError } from './errors.js';
 import { TieredRateLimiter } from './utils/rate-limiter.js';
 import { ImapClient } from './protocol/imap.js';
@@ -120,7 +120,7 @@ export function parseAllowedTools(raw: string | undefined): Set<string> | undefi
   return allowedTools;
 }
 
-function formatDeliveryResult(result: SendDeliveryResult) {
+function formatDeliveryResult(result: { status?: unknown }) {
   const isError = result.status === 'smtp_rejected' ||
     result.status === 'smtp_connection_failed' ||
     result.status === 'smtp_outcome_unknown';
@@ -854,6 +854,12 @@ export class MailMCPServer {
           since: args.since as string | undefined,
           before: args.before as string | undefined,
           keywords: args.keywords as string | undefined,
+          keywordsAll: args.keywordsAll as string[] | undefined,
+          keywordsAny: args.keywordsAny as string[] | undefined,
+          excludeKeywords: args.excludeKeywords as string[] | undefined,
+          keywordScope: args.keywordScope as 'body' | 'subject' | 'all' | undefined,
+          unread: args.unread as boolean | undefined,
+          flagged: args.flagged as boolean | undefined,
         }, {
           folder: args.folder as string | undefined,
           limit: args.limit as number | undefined,
@@ -1033,13 +1039,17 @@ export class MailMCPServer {
       }
 
       if (name === 'update_draft' || name === 'send_draft') {
-        const service = await this.getService(args.accountId as string);
+        if (args.draftId !== undefined && args.locator !== undefined) {
+          throw new Error('Provide draftId or locator, not both');
+        }
         const target = args.draftId ?? args.locator;
-        if (typeof target !== 'string' || !target) throw new Error('draftId or locator is required');
+        if (typeof target !== 'string' || !target.trim()) throw new Error('draftId or locator is required');
+        const changes = name === 'update_draft' ? requireObject(args.changes, 'changes') : undefined;
+        const service = await this.getService(args.accountId as string);
         const result = name === 'send_draft'
           ? await service.sendDraft(target)
-          : await service.updateDraft(target, requireObject(args.changes, 'changes'));
-        return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+          : await service.updateDraft(target, changes!);
+        return trackResult(formatDeliveryResult(result));
       }
 
       if (name === 'create_draft') {

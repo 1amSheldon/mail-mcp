@@ -5,6 +5,17 @@ description: Operate mail-mcp accounts from Codex through its compact query and 
 
 # Mail MCP
 
+## Keyword search
+
+For IMAP accounts, call `mail_query` / `searchMessages` with `keywordsAll`,
+`keywordsAny`, and/or `excludeKeywords` arrays. `keywordScope` is `body` (default),
+`subject`, or `all`. Combine with sender, recipient, date, `unread`, and `flagged`
+filters. Array entries are literal words or phrases (20 per list, 256 characters each).
+Use `headerOnly: true` when snippets are unnecessary. Repeat the same filters with
+the returned `nextCursor` as `cursor`; changing filters starts a new search.
+The `keywords` string remains a single literal body phrase. Search is server-side;
+do not download a whole mailbox to filter it locally. Other backends use their own operations.
+
 ## Server draft workflow
 
 For IMAP/SMTP, createDraft returns draftId plus the usual locator. Preserve draftId for scheduled work.

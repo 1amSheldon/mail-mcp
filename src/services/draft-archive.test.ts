@@ -6,6 +6,15 @@ import type { EmailAccount } from '../config.js';
 
 const account: EmailAccount = { id: 'archive-test', name: 'Test', host: 'imap.exmail.qq.com', smtpHost: 'smtp.exmail.qq.com', port: 993, user: 'test@example.com', authType: 'login', useTLS: true };
 describe('draft archive policy and confirmation', () => {
+  it('enforces recipient and sender policy when composing the latest server draft', async () => {
+    const service = new MailService({ ...account, allowedRecipients: ['approved@example.com'] }) as any;
+    const compose = service.draftWorkflow().port.compose;
+    expect(() => compose({ to: 'other@example.com', subject: 'Test', text: 'Body' })).toThrow();
+    expect(() => compose({ to: 'approved@example.com', bcc: 'hidden@example.com', subject: 'Test', text: 'Body' })).toThrow();
+    expect(() => compose({ to: 'approved@example.com', from: 'imposter@example.com', subject: 'Test', text: 'Body' })).toThrow();
+    await expect(compose({ to: 'approved@example.com', from: account.user, subject: 'Test', text: 'Body' })).resolves.toHaveProperty('rawMessage');
+  });
+
   it('uses provider copies for Tencent unless explicitly overridden', () => {
     expect((new MailService(account) as any).sentCopyPolicy()).toBe('provider');
     expect((new MailService({ ...account, sentPolicy: 'always' }) as any).sentCopyPolicy()).toBe('manual');
@@ -19,13 +28,14 @@ describe('draft archive policy and confirmation', () => {
     const source = replaceHeaders(raw, { 'Message-ID': id, Date: now.toUTCString() });
     const copy = replaceHeaders(source, { 'Message-ID': '<ABC123+archive@example.com>' });
     let scans = 0;
-    vi.spyOn(service.imapClient, 'searchMessageUids').mockImplementation(async (...args: unknown[]) => {
-      if ((args[0] as any).header) return [];
-      return ++scans === 1 ? [] : [2];
-    });
+    vi.spyOn(service.imapClient, 'searchMessageUids').mockImplementation(async () => ++scans === 1 ? [] : [2]);
     vi.spyOn(service.imapClient, 'fetchRawMessage').mockResolvedValue(copy);
     expect(await service.draftWorkflow().port.verify(source, id, now)).toEqual({ folder: 'Sent', uid: 2 });
     expect(scans).toBe(2);
+    expect(service.imapClient.searchMessageUids).toHaveBeenCalledWith(
+      { header: { 'Message-ID': 'archive@example.com' } }, 'Sent', 20,
+    );
+    expect(service.imapClient.fetchRawMessage).toHaveBeenCalledTimes(1);
   });
   it('does not confirm ambiguous Sent copies', async () => {
     const service = new MailService(account) as any;

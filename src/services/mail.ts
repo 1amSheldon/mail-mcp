@@ -32,6 +32,14 @@ import type { ParsedMail } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import { DraftWorkflow, contentFingerprint, matchesSentDraft } from './drafts.js';
 import type { SmtpComposedMessage } from '../protocol/smtp.js';
+import {
+  buildSearchCriteria,
+  normalizeSearchQuery,
+  searchPaginationKey,
+  type SearchEmailsQuery,
+} from '../domain/mail-search.js';
+
+export type { SearchEmailsQuery } from '../domain/mail-search.js';
 
 const DEFAULT_SENT_FOLDER = 'Sent';
 const DEFAULT_DRAFTS_FOLDER = 'Drafts';
@@ -90,17 +98,6 @@ export interface ListEmailsPageOptions {
   headerOnly?: boolean;
 }
 
-export interface SearchEmailsQuery {
-  from?: string;
-  to?: string;
-  cc?: string;
-  subject?: string;
-  since?: string;
-  before?: string;
-  keywords?: string;
-  messageId?: string;
-}
-
 export interface SearchEmailsPageOptions {
   folder?: string;
   limit?: number;
@@ -123,6 +120,7 @@ export interface CopyEmailResult extends CopyMessagesResult {
 
 export interface DraftCreationResult {
   draftId?: string;
+  warning?: string;
   folder: string;
   uid?: number;
   locator?: string;
@@ -237,16 +235,12 @@ export class MailService {
   ): Promise<PaginationPage<LocatedMessageMetadata>> {
     const folder = options.folder ?? 'INBOX';
     const limit = options.limit ?? 10;
+    const normalizedQuery = normalizeSearchQuery(query);
     const identity = await this.imapClient.getMailboxIdentity(folder);
-    const normalizedQuery = this.normalizeSearchQuery(query);
     const scope = this.paginationScope(
       identity.path,
       identity.uidValidity,
-      JSON.stringify({
-        kind: 'search',
-        query: normalizedQuery,
-        headerOnly: options.headerOnly ?? false,
-      })
+      searchPaginationKey(normalizedQuery, options.headerOnly ?? false),
     );
 
     const page = options.cursor
@@ -254,7 +248,7 @@ export class MailService {
       : this.paginationStore.getFirstPage(
           scope,
           await this.imapClient.searchMessageUids(
-            this.buildSearchCriteria(normalizedQuery),
+            buildSearchCriteria(normalizedQuery),
             identity.path,
             MAX_PAGINATION_SNAPSHOT_ITEMS,
           ),
@@ -275,27 +269,6 @@ export class MailService {
       nextCursor: page.nextCursor,
       total: page.total,
     };
-  }
-
-  private buildSearchCriteria(query: SearchEmailsQuery): Record<string, unknown> {
-    const criteria: Record<string, unknown> = {};
-    if (query.from) criteria.from = query.from;
-    if (query.to) criteria.to = query.to;
-    if (query.cc) criteria.cc = query.cc;
-    if (query.subject) criteria.subject = query.subject;
-    if (query.since) criteria.since = query.since;
-    if (query.before) criteria.before = query.before;
-    if (query.keywords) criteria.body = query.keywords;
-    if (query.messageId) criteria.header = { 'Message-ID': query.messageId };
-    return criteria;
-  }
-
-  private normalizeSearchQuery(query: SearchEmailsQuery): SearchEmailsQuery {
-    return Object.fromEntries(
-      Object.entries(query)
-        .filter((entry): entry is [string, string] => typeof entry[1] === 'string' && entry[1].length > 0)
-        .sort(([left], [right]) => left.localeCompare(right))
-    ) as SearchEmailsQuery;
   }
 
   async resolveSentFolder(explicitFolder?: string): Promise<string> {
@@ -829,9 +802,20 @@ export class MailService {
         uid: appended.uid,
       });
     }
-    const draftId = locator ? await this.draftWorkflow().adopt(locator, composed.messageId) : undefined;
+    let draftId: string | undefined;
+    let warning: string | undefined;
+    if (locator) {
+      try {
+        draftId = await this.draftWorkflow().adopt(locator, composed.messageId);
+      } catch {
+        // APPEND already succeeded. Do not turn a local state failure into a
+        // failed creation that encourages the client to append another copy.
+        warning = 'Draft saved, but its local tracking record could not be stored. Keep the locator and inspect draft-state before updating or sending. Do not create another copy.';
+      }
+    }
     return {
       ...(draftId ? { draftId } : {}),
+      ...(warning ? { warning } : {}),
       folder: draftsFolder,
       ...(appended.uid !== undefined ? { uid: appended.uid } : {}),
       ...(locator ? { locator } : {}),
@@ -853,7 +837,10 @@ export class MailService {
   private draftWorkflow(): DraftWorkflow {
     return new DraftWorkflow(this.account, {
       folder: () => this.resolveDraftsFolder(),
-      read: async locator => Buffer.from((await this.readRawEmail(locator, 50 * 1024 * 1024)).contentBase64, 'base64'),
+      read: async locator => {
+        const resolved = await this.resolveLocator(locator);
+        return this.imapClient.fetchRawMessage(resolved.uid.toString(), resolved.mailbox, 50 * 1024 * 1024);
+      },
       search: async messageId => {
         const folder = await this.resolveDraftsFolder();
         const identity = await this.imapClient.getMailboxIdentity(folder);
@@ -880,9 +867,11 @@ export class MailService {
         const expected = await contentFingerprint(raw);
         for (const delay of [0, 1000, 2000, 4000]) {
           if (delay) await new Promise(resolve => setTimeout(resolve, delay));
-          const exact = await this.imapClient.searchMessageUids({ header: { 'Message-ID': messageId } }, folder);
-          const recent = await this.imapClient.searchMessageUids({ since: new Date(since.getTime() - 60000) }, folder);
-          const uids = [...new Set([...exact, ...recent.sort((a, b) => b - a).slice(0, 100)])];
+          // IMAP HEADER is a substring search. Omitting brackets also finds
+          // provider-prefixed IDs without downloading unrelated recent mail.
+          const uids = await this.imapClient.searchMessageUids(
+            { header: { 'Message-ID': messageId.replace(/^<|>$/g, '') } }, folder, 20,
+          );
           const matches: number[] = [];
           for (const uid of uids) {
             const candidate = await this.imapClient.fetchRawMessage(String(uid), folder, 50 * 1024 * 1024);

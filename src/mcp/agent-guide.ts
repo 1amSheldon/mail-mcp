@@ -44,7 +44,7 @@ Use \`mail_query\` with one of these operations:
 
 Use \`mail_mutate\` with one of these operations:
 
-- Compose: \`sendMessage\`, \`createDraft\`, \`reply\`, \`replyAll\`, \`forward\`.
+- Compose: \`sendMessage\`, \`createDraft\`, \`updateDraft\`, \`sendDraft\`, \`reply\`, \`replyAll\`, \`forward\`.
 - Messages: \`copyMessage\`, \`moveMessage\`, \`modifyLabels\`, \`batchMessages\`, \`moveToTrash\`, \`permanentlyDelete\`, \`markRead\`, \`markUnread\`, \`star\`, \`unstar\`.
 - Mailboxes and setup: \`createMailbox\`, \`renameMailbox\`, \`deleteMailbox\`, \`registerOAuth2\`.
 - ManageSieve: \`setFilter\`, \`deleteFilter\`.
@@ -53,6 +53,16 @@ Use \`mail_mutate\` with one of these operations:
 - Mailtrap: \`mailtrap.send\` plus the resource mutation operations advertised by the schema.
 
 ## Common input shapes
+
+IMAP searchMessages accepts keywordsAll (all terms), keywordsAny (any term),
+excludeKeywords (none), keywordScope (body by default, subject, or all),
+unread and flagged booleans, plus from, to, cc, subject, messageId, since and before.
+Example input: { "folder": "INBOX", "keywordsAny": ["invoice", "payment overdue"], "excludeKeywords": ["newsletter"], "keywordScope": "all", "unread": true, "limit": 20, "headerOnly": true }.
+Each keyword list accepts at most 20 literal words/phrases of at most 256 characters.
+Groups combine with AND; keywords is a single literal body phrase. These are server-side
+substring searches, not regex or semantic search. Date boundaries use YYYY-MM-DD; before is exclusive.
+Use headerOnly to skip body snippets. Repeat identical filters with nextCursor as cursor;
+do not reuse a cursor after changing filters. Other backends use their own search operations.
 
 IMAP drafts: createDraft also returns a stable draftId. updateDraft input is { draftId, changes },
 where changes may contain to, cc, bcc, subject, textBody, htmlBody and attachments.
