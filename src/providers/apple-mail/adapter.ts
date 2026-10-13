@@ -56,6 +56,8 @@ import type {
 } from './types.js';
 
 export interface AppleMailAdapterOptions {
+  /** Explicit permission for rules that can affect every account in Mail.app. */
+  allowGlobalRules?: boolean;
   runner?: AppleScriptRunner;
   platform?: NodeJS.Platform;
   timeoutMs?: number;
@@ -71,10 +73,12 @@ export class AppleMailAdapter {
   private readonly platform: NodeJS.Platform;
   private readonly timeoutMs: number;
   private readonly allowedAttachmentRoots: readonly string[];
+  private readonly allowGlobalRules: boolean;
   private readonly executor = new SerializedExecutor();
 
   constructor(options: AppleMailAdapterOptions = {}) {
     this.platform = options.platform ?? process.platform;
+    this.allowGlobalRules = options.allowGlobalRules === true;
     this.timeoutMs = options.timeoutMs ?? 30_000;
     this.allowedAttachmentRoots = [...(options.allowedAttachmentRoots ?? [])];
     for (const root of this.allowedAttachmentRoots) {
@@ -185,6 +189,9 @@ export class AppleMailAdapter {
   }
 
   private async execute<T>(operation: AppleMailOperation, script: string): Promise<T> {
+    if (['listRules', 'createRule', 'updateRule', 'deleteRule'].includes(operation) && !this.allowGlobalRules) {
+      throw new AppleMailError('INVALID_ARGUMENT', 'Apple Mail rules are application-global. Configure allowGlobalRules=true only when access to rules across all Mail.app accounts is intended.');
+    }
     if (this.platform !== 'darwin') {
       throw new AppleMailError(
         'UNSUPPORTED_PLATFORM',

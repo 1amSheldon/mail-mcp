@@ -141,7 +141,7 @@ export interface AppleReadResultMap {
   searchMessages: PaginationPage<AppleMailMessageSummary>;
   readMessage: AppleMailMessage;
   getRawSource: { rawSource: string };
-  listRules: AppleMailRule[];
+  listRules: { scope: 'application-global'; rules: AppleMailRule[] };
 }
 
 export interface AppleWriteInputMap {
@@ -272,6 +272,7 @@ export class ProviderRuntime {
     this.redact = options.redact ?? false;
     this.factories = {
       appleMail: options.factories?.appleMail ?? (account => new AppleMailAdapter({
+        allowGlobalRules: account.allowGlobalRules,
         allowedAttachmentRoots: account.allowedAttachmentRoots,
       })),
       microsoftGraph: options.factories?.microsoftGraph ?? ((account, tokenProvider) => (
@@ -303,6 +304,7 @@ export class ProviderRuntime {
   ): Promise<AppleReadResultMap[Operation]> {
     const account = await this.resolveAccount(accountId);
     if (!isAppleMailAccount(account)) this.backendMismatch(account, 'apple-mail');
+    this.assertAppleRuleAccess(account, operation);
     const scopedInput = operation === 'listAccounts'
       ? input
       : this.scopeAppleInput(account, input as { account?: string });
@@ -331,9 +333,9 @@ export class ProviderRuntime {
       case 'getRawSource': return this.redactResult(await client.getRawSource(
         scopedInput as AppleReadInputMap['getRawSource'],
       )) as AppleReadResultMap[Operation];
-      case 'listRules': return this.redactResult(await client.listRules(
+      case 'listRules': return this.redactResult({ scope: 'application-global', rules: await client.listRules(
         scopedInput as AppleReadInputMap['listRules'],
-      )) as AppleReadResultMap[Operation];
+      ) }) as AppleReadResultMap[Operation];
       default: return this.unsupportedOperation(accountId, operation);
     }
   }
@@ -345,6 +347,7 @@ export class ProviderRuntime {
   ): Promise<AppleWriteResultMap[Operation]> {
     const account = await this.resolveAccount(accountId);
     if (!isAppleMailAccount(account)) this.backendMismatch(account, 'apple-mail');
+    this.assertAppleRuleAccess(account, operation);
     const scopedInput = this.scopeAppleInput(account, input);
     const client = await this.appleMailClient(account);
 
@@ -503,6 +506,13 @@ export class ProviderRuntime {
       `Account ${account.id} uses backend ${backendName(account)}; expected ${expected}`,
       account.id,
     );
+  }
+
+  private assertAppleRuleAccess(account: AppleMailConfiguredAccount, operation: string): void {
+    if (['listRules', 'createRule', 'updateRule', 'deleteRule'].includes(operation) && account.allowGlobalRules !== true) {
+      throw new ProviderRuntimeError('OPERATION_NOT_ALLOWED',
+        'Apple Mail rules affect all Mail.app accounts. The local account configuration must explicitly set allowGlobalRules=true.');
+    }
   }
 
   private scopeAppleInput<Input extends { account?: string }>(

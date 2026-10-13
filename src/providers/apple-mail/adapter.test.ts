@@ -10,6 +10,20 @@ import { APPLE_MAIL_OPERATION_KINDS } from './types.js';
 import type { AppleScriptRunner } from './runner.js';
 
 describe('AppleMailAdapter', () => {
+  it('blocks global rule access by default before invoking Mail.app', async () => {
+    const runner: AppleScriptRunner = { run: vi.fn() };
+    const adapter = new AppleMailAdapter({ runner, platform: 'darwin' });
+    await expect(adapter.listRules({ account: 'Personal' })).rejects.toThrow('application-global');
+    await expect(adapter.deleteRule({ account: 'Personal', name: 'Other account rule' })).rejects.toThrow('application-global');
+    expect(runner.run).not.toHaveBeenCalled();
+  });
+
+  it('allows explicitly enabled global rules and rejects ambiguous names in scripts', async () => {
+    const runner: AppleScriptRunner = { run: vi.fn().mockResolvedValue('{"ok":true}') };
+    const adapter = new AppleMailAdapter({ runner, platform: 'darwin', allowGlobalRules: true });
+    await adapter.deleteRule({ account: 'Personal', name: 'Shared name' });
+    expect(runner.run).toHaveBeenCalledWith(expect.stringContaining('if (count of matches) is not 1'), expect.anything());
+  });
   it('fails without invoking osascript on non-macOS platforms', async () => {
     const runner: AppleScriptRunner = { run: vi.fn() };
     const adapter = new AppleMailAdapter({ runner, platform: 'win32' });

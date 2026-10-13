@@ -23,6 +23,24 @@ const APPLE_ACCOUNT: AppleMailConfiguredAccount = {
   backend: 'apple-mail',
 };
 
+describe('Apple Mail global rule boundary', () => {
+  it('enforces the configured permission before a custom adapter is constructed', async () => {
+    const factory = vi.fn();
+    const runtime = new ProviderRuntime(new MailMCPRuntimeState(), options([APPLE_ACCOUNT], { appleMail: factory }));
+    await expect(runtime.executeAppleRead('apple', 'listRules', { account: 'Personal' })).rejects.toMatchObject({ code: 'OPERATION_NOT_ALLOWED' });
+    await expect(runtime.executeAppleWrite('apple', 'deleteRule', { account: 'Personal', name: 'Rule' })).rejects.toMatchObject({ code: 'OPERATION_NOT_ALLOWED' });
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('labels an explicitly enabled rule listing as application-global', async () => {
+    const runtime = new ProviderRuntime(new MailMCPRuntimeState(), options([{ ...APPLE_ACCOUNT, nativeAccountName: 'Personal', allowGlobalRules: true }], {
+      appleMail: () => ({ listRules: async () => [{ name: 'All accounts' }] }) as unknown as AppleMailAdapter,
+    }));
+    expect(await runtime.executeAppleRead('apple', 'listRules', { account: 'Personal' }))
+      .toEqual({ scope: 'application-global', rules: [{ name: 'All accounts' }] });
+  });
+});
+
 const GRAPH_ACCOUNT: MicrosoftGraphConfiguredAccount = {
   id: 'graph',
   name: 'Graph',

@@ -78,6 +78,7 @@ export const appleMailAccountSchema = secretFreeObjectSchema.pipe(z.object({
   ...commonAccountFields,
   nativeAccountName: nonEmptyString.optional(),
   nativeAccountUuid: nonEmptyString.optional(),
+  allowGlobalRules: z.boolean().optional(),
   allowedAttachmentRoots: z.array(nonEmptyString).optional(),
 }));
 
@@ -131,6 +132,7 @@ export interface AccountCapabilityDescriptor {
   readonly sendMail: boolean;
   readonly manageMailboxes: boolean;
   readonly manageRules: boolean;
+  readonly rulesScope?: 'application-global';
   readonly providerApi: boolean;
 }
 
@@ -215,5 +217,9 @@ export function isMailtrapAccount(
 export function getAccountCapabilities(
   account: ConfiguredAccount,
 ): AccountCapabilityDescriptor {
+  if (isAppleMailAccount(account)) {
+    return { ...ACCOUNT_BACKEND_CAPABILITIES['apple-mail'], manageRules: account.allowGlobalRules === true,
+      rulesScope: 'application-global' };
+  }
   return ACCOUNT_BACKEND_CAPABILITIES[account.backend ?? 'imap-smtp'];
 }

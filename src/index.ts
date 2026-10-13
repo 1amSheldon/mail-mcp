@@ -324,6 +324,10 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
     case 'delete_filter':
       return `Delete SIEVE filter '${args.name as string}' on account ${args.accountId as string}`;
     case 'apple_mail_mutate':
+      if (['createRule', 'updateRule', 'deleteRule'].includes(args.operation as string)) {
+        return `Execute ${args.operation as string} on GLOBAL Apple Mail rules affecting ALL Mail.app accounts (configured access: ${args.accountId as string})`;
+      }
+      return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
     case 'microsoft_mail_send':
       return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
     case 'mailtrap_mutate': {

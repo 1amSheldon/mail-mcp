@@ -49,6 +49,8 @@ node dist/index.js accounts list
 node dist/index.js accounts remove ACCOUNT_ID
 ```
 
+Apple Mail rules are global to Mail.app and may affect every native account. Rule reads and mutations are disabled by default. An administrator may explicitly set `allowGlobalRules: true` on an Apple Mail account in the local account configuration to grant this broader access. The account selector then identifies access and destination mailboxes; it does not restrict which messages a rule matches. Rule listings report `scope: "application-global"`, and mutation confirmations name the global scope. Duplicate rule names must be resolved in Mail.app before updating or deleting them through MCP.
+
 Account definitions are stored in `~/.config/mail-mcp/accounts.json`. Passwords, OAuth2 credentials, and API tokens are stored in the operating-system credential store under `com.1amsheldon.mail-mcp`.
 
 ### Codex
