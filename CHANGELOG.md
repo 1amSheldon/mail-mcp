@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fix Zimbra current-time filter attributes and replacing a rule before itself.
+- Flush POSIX send-journal directory entries before dispatch and after replacement;
+  document the Windows OS-crash/power-loss durability boundary.
+- Verify Zimbra credential deletion before removing account configuration, clear
+  legacy saved-password fallbacks on login/disable, and correct capability guidance.
 - Add explicit local Zimbra trusted-device registration/reuse and optional
   OS-protected password storage for on-demand automatic login after session expiry.
 - Serialize login attempts across local processes, persist failure/crash blocking,

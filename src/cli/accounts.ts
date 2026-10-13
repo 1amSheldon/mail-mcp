@@ -6,7 +6,7 @@ import {
   type ConfiguredAccount,
   type EmailAccount,
 } from '../config.js';
-import { saveCredentials, removeCredentials } from '../security/keychain.js';
+import { saveCredentials, removeCredentials, removeZimbraCredentials } from '../security/keychain.js';
 import { validateOAuth2TokenEndpoint } from '../security/oauth2.js';
 import { handleZimbraLogin, disableZimbraAutomaticLogin } from './zimbra-login.js';
 import { validateZimbraEndpoint } from '../providers/zimbra/session.js';
@@ -249,7 +249,10 @@ async function removeAccount(id: string | undefined): Promise<void> {
     try { await removeCredentials(id); }
     catch { console.error(`Warning: could not remove keychain entry for '${id}' (may not exist).`); }
   };
-  if (isZimbra) await withZimbraLoginLock(id, remove);
+  if (isZimbra) await withZimbraLoginLock(id, async () => {
+    await removeZimbraCredentials(id);
+    saveConfiguredAccounts(accounts.filter(account => account.id !== id));
+  });
   else await remove();
 
   console.log(`Account '${id}' removed.`);

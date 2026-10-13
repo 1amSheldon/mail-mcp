@@ -82,7 +82,7 @@ function testNode(t: Test, index: number): [string, Obj] {
   if (t.type === 'body') v.caseSensitive = t.caseSensitive ? 1 : 0;
   if (t.type === 'conversation') v.where = t.where;
   if (t.type === 'currentDayOfWeek') v.value = [...new Set(t.days)].join(',');
-  if (t.type === 'currentTime') { v.dateComparison = t.comparison; v.d = t.time; }
+  if (t.type === 'currentTime') { v.dateComparison = t.comparison; v.time = t.time; }
   if (t.type === 'date') { v.dateComparison = t.comparison; v.d = t.seconds; }
   if (t.type === 'flagged') v.flagName = t.flag;
   if (t.type === 'importance') v.imp = t.importance;
@@ -200,7 +200,9 @@ export class ZimbraFilters {
       } else if ('rule' in v) {
         const i = rules.findIndex(r => r.name === v.rule.name);
         if (i >= 0) rules.splice(i, 1);
-        const target = v.beforeRuleName ? locate(v.beforeRuleName) : i >= 0 ? Math.min(i, rules.length) : rules.length;
+        // Inserting an existing rule before itself keeps its original position.
+        const target = v.beforeRuleName && !(i >= 0 && v.beforeRuleName === v.rule.name)
+          ? locate(v.beforeRuleName) : i >= 0 ? Math.min(i, rules.length) : rules.length;
         rules.splice(target, 0, compileRule(v.rule));
       } else if ('enabled' in v) rules[locate(v.name)].active = v.enabled ? 1 : 0;
       else rules.splice(locate(v.name), 1);

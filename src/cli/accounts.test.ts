@@ -21,11 +21,12 @@ vi.mock('../security/keychain.js', () => ({
   loadCredentials: vi.fn(),
   saveCredentials: vi.fn(),
   removeCredentials: vi.fn(),
+  removeZimbraCredentials: vi.fn(),
 }));
 
 import { handleAccountsCommand, inferSmtpHost } from './accounts.js';
 import { getConfiguredAccounts, saveConfiguredAccounts } from '../config.js';
-import { removeCredentials, saveCredentials } from '../security/keychain.js';
+import { removeCredentials, saveCredentials, removeZimbraCredentials } from '../security/keychain.js';
 
 const mockedGetAccounts = vi.mocked(getConfiguredAccounts);
 const mockedSaveAccounts = vi.mocked(saveConfiguredAccounts);
@@ -180,6 +181,23 @@ describe('handleAccountsCommand', () => {
   });
 
   describe('accounts remove', () => {
+    const zimbra = { id: 'credential-cleanup-test', name: 'Zimbra', backend: 'zimbra' as const, endpoint: 'https://mail.example.test/service/soap', user: 'test@example.test' };
+    it('retains Zimbra configuration when verified credential removal fails', async () => {
+      const accounts = [zimbra];
+      mockedGetAccounts.mockReturnValue(accounts);
+      vi.mocked(removeZimbraCredentials).mockRejectedValueOnce(new Error('Cannot verify removal'));
+      await expect(handleAccountsCommand(['accounts', 'remove', zimbra.id])).rejects.toThrow('Cannot verify removal');
+      expect(mockedSaveAccounts).not.toHaveBeenCalled();
+      expect(accounts).toEqual([zimbra]);
+      expect(consoleSpy).not.toHaveBeenCalledWith(`Account '${zimbra.id}' removed.`);
+    });
+    it('removes Zimbra configuration only after verified credential cleanup', async () => {
+      mockedGetAccounts.mockReturnValue([zimbra, TEST_ACCOUNT]);
+      vi.mocked(removeZimbraCredentials).mockImplementationOnce(async () => { expect(mockedSaveAccounts).not.toHaveBeenCalled(); });
+      await handleAccountsCommand(['accounts', 'remove', zimbra.id]);
+      expect(mockedSaveAccounts).toHaveBeenCalledWith([TEST_ACCOUNT]);
+      expect(mockedRemoveCredentials).not.toHaveBeenCalled();
+    });
     it('prints usage and exits with code 1 when no id given', async () => {
       await expect(handleAccountsCommand(['accounts', 'remove'])).rejects.toThrow(
         'process.exit(1)'

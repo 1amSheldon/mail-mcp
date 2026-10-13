@@ -39,6 +39,11 @@ read-back succeeded, not that a scheduler task was independently verified.
 write, not that a previously started send was stopped. A server error, timeout
 or failed read-back leaves `outcome_unknown`; do not automatically retry.
 
+POSIX journal entries are directory-synced. On Windows, file contents are flushed
+but Node cannot fsync directories, so OS-crash/power-loss persistence is not
+guaranteed. After such an event, inspect the server draft and Sent even if the
+local journal has no claim; do not infer that scheduling or sending never started.
+
 The claim is retained after cancellation or failure. Repeated scheduling or
 manual sending returns the historical claim instead of starting a new send.
 For a separately authorized new send or revised schedule, first reconcile the

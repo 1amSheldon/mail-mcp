@@ -40,6 +40,11 @@ file and null storage fallbacks are refused. The second command removes the save
 webmail separately. No administrator is needed when the server already permits
 trusted devices. Disabled or unsupported trust is not bypassed.
 
+Login replacement and disabling automatic login also clear a reachable legacy
+credential-service entry. Account removal verifies credential deletion first;
+if the keychain cannot confirm removal, account configuration remains available
+for retry and the command reports failure instead of claiming success.
+
 Automatic login runs on demand when the session expires, under a local process
 lock, and persists its attempt before sending credentials. Failure or process
 interruption blocks further automatic attempts until local login. A crash-owned
@@ -98,6 +103,13 @@ A durable exclusive journal prevents repeated local attempts after restart and
 arbitrates manual/scheduled sends. Acceptance is saved before guarded cleanup.
 Preserve `~/.config/mail-mcp/zimbra-send-state` during migration. Server acceptance
 and a Sent copy are not recipient-delivery confirmation.
+
+On POSIX, new journal directories, exclusive claims and atomic status replacements
+also flush their directory entries before completion; a failed flush stops dispatch
+or reports an uncertain update. Windows flushes file contents, but Node does not
+support directory fsync there. Protection against concurrent calls and process
+termination remains; persistence across an OS crash or power loss is not guaranteed
+on Windows. Inspect Sent after such an event before initiating another send.
 
 Native scheduled delivery uses the server draft at execution time. Any
 `allowedRecipients` policy blocks scheduling because later webmail edits can

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { loadCredentials, saveCredentials } from '../../security/keychain.js';
+import { loadCredentials, saveZimbraSessionCredentials } from '../../security/keychain.js';
 import type { ZimbraConfiguredAccount } from '../account-types.js';
 
 export const zimbraSessionSchema = z.object({
@@ -47,5 +47,5 @@ export async function readZimbraSession(account: ZimbraConfiguredAccount): Promi
 }
 
 export async function saveZimbraSession(accountId: string, session: ZimbraSession): Promise<void> {
-  await saveCredentials(accountId, JSON.stringify(zimbraSessionSchema.parse(session)));
+  await saveZimbraSessionCredentials(accountId, JSON.stringify(zimbraSessionSchema.parse(session)));
 }

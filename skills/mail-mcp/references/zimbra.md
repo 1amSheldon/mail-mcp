@@ -211,9 +211,14 @@ schedule canceled before manual sending or ordinary draft editing. A generic
 SaveDraft without autoSendTime cancels native scheduling, so updateDraft refuses
 scheduled drafts instead of silently changing their delivery behavior.
 
+On POSIX, journal directory entries are flushed before dispatch and after status
+replacement. Windows flushes file contents but cannot flush directories through
+Node; OS-crash/power-loss persistence is not guaranteed there. After such an event,
+inspect Sent before initiating another send, even if a local claim is missing.
+
 For outcome_unknown, inspect Drafts/Sent or affected objects before deciding on
-recovery; never automatically repeat a write. Native scheduling and calendars
-are not exposed yet.
+recovery; never automatically repeat a write. Native scheduling is described above;
+for calendars, tasks and availability, read [calendars](zimbra-calendar.md).
 
 ## Folders, contacts and user settings
 
