@@ -18,7 +18,7 @@ administrator API. No deployment or changes to corporate mail are part of this P
   out-of-office, supported server capability discovery.
 - [ ] Collaboration: sharing and mountpoints, calendars, invitations, recurrence,
   free/busy, tasks, reminders and native scheduled sending.
-- [ ] Briefcase: folders, document upload/download, revisions and document actions.
+- [x] Briefcase: folders, document upload/download, revisions and document actions.
 - [ ] Operations: authentication lifetime, remote session checks, bounded paging,
   explicit partial results, consistent errors and no automatic uncertain writes.
 - [ ] Skills: exact discoverable input contracts, realistic end-to-end workflows,
@@ -51,12 +51,17 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
 
 - 0fe06f2: contact groups, GAL paging, autocomplete, identities, native
   preferences and out-of-office with recipient-policy enforcement.
-- Current increment: revisioned incoming/outgoing filter reads, typed nested
+- 3d9b4cb: revisioned incoming/outgoing filter reads, typed nested
   conditions/actions, targeted/list replacement retaining unknown constructs,
   bounded apply, forwarding policy and actual read-back. Server lacks atomic CAS;
   this limitation is explicit in results and skill guidance.
+- ddbb15c: folder ACLs, native share discovery/notification, mountpoints and
+  reminders. Internal grants require directory IDs to prevent guest fallback.
+- Current increment: Briefcase uploads, attachment/text sources, metadata,
+  downloads, revision windows/diffs/restoration, document actions and file ACLs.
+  Calendars/tasks and scheduled mail are still pending.
 
-Qualification so far: TypeScript passes; all 1,194 unit tests pass on Node 24,
+Qualification so far: TypeScript passes; all 1,215 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate
 writes remain untested.
 The complete acceptance matrix above is still pending; do not treat these

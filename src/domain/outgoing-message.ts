@@ -175,7 +175,7 @@ async function assertAllowedAttachmentPath(
   throw new Error('Attachment path is outside the configured allowedAttachmentRoots');
 }
 
-async function prepareAttachment(
+export async function prepareAttachment(
   attachment: OutgoingAttachment,
   options: OutgoingMessagePreparationOptions,
 ): Promise<NonNullable<PreparedOutgoingMessage['attachments']>[number]> {

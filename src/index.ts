@@ -362,6 +362,7 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
         'to', 'cc', 'bcc', 'subject', 'originalMessageId', 'replyType', 'attachOriginal', 'quoteOriginal',
         'parentFolderId', 'contactId', 'contactIds', 'signatureId', 'view', 'recursive', 'flagged', 'spam',
         'mountpointId', 'remoteFolderId', 'owner', 'permissions', 'granteeId', 'expiresAt',
+        'documentId', 'expectedVersion', 'restoreVersion', 'locked', 'enabled',
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
@@ -369,12 +370,14 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       if (operation === 'moveToTrash') details.push('move messages to Trash');
       if (operation === 'deleteFolder') details.push('delete the folder, its descendants and contents');
       if (operation === 'emptyFolder') details.push('delete folder contents');
-      if (operation === 'grantFolderAccess') {
+      if (operation === 'grantFolderAccess' || operation === 'grantDocumentAccess') {
         const target = input.grantee as Record<string, unknown> | undefined;
-        details.push('change folder sharing permissions', `grantee=${JSON.stringify({ type: target?.type, id: target?.id, name: target?.name, email: target?.email })}`);
+        details.push('change sharing permissions', `grantee=${JSON.stringify({ type: target?.type, id: target?.id, name: target?.name, email: target?.email })}`);
       }
       if (operation === 'removeMountpoint') details.push('remove local link to the shared folder');
       if (operation === 'sendShareNotification') details.push('send a sharing email to the listed recipients');
+      if (operation === 'deleteDocument') details.push('delete the document and its retained revisions');
+      if (operation === 'restoreDocumentRevision') details.push('create a new current revision from historical content and description');
       if (operation === 'deleteMessages' || operation === 'deleteContacts') details.push('delete selected items; recovery depends on server retention');
       return `Execute Zimbra ${operation} for account ${args.accountId as string}${details.length ? ` (${details.join(', ')})` : ''}`;
     }

@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { itemId, NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS, schemas } from './native-operations.js';
 import { attachmentsSchema, MAX_MIME_BYTES } from './mime.js';
 import { FILTER_READ_SCHEMAS, FILTER_WRITE_SCHEMAS } from './filters.js';
+import { DOCUMENT_READ_SCHEMAS, DOCUMENT_WRITE_SCHEMAS } from './documents.js';
 
 const id = itemId;
 const attachmentPart = z.string().regex(/^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/);
@@ -44,10 +45,12 @@ export const draftChangesSchema = z.object({
 export const ZIMBRA_READ_SCHEMAS = {
   ...schemas(NATIVE_READ_OPERATIONS),
   ...FILTER_READ_SCHEMAS,
+  ...DOCUMENT_READ_SCHEMAS,
   sessionStatus: z.object({ remote: z.boolean().default(false) }).strict(),
   getSendStatus: z.object({ draftId: id }).strict(),
   verifySentMessage: z.object({ messageId: rfcMessageId, limit: z.number().int().min(1).max(100).default(20) }).strict(),
   searchMessages: z.object(page).strict(),
+  searchDocuments: z.object(page).strict(),
   readMessage: z.object({ messageId: id }).strict(),
   getRawMessage: z.object({ messageId: id, maxBytes: z.number().int().min(1).max(MAX_MIME_BYTES).default(10 * 1024 * 1024) }).strict(),
   getThread: z.object({ conversationId }).strict(),
@@ -63,6 +66,7 @@ export const ZIMBRA_READ_SCHEMAS = {
 export const ZIMBRA_WRITE_SCHEMAS = {
   ...schemas(NATIVE_WRITE_OPERATIONS),
   ...FILTER_WRITE_SCHEMAS,
+  ...DOCUMENT_WRITE_SCHEMAS,
   createDraft: z.object(draft).strict().refine(hasBody, 'Supply body or textBody/htmlBody, not both forms.'),
   createReplyDraft: z.object(replyDraft).strict(),
   createReplyAllDraft: z.object(replyDraft).strict(),

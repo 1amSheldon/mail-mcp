@@ -2,6 +2,7 @@
 
 For server filters, see [incoming and outgoing rules](zimbra-rules.md).
 For folder ACLs and shared resources, see [sharing and mountpoints](zimbra-sharing.md).
+For files and revision history, see [Briefcase](zimbra-documents.md).
 
 Use only when list_accounts reports backend `zimbra`. IMAP accounts on a Zimbra
 host remain IMAP accounts. Do not revive a disabled legacy MCP or change its

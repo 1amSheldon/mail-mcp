@@ -12,6 +12,7 @@ import { validateEmailAddresses } from '../../utils/validation.js';
 import { addresses, escapeHtml, parsedAttachments, parseMime, replyEnvelope } from './compose.js';
 import { checkPreferencePolicy } from './preference-policy.js';
 import { ZimbraFilters, FILTER_WRITE_SCHEMAS, type FilterWriteOperation } from './filters.js';
+import { ZimbraDocuments, DOCUMENT_READ_SCHEMAS, DOCUMENT_WRITE_SCHEMAS } from './documents.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -89,6 +90,7 @@ export interface ZimbraClientOptions {
 /** User SOAP API only. Never retries a write or exports authentication material. */
 export class ZimbraClient {
   private readonly filters: ZimbraFilters;
+  private readonly documents: ZimbraDocuments;
   private readonly sendJournal: ZimbraSendJournal;
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
@@ -100,6 +102,9 @@ export class ZimbraClient {
     this.sendJournal = new ZimbraSendJournal(JSON.stringify([account.id, this.endpoint, account.user]), options.journalDirectory);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.filters = new ZimbraFilters((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.allowedRecipients);
+    this.documents = new ZimbraDocuments((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write),
+      (bytes, name, type) => this.upload(bytes, name, type),
+      (id, version, maxBytes) => this.attachment({ messageId: id, version, document: true, maxBytes }), account.allowedAttachmentRoots);
   }
   disconnect(): void { this.closed = true; this.cursors.clear(); for (const c of this.pending) c.abort(); }
 
@@ -184,6 +189,7 @@ export class ZimbraClient {
     const parsed = schema.safeParse(input);
     if (!parsed.success) throw new ZimbraError('INVALID_INPUT', 'Invalid fields for Zimbra ' + operation + '.');
     const v = parsed.data;
+    if (Object.hasOwn(DOCUMENT_READ_SCHEMAS, operation)) return this.documents.read(operation as keyof typeof DOCUMENT_READ_SCHEMAS, v);
     if (Object.hasOwn(NATIVE_READ_OPERATIONS, operation)) {
       const native = NATIVE_READ_OPERATIONS[operation as keyof typeof NATIVE_READ_OPERATIONS].request(v);
       return this.request(native.name, native.params, native.namespace);
@@ -201,7 +207,7 @@ export class ZimbraClient {
         if (remote) await this.request('GetInfo', { sections: 'mbox' }, 'urn:zimbraAccount');
         return { status: 'session_available', remoteVerified: remote, expiresAt: new Date(session.expiresAt).toISOString(), nextAction: 'Run accounts login ACCOUNT_ID locally when the session expires.' };
       }
-      case 'searchMessages': case 'searchContacts': case 'searchGal': return this.search(operation, v as { query: string; limit: number; cursor?: string; type?: string });
+      case 'searchMessages': case 'searchContacts': case 'searchGal': case 'searchDocuments': return this.search(operation, v as { query: string; limit: number; cursor?: string; type?: string });
       case 'readMessage': return this.request('GetMsg', { m: { id: (v as { messageId: string }).messageId, html: 1, read: 0, wantModSeq: 1, max: 200000 } });
       case 'getRawMessage': return this.attachment(v as { messageId: string; maxBytes: number });
       case 'getThread': return { ...await this.request('GetConv', { c: { id: (v as { conversationId: string }).conversationId } }), partial: true, warning: 'Conversation metadata only. Read individual messages explicitly; completeness is not guaranteed.' };
@@ -238,8 +244,8 @@ export class ZimbraClient {
     const offset = cursor?.offset ?? 0;
     const gal = operation === 'searchGal';
     const result = gal ? await this.request('SearchGal', { name: { _content: v.query }, type: v.type, limit: v.limit, offset, sortBy: 'nameAsc', needExp: 1 }, 'urn:zimbraAccount')
-      : await this.request('Search', { query: { _content: v.query }, limit: v.limit, offset, types: operation === 'searchContacts' ? 'contact' : 'message', fetch: 'all', read: 0, max: 20000, sortBy: 'dateDesc' });
-    const received = list(result[gal || operation === 'searchContacts' ? 'cn' : 'm']);
+      : await this.request('Search', { query: { _content: v.query }, limit: v.limit, offset, types: operation === 'searchContacts' ? 'contact' : operation === 'searchDocuments' ? 'document' : 'message', fetch: 'all', read: 0, max: 20000, sortBy: 'dateDesc' });
+    const received = list(result[gal || operation === 'searchContacts' ? 'cn' : operation === 'searchDocuments' ? 'doc' : 'm']);
     const pageable = !gal || truth(result.paginationSupported);
     const items = received.slice(0, v.limit);
     if (pageable && (received.length > v.limit || (truth(result.more) && !items.length))) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra returned invalid search pagination.');
@@ -262,6 +268,7 @@ export class ZimbraClient {
     if (!parsed.success) throw new ZimbraError('INVALID_INPUT', 'Invalid fields for Zimbra ' + operation + '.');
     const v = parsed.data;
     if (Object.hasOwn(FILTER_WRITE_SCHEMAS, operation)) return this.filters.write(operation as FilterWriteOperation, v);
+    if (Object.hasOwn(DOCUMENT_WRITE_SCHEMAS, operation)) return this.documents.write(operation as keyof typeof DOCUMENT_WRITE_SCHEMAS, v);
     if (Object.hasOwn(NATIVE_WRITE_OPERATIONS, operation)) {
       const native = NATIVE_WRITE_OPERATIONS[operation as keyof typeof NATIVE_WRITE_OPERATIONS].request(v);
       if (operation === 'sendShareNotification' && this.account.allowedRecipients !== undefined) {
@@ -606,20 +613,20 @@ export class ZimbraClient {
         throw new ZimbraError(response.status === 401 ? 'AUTH_REQUIRED' : 'ACCESS_DENIED', 'Zimbra upload access rejected. Check the session and server permissions.');
       }
       const data = await boundedBytes(response, 8192);
-      if (!response.ok) throw new ZimbraError('OUTCOME_UNKNOWN', 'Zimbra upload failed. No draft save was attempted.');
+      if (!response.ok) throw new ZimbraError('OUTCOME_UNKNOWN', 'Zimbra upload failed. No save or send was attempted.');
       return parseUploadResponse(data.toString('utf8'), requestId);
     } catch (error) {
       if (error instanceof ZimbraError && error.code !== 'PROVIDER_ERROR') throw error;
-      throw new ZimbraError('OUTCOME_UNKNOWN', 'Zimbra upload outcome is unknown. No draft save was attempted.');
+      throw new ZimbraError('OUTCOME_UNKNOWN', 'Zimbra upload outcome is unknown. No save or send was attempted.');
     } finally { clearTimeout(timer); this.pending.delete(controller); }
   }
 
-  private async attachment(v: { messageId: string; partId?: string; maxBytes: number }): Promise<unknown> {
+  private async attachment(v: { messageId: string; partId?: string; version?: number; document?: boolean; maxBytes: number }): Promise<unknown> {
     if (this.closed) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra client is closed.');
     const session = await this.options.sessionProvider();
     if (session.endpoint !== this.endpoint || session.user !== this.account.user || session.expiresAt <= Date.now() + 5000) throw new ZimbraError('AUTH_REQUIRED', 'Run accounts login ACCOUNT_ID locally.');
     const url = new URL('/service/home/~/', this.endpoint);
-    url.search = new URLSearchParams({ id: v.messageId, ...(v.partId ? { part: v.partId } : { fmt: 'raw' }), auth: 'co' }).toString();
+    url.search = new URLSearchParams({ id: v.messageId, ...(v.document ? { ...(v.version ? { ver: String(v.version) } : {}) } : v.partId ? { part: v.partId } : { fmt: 'raw' }), auth: 'co' }).toString();
     const controller = new AbortController(); this.pending.add(controller);
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30000);
     try {

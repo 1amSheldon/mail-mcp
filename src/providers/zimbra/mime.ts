@@ -32,6 +32,6 @@ export async function composeMime(message: OutgoingMessage, user: string, roots:
 /** fmt=raw is a three-field protocol, not executable JavaScript. */
 export function parseUploadResponse(value: string, requestId: string): string {
   const match = /^\s*200\s*,\s*'([A-Za-z0-9_.-]+)'\s*,\s*'([A-Za-z0-9_:.-]{1,1024})'\s*$/.exec(value);
-  if (!match || match[1] !== requestId) throw new ZimbraError('OUTCOME_UNKNOWN', 'Upload response is invalid or belongs to another request. No draft save was attempted.');
+  if (!match || match[1] !== requestId) throw new ZimbraError('OUTCOME_UNKNOWN', 'Upload response is invalid or belongs to another request. No save or send was attempted.');
   return match[2];
 }
