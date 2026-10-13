@@ -169,7 +169,6 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
-    activeRecoveryRequests++;
     try {
       await mcpServer.connect(transport);
       await transport.handleRequest(req, res, body);
@@ -178,7 +177,6 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         mcpServer.shutdown(),
         transport.close(),
       ]);
-      activeRecoveryRequests--;
     }
   };
 
@@ -291,14 +289,20 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
             rpcError(res, 503, 'Too many active recovered MCP requests');
             return;
           }
-          let body: unknown;
+          // Admission must be synchronous, before a slow request body yields.
+          activeRecoveryRequests++;
           try {
-            body = await readJsonBody(req);
-          } catch (error) {
-            respondToBodyError(res, error);
-            return;
+            let body: unknown;
+            try {
+              body = await readJsonBody(req);
+            } catch (error) {
+              respondToBodyError(res, error);
+              return;
+            }
+            await handleRecoveredPost(req, res, body);
+          } finally {
+            activeRecoveryRequests--;
           }
-          await handleRecoveredPost(req, res, body);
           return;
         }
       }
