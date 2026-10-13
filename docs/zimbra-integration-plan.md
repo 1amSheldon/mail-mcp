@@ -88,13 +88,24 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   Focused edit/documentation tests (21) pass. Counter proposals do not alter the
   meeting or copy alarms/attachments. Inbox invitation reply/forward and decline
   of an incoming COUNTER message remain for the next increment.
-- Current increment: guarded inbox invitation participation replies, whole-mail
+- d7a2965: guarded inbox invitation participation replies, whole-mail
   forwarding, and organizer rejection of original incoming COUNTER details.
   Native inbox replies can persist alarms or restore calendar items; this is
   explicit in confirmations/skills and blocked under recipient restrictions.
   Source inspection also confirmed CreateTaskException exists; no corresponding
   ForwardTaskInvite/DeclineCounterTask handlers exist in the pinned source, so
   forwarding/counter rejection explicitly require appointment components.
+- Current increment: ordinary draft edits refuse native scheduled drafts rather
+  than silently canceling them. Verified in SaveDraft and AutoSendDraftTask:
+  SaveDraft defaults autoSendTime to zero, cancels the old task and optionally
+  schedules a new one; the worker reads the current draft MIME at execution,
+  sends it and deletes the draft. Native scheduling therefore cannot enforce a
+  local recipient allowlist against later webmail edits. Implement explicit
+  schedule/read/cancel operations for unrestricted accounts, share the durable
+  send claim to prevent local manual-send races, preserve raw MIME on changes,
+  and report cancellation as observed state rather than proof of non-delivery.
+  Scheduling and delivery are distinct: read-back of autoSendTime does not prove
+  the scheduler task exists or has delivered anything. No live mailbox writes.
 
 Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate

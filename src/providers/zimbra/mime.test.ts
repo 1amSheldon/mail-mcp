@@ -7,6 +7,13 @@ const account = { id: 'z', name: 'Zimbra', backend: 'zimbra' as const, user: 'me
 const session = () => ({ kind: 'zimbra-session-v1' as const, endpoint: account.endpoint, user: account.user, authToken: 'session', expiresAt: Date.now() + 60000 });
 
 describe('Zimbra MIME composition and upload', () => {
+  it('does not silently cancel a native schedule while patching a draft', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(JSON.stringify({ Body: { GetMsgResponse: { m: [{ id: '8', f: 'd', ms: 42, autoSendTime: Date.now() + 3600000 }] } } })));
+    const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session() });
+    await expect(client.executeWrite('updateDraft', { draftId: '8', expectedRevision: '42', changes: { subject: 'New' } })).rejects.toMatchObject({ code: 'CONFLICT' });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(JSON.parse(String(fetch.mock.calls[0][1]?.body)).Body).toHaveProperty('GetMsgRequest');
+  });
   it('round-trips Unicode, both body formats, Bcc, reply headers and an inline CID', async () => {
     const raw = await composeMime({ to: 'to@example.test', bcc: 'hidden@example.test', subject: 'Delivery: \u0424\u0430\u0439\u043b', text: 'Report', html: '<p>Report<img src="cid:logo"></p>',
       threading: { inReplyTo: '<source@example.test>', references: ['<root@example.test>', '<source@example.test>'] },

@@ -171,7 +171,9 @@ copy by RFC Message-ID, not subject; found does not prove recipient delivery and
 not_found does not prove non-delivery. No automatic retry/reset of an uncertain
 attempt is exposed. Review Sent and server delivery evidence before deciding on
 any separately authorized new send. Native scheduled drafts must have their
-schedule canceled before manual sending.
+schedule canceled before manual sending or ordinary draft editing. A generic
+SaveDraft without autoSendTime cancels native scheduling, so updateDraft refuses
+scheduled drafts instead of silently changing their delivery behavior.
 
 For outcome_unknown, inspect Drafts/Sent or affected objects before deciding on
 recovery; never automatically repeat a write. Native scheduling and calendars

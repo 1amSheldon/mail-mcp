@@ -566,6 +566,7 @@ export class ZimbraClient {
 
   private async patchDraft(v: Extract<typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output, { changes: unknown }>, linkage?: { originalMessageId: string; replyType: 'r' | 'w'; inReplyTo?: string; attachOriginal: boolean }): Promise<unknown> {
     const source = await this.assertDraft(v.draftId);
+    if (source.autoSendTime && Number(source.autoSendTime) > 0) throw new ZimbraError('CONFLICT', 'This draft has native scheduled delivery. Cancel the schedule explicitly before editing; ordinary SaveDraft would silently cancel it.');
     const revision = String(source.ms ?? '');
     if (!/^[0-9]+$/.test(revision)) throw new ZimbraError('CONFLICT', 'Server omitted the draft change sequence; a safe partial update is unavailable.');
     if (v.expectedRevision !== undefined && revision !== v.expectedRevision) throw new ZimbraError('CONFLICT', 'The draft differs from the selected revision. Read it again.');
