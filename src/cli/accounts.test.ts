@@ -101,14 +101,14 @@ describe('handleAccountsCommand', () => {
         'process.exit(1)'
       );
       expect(consoleSpy).toHaveBeenCalledWith(
-        'Usage: mail-mcp accounts <add|list|remove>'
+        'Usage: mail-mcp accounts <add|list|remove|login>'
       );
     });
 
     it('prints usage and exits when no subcommand is given', async () => {
       await expect(handleAccountsCommand(['accounts'])).rejects.toThrow('process.exit(1)');
       expect(consoleSpy).toHaveBeenCalledWith(
-        'Usage: mail-mcp accounts <add|list|remove>'
+        'Usage: mail-mcp accounts <add|list|remove|login>'
       );
     });
   });

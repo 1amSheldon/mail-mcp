@@ -103,12 +103,24 @@ export const mailtrapAccountSchema = secretFreeObjectSchema.pipe(z.object({
   sandboxId: nonEmptyString.optional(),
 }));
 
+export const zimbraAccountSchema = secretFreeObjectSchema.pipe(z.object({
+  backend: z.literal('zimbra'), ...commonAccountFields, user: nonEmptyString,
+  endpoint: httpsEndpointSchema.refine(value => {
+    try {
+      const url = new URL(value);
+      return !url.search && !url.hash && url.pathname.replace(/\/$/, '') === '/service/soap';
+    } catch { return false; }
+  }, 'Zimbra endpoint must end in /service/soap without query or fragment'),
+  allowedRecipients: z.array(z.email()).optional(),
+}));
+
 export const configuredAccountSchema = z.union([
   emailAccountSchema,
   appleMailAccountSchema,
   microsoftGraphAccountSchema,
   ewsAccountSchema,
   mailtrapAccountSchema,
+  zimbraAccountSchema,
 ]);
 
 export type LegacyEmailAccount = z.infer<typeof legacyEmailAccountSchema>;
@@ -118,6 +130,7 @@ export type AppleMailConfiguredAccount = z.infer<typeof appleMailAccountSchema>;
 export type MicrosoftGraphConfiguredAccount = z.infer<typeof microsoftGraphAccountSchema>;
 export type EwsConfiguredAccount = z.infer<typeof ewsAccountSchema>;
 export type MailtrapConfiguredAccount = z.infer<typeof mailtrapAccountSchema>;
+export type ZimbraConfiguredAccount = z.infer<typeof zimbraAccountSchema>;
 export type ConfiguredAccount = z.infer<typeof configuredAccountSchema>;
 export type AccountBackend = Exclude<ConfiguredAccount['backend'], undefined>;
 
@@ -137,6 +150,11 @@ export interface AccountCapabilityDescriptor {
 }
 
 export const ACCOUNT_BACKEND_CAPABILITIES = {
+  zimbra: {
+    backend: 'zimbra', credentialSource: 'keychain', readMail: true, sendMail: true,
+    manageMailboxes: false, manageRules: false, providerApi: true,
+    updateDraft: true, sendDraft: true,
+  },
   'imap-smtp': {
     updateDraft: true,
     sendDraft: true,
@@ -214,9 +232,16 @@ export function isMailtrapAccount(
   return account.backend === 'mailtrap';
 }
 
+export function isZimbraAccount(account: ConfiguredAccount): account is ZimbraConfiguredAccount {
+  return account.backend === 'zimbra';
+}
+
 export function getAccountCapabilities(
   account: ConfiguredAccount,
 ): AccountCapabilityDescriptor {
+  if (isZimbraAccount(account) && account.allowedRecipients !== undefined) {
+    return { ...ACCOUNT_BACKEND_CAPABILITIES.zimbra, sendMail: false, sendDraft: false };
+  }
   if (isAppleMailAccount(account)) {
     return { ...ACCOUNT_BACKEND_CAPABILITIES['apple-mail'], manageRules: account.allowGlobalRules === true,
       rulesScope: 'application-global' };

@@ -68,6 +68,8 @@ import type { MailtrapAction } from './providers/mailtrap/types.js';
 import { AppleMailError } from './providers/apple-mail/errors.js';
 import { MailtrapHttpError, MailtrapSendOutcomeUnknownError } from './providers/mailtrap/client.js';
 import { MicrosoftProviderError } from './providers/microsoft/common.js';
+import { ZimbraError } from './providers/zimbra/session.js';
+import type { ZimbraReadOperation, ZimbraWriteOperation } from './providers/zimbra/operations.js';
 import type { OutgoingAttachment } from './domain/outgoing-message.js';
 import { validateOAuth2TokenEndpoint } from './security/oauth2.js';
 import {
@@ -210,6 +212,10 @@ function formatProviderResult(result: unknown, uri: string) {
 }
 
 function providerErrorMessage(error: unknown): string {
+  if (error instanceof ZimbraError) return JSON.stringify({ provider: 'zimbra', status: error.code.toLowerCase(),
+    retrySafe: false, message: error.message,
+    nextAction: error.code === 'AUTH_REQUIRED' ? 'Run accounts login ACCOUNT_ID locally. Never paste credentials or OTPs into chat.'
+      : error.code === 'OUTCOME_UNKNOWN' ? 'Inspect the current server state. Never retry this write automatically.' : 'Review the input and server policy.' });
   if (error instanceof ProviderRuntimeError) {
     return `[${error.code}] ${error.message}`;
   }
@@ -693,6 +699,17 @@ export class MailMCPServer {
         } catch (error) {
           throw new Error(providerErrorMessage(error), { cause: error });
         }
+      }
+
+      if (name === 'zimbra_mail_query' || name === 'zimbra_mail_mutate') {
+        try {
+          const input = requireObject(args.input, 'input');
+          const result = name === 'zimbra_mail_query'
+            ? await this.providerRuntime.executeZimbraRead(args.accountId as string, args.operation as ZimbraReadOperation, input)
+            : await this.providerRuntime.executeZimbraWrite(args.accountId as string, args.operation as ZimbraWriteOperation, input);
+          return formatProviderResult(result,
+            `zimbra-result://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(String(args.operation))}`);
+        } catch (error) { throw new Error(providerErrorMessage(error), { cause: error }); }
       }
 
       if (name === 'microsoft_mail_query' || name === 'microsoft_mail_send') {

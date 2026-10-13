@@ -15,6 +15,37 @@ The server has three tools:
 
 For either router, put \`accountId\` and \`operation\` at the top level and operation-specific fields inside \`input\`. Provider operations are prefixed with \`apple.\`, \`microsoft.\`, or \`mailtrap.\`.
 
+
+## Zimbra SOAP backend
+
+Use zimbra.* operations only for a zimbra account. Authentication is local:
+node dist/index.js accounts login ACCOUNT_ID. Never request passwords or OTPs
+in chat or tools. auth_required means the user must log in locally again.
+zimbra.sessionStatus reports cached session availability, not remote validity.
+
+Reads: zimbra.searchMessages/searchContacts input { query, limit?, cursor? };
+zimbra.readMessage { messageId }; zimbra.getThread { conversationId } returns
+metadata; zimbra.listFolders/listTags/sessionStatus {}; zimbra.getContact
+{ contactId }; zimbra.getAttachment { messageId, partId, maxBytes? }. IDs must
+come from this Zimbra account, never from IMAP. Read messages before acting.
+Search cursors require identical query and limit, expire after five minutes and
+are consumed after success. Native offset paging can shift when mail changes.
+
+Writes: zimbra.createDraft { to: [email], subject, body, cc?, bcc?, isHtml?,
+originalMessageId?, replyType?: r|w, attachOriginal?, quoteOriginal? };
+zimbra.updateDraft adds draftId and replaces all content, including attachments.
+Do not use updateDraft when existing arbitrary attachments must be preserved.
+Reply/forward require originalMessageId and replyType together; recipients are
+explicit, not inferred reply-all. zimbra.sendDraft { draftId } sends the current
+server version; inspect it first and obtain authorization. Native send is disabled
+when allowedRecipients is configured because concurrent webmail edits cannot be
+checked atomically. zimbra.createTag { name, color? }; zimbra.deleteTag { tagId };
+zimbra.addTag/removeTag { messageIds, tagName }; zimbra.moveMessages
+{ messageIds, folderId }; zimbra.markRead { messageIds, read };
+zimbra.moveToTrash { messageIds }. Existing confirmation/read-only/allowlist
+gates apply. Never repeat an outcome_unknown write automatically. Inspect
+Drafts/Sent or the changed objects first. Calendars and contact writes are not exposed.
+
 ## Workflow
 
 1. Discover first. Call \`list_accounts\` and inspect the selected account's backend and capabilities before choosing an operation.

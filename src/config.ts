@@ -29,6 +29,8 @@ export {
   legacyEmailAccountSchema,
   mailtrapAccountSchema,
   microsoftGraphAccountSchema,
+  zimbraAccountSchema,
+  isZimbraAccount,
 } from './providers/account-types.js';
 export type {
   AccountBackend,
@@ -41,6 +43,7 @@ export type {
   LegacyEmailAccount,
   MailtrapConfiguredAccount,
   MicrosoftGraphConfiguredAccount,
+  ZimbraConfiguredAccount,
 } from './providers/account-types.js';
 
 export const ACCOUNTS_PATH = path.join(os.homedir(), '.config', 'mail-mcp', 'accounts.json');

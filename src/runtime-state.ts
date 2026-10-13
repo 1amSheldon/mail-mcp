@@ -3,12 +3,14 @@ import type { AppleMailAdapter } from './providers/apple-mail/adapter.js';
 import type { MailtrapClient } from './providers/mailtrap/client.js';
 import type { EwsClient } from './providers/microsoft/ews.js';
 import type { MicrosoftGraphClient } from './providers/microsoft/graph.js';
+import type { ZimbraClient } from './providers/zimbra/client.js';
 import { TieredRateLimiter } from './utils/rate-limiter.js';
 import { PaginationSnapshotStore } from './utils/pagination-store.js';
 import type { AppleMailMessageSummary } from './providers/apple-mail/types.js';
 import { ConfirmationStore } from './utils/confirmation-store.js';
 
 export type RuntimeProviderClient =
+  | ZimbraClient
   | AppleMailAdapter
   | MicrosoftGraphClient
   | EwsClient
@@ -34,6 +36,7 @@ export class MailMCPRuntimeState {
   readonly microsoftGraphClients = new Map<string, MicrosoftGraphClient>();
   readonly ewsClients = new Map<string, EwsClient>();
   readonly mailtrapClients = new Map<string, MailtrapClient>();
+  readonly zimbraClients = new Map<string, ZimbraClient>();
   readonly providerCreations = new Map<string, Promise<RuntimeProviderClient>>();
   readonly appleMailPages = new PaginationSnapshotStore<AppleMailMessageSummary>({
     maxItemsPerSnapshot: 10_000,
@@ -66,6 +69,7 @@ export class MailMCPRuntimeState {
         ...this.microsoftGraphClients.values(),
         ...this.ewsClients.values(),
         ...this.mailtrapClients.values(),
+        ...this.zimbraClients.values(),
       ]);
       await Promise.allSettled(
         Array.from(providerClients).map(client => disconnectIfSupported(client))
@@ -78,6 +82,7 @@ export class MailMCPRuntimeState {
       this.microsoftGraphClients.clear();
       this.ewsClients.clear();
       this.mailtrapClients.clear();
+      this.zimbraClients.clear();
       this.appleMailPages.clear();
       this.providerCreations.clear();
     })();

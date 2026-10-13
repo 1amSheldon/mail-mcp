@@ -9,6 +9,7 @@ import {
   isEwsAccount,
   isMailtrapAccount,
   isMicrosoftGraphAccount,
+  isZimbraAccount,
 } from './account-types.js';
 import type {
   AppleMailConfiguredAccount,
@@ -16,6 +17,7 @@ import type {
   EwsConfiguredAccount,
   MailtrapConfiguredAccount,
   MicrosoftGraphConfiguredAccount,
+  ZimbraConfiguredAccount,
 } from './account-types.js';
 import { AppleMailAdapter } from './apple-mail/adapter.js';
 import type {
@@ -63,6 +65,9 @@ import type {
   GraphThreadResult,
 } from './microsoft/graph.js';
 import type { PaginationPage, PaginationScope } from '../utils/pagination-store.js';
+import { ZimbraClient } from './zimbra/client.js';
+import { readZimbraSession } from './zimbra/session.js';
+import type { ZimbraReadOperation, ZimbraWriteOperation } from './zimbra/operations.js';
 
 export const APPLE_READ_OPERATIONS = [
   'listAccounts',
@@ -208,6 +213,7 @@ export class ProviderRuntimeError extends Error {
 }
 
 export interface ProviderRuntimeFactories {
+  zimbra(account: ZimbraConfiguredAccount): ZimbraClient;
   appleMail(account: AppleMailConfiguredAccount): AppleMailAdapter;
   microsoftGraph(
     account: MicrosoftGraphConfiguredAccount,
@@ -271,6 +277,9 @@ export class ProviderRuntime {
     this.getAccessToken = options.getValidAccessToken ?? getValidAccessToken;
     this.redact = options.redact ?? false;
     this.factories = {
+      zimbra: options.factories?.zimbra ?? (account => new ZimbraClient(account, {
+        fetch: fetchImpl, sessionProvider: () => readZimbraSession(account),
+      })),
       appleMail: options.factories?.appleMail ?? (account => new AppleMailAdapter({
         allowGlobalRules: account.allowGlobalRules,
         allowedAttachmentRoots: account.allowedAttachmentRoots,
@@ -450,6 +459,20 @@ export class ProviderRuntime {
     return await this.executeMailtrap(accountId, action, input, 'read');
   }
 
+  async executeZimbraRead(accountId: string, operation: ZimbraReadOperation, input: unknown): Promise<unknown> {
+    const account = await this.resolveAccount(accountId);
+    if (!isZimbraAccount(account)) this.backendMismatch(account, 'zimbra');
+    const client = await this.getOrCreate(account, 'zimbra', this.state.zimbraClients, () => this.factories.zimbra(account));
+    return this.redactResult(await client.executeRead(operation, input));
+  }
+
+  async executeZimbraWrite(accountId: string, operation: ZimbraWriteOperation, input: unknown): Promise<unknown> {
+    const account = await this.resolveAccount(accountId);
+    if (!isZimbraAccount(account)) this.backendMismatch(account, 'zimbra');
+    const client = await this.getOrCreate(account, 'zimbra', this.state.zimbraClients, () => this.factories.zimbra(account));
+    return this.redactResult(await client.executeWrite(operation, input));
+  }
+
   async executeMailtrapWrite<Action extends MailtrapAction>(
     accountId: string,
     action: Action,
@@ -485,7 +508,7 @@ export class ProviderRuntime {
     const account = (await this.getAccounts()).find(candidate => candidate.id === accountId);
     if (!account) {
       const removed = [];
-      for (const clients of [this.state.appleMailAdapters, this.state.microsoftGraphClients, this.state.ewsClients, this.state.mailtrapClients]) {
+      for (const clients of [this.state.appleMailAdapters, this.state.microsoftGraphClients, this.state.ewsClients, this.state.mailtrapClients, this.state.zimbraClients]) {
         const client = clients.get(accountId);
         clients.delete(accountId);
         if (client) removed.push(disconnectIfSupported(client));

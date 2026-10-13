@@ -1,6 +1,8 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
 
 export const MAIL_QUERY_OPERATIONS = [
+  'zimbra.sessionStatus', 'zimbra.searchMessages', 'zimbra.readMessage', 'zimbra.getThread',
+  'zimbra.listFolders', 'zimbra.listTags', 'zimbra.searchContacts', 'zimbra.getContact', 'zimbra.getAttachment',
   'listMessages', 'searchMessages', 'verifySentMessage', 'readMessage', 'listFolders',
   'getRawMessage', 'getThread', 'getAttachment', 'extractAttachmentText', 'mailboxStats',
   'extractContacts', 'listTemplates', 'renderTemplate', 'listFilters', 'getFilter',
@@ -16,6 +18,8 @@ export const MAIL_QUERY_OPERATIONS = [
 ] as const;
 
 export const MAIL_MUTATION_OPERATIONS = [
+  'zimbra.createDraft', 'zimbra.updateDraft', 'zimbra.sendDraft', 'zimbra.createTag', 'zimbra.deleteTag',
+  'zimbra.addTag', 'zimbra.removeTag', 'zimbra.moveMessages', 'zimbra.markRead', 'zimbra.moveToTrash',
   'sendMessage', 'createDraft', 'createReplyDraft', 'createReplyAllDraft', 'updateDraft', 'sendDraft', 'createMailbox', 'renameMailbox', 'deleteMailbox',
   'copyMessage', 'moveMessage', 'modifyLabels', 'registerOAuth2', 'batchMessages',
   'reply', 'replyAll', 'forward', 'moveToTrash', 'permanentlyDelete', 'markRead',
@@ -81,6 +85,7 @@ const STANDARD_MUTATION_ROUTES = {
 } as const satisfies Record<string, string>;
 
 const PROVIDER_WRITE_ROUTERS = new Set([
+  'zimbra_mail_mutate',
   'apple_mail_mutate', 'microsoft_mail_send', 'mailtrap_mutate',
 ]);
 
@@ -133,6 +138,9 @@ function providerRoute(
   if (separator < 1) return undefined;
   const provider = operation.slice(0, separator);
   const providerOperation = operation.slice(separator + 1);
+  if (provider === 'zimbra') {
+    return { name: write ? 'zimbra_mail_mutate' : 'zimbra_mail_query', args: { accountId, operation: providerOperation, input } };
+  }
   if (provider === 'apple') {
     return {
       name: write ? 'apple_mail_mutate' : 'apple_mail_query',
@@ -220,6 +228,7 @@ function mutationOperationAllowed(
   if (standardRoute && allowed.has(standardRoute)) return true;
   if (operation.startsWith('apple.') && allowed.has('apple_mail_mutate')) return true;
   if (operation.startsWith('microsoft.') && allowed.has('microsoft_mail_send')) return true;
+  if (operation.startsWith('zimbra.') && allowed.has('zimbra_mail_mutate')) return true;
   return operation.startsWith('mailtrap.') && allowed.has('mailtrap_mutate');
 }
 
@@ -245,7 +254,7 @@ const LIST_ACCOUNTS_TOOL: Tool = {
 
 const MAIL_QUERY_TOOL: Tool = {
   name: 'mail_query',
-  description: 'Read mail through IMAP, Apple Mail, Microsoft, or Mailtrap. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, or mailtrap.*. Read mail://agent-guide for input shapes.',
+  description: 'Read mail through IMAP, Apple Mail, Microsoft, Mailtrap, or Zimbra. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, mailtrap.*, or zimbra.*. Read mail://agent-guide for input shapes.',
   annotations: { readOnlyHint: true, destructiveHint: false },
   inputSchema: {
     type: 'object',
@@ -261,7 +270,7 @@ const MAIL_QUERY_TOOL: Tool = {
 
 const MAIL_MUTATE_TOOL: Tool = {
   name: 'mail_mutate',
-  description: 'Draft, send, organize, or configure mail through any supported backend. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, or mailtrap.*. Read mail://agent-guide before writes.',
+  description: 'Draft, send, organize, or configure mail through any supported backend. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, mailtrap.*, or zimbra.*. Read mail://agent-guide before writes.',
   annotations: { readOnlyHint: false, destructiveHint: true },
   inputSchema: {
     type: 'object',

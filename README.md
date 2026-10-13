@@ -20,6 +20,15 @@ See [production hardening qualification](PRODUCTION-READINESS.md) for the audit 
 
 Gmail, Google Workspace, Mail.ru, iCloud, Fastmail, Yahoo, Zoho, and other standards-based providers use the IMAP + SMTP backend. POP3 and JMAP are not implemented.
 
+## Zimbra SOAP and 2FA
+
+The optional `zimbra` backend adds native search, tags, address-book reads,
+conversation metadata, server reply/forward drafts and native draft sending.
+Authenticate locally with `node dist/index.js accounts login ACCOUNT_ID`;
+only the completed session is stored, not the password or OTP. Expired or revoked
+sessions require local reauthentication. Existing IMAP/SMTP app-password accounts
+remain separate. See [Zimbra setup, operations and limitations](docs/ZIMBRA.md).
+
 ## Install
 
 This is the `starychenko/mail-mcp` fork, version `3.0.1-fork.1`. It is distributed as a reviewed local build, not through the upstream npm package. Keep the checkout at a stable path.
