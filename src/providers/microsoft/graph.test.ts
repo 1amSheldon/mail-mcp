@@ -23,6 +23,21 @@ function message(attachments: MicrosoftMessageContent['attachments'] = []): Micr
 }
 
 describe('MicrosoftGraphClient', () => {
+  it.each(['network', 'server-error', 'invalid-json', 'oversized', 'missing-id'])('preserves Graph draft creation uncertainty after %s', async failure => {
+    for (const operation of ['send', 'reply'] as const) {
+      const fetchMock = vi.fn<MicrosoftFetch>();
+      if (failure === 'network') fetchMock.mockRejectedValue(new Error('lost after upload'));
+      else fetchMock.mockResolvedValue(new Response(failure === 'invalid-json' ? '{broken' : '{}', {
+        status: failure === 'server-error' ? 503 : 200,
+        ...(failure === 'oversized' ? { headers: { 'content-length': String(5 * 1024 * 1024) } } : {}),
+      }));
+      const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+      const input = message([{ name: 'attachment.bin', content: Buffer.alloc(operation === 'send' ? GRAPH_SIMPLE_ATTACHMENT_LIMIT : 1) }]);
+      await expect(operation === 'send' ? client.sendMessage(input) : client.reply('original', input))
+        .rejects.toMatchObject({ kind: 'outcome_unknown', operation: 'createDraft' });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    }
+  });
   it('does not follow redirects and treats server send failures as ambiguous', async () => {
     const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('', { status: 503 }));
     const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });

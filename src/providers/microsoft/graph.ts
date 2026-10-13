@@ -259,11 +259,10 @@ export class MicrosoftGraphClient {
       );
     }
 
-    const draft = await this.requestJson<Record<string, unknown>>(
+    const draftId = await this.createDraft(
       `${this.mailboxPath}/messages`,
       { method: 'POST', body: JSON.stringify(messagePayload(message, false)) },
     );
-    const draftId = this.requiredId(draft, 'draft');
     await this.attachToDraft(draftId, attachments);
     const response = await this.request(
       `${this.mailboxPath}/messages/${encodePathSegment(draftId)}/send`,
@@ -299,11 +298,10 @@ export class MicrosoftGraphClient {
       };
     }
 
-    const draft = await this.requestJson<Record<string, unknown>>(
+    const draftId = await this.createDraft(
       `${this.mailboxPath}/messages/${encodedId}/createReply`,
       { method: 'POST' },
     );
-    const draftId = this.requiredId(draft, 'reply draft');
     await this.request(
       `${this.mailboxPath}/messages/${encodePathSegment(draftId)}`,
       { method: 'PATCH', body: JSON.stringify(messagePayload(message, false)) },
@@ -499,13 +497,6 @@ export class MicrosoftGraphClient {
     return url.href;
   }
 
-  private requiredId(value: Record<string, unknown>, label: string): string {
-    if (typeof value.id !== 'string' || !value.id) {
-      throw new MicrosoftProviderError('graph', 'invalid_response', `Microsoft Graph ${label} is missing id`);
-    }
-    return value.id;
-  }
-
   private assertAttachmentSizes(attachments: MicrosoftAttachment[]): void {
     const oversized = attachments.find(
       item => attachmentBytes(item).byteLength > GRAPH_MAX_ATTACHMENT_SIZE,
@@ -596,6 +587,19 @@ export class MicrosoftGraphClient {
     }
   }
 
+  private async createDraft(path: string, init: RequestInit): Promise<string> {
+    try {
+      const draft = await this.requestJson<Record<string, unknown>>(path, init, true);
+      if (typeof draft?.id !== 'string' || !draft.id) {
+        throw new MicrosoftProviderError('graph', 'outcome_unknown', 'Graph returned no identifiable saved draft. Inspect Drafts before retrying.');
+      }
+      return draft.id;
+    } catch (error) {
+      if (error instanceof MicrosoftProviderError && error.kind === 'outcome_unknown') error.operation = 'createDraft';
+      throw error;
+    }
+  }
+
   private async requestJson<T>(
     path: string,
     init: RequestInit = {},
@@ -607,7 +611,7 @@ export class MicrosoftGraphClient {
     } catch (error) {
       throw new MicrosoftProviderError(
         'graph',
-        'invalid_response',
+        mutating ? 'outcome_unknown' : 'invalid_response',
         'Microsoft Graph returned invalid JSON',
         response.status,
         requestIdFrom(response),
