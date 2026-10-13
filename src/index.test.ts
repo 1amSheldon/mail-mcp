@@ -904,7 +904,7 @@ describe('CONN-02: IMAP reconnect via close-event + getService retry', () => {
 
     const first = (server as any).getService('acc1');
     const second = (server as any).getService('acc1');
-    expect(creation).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(creation).toHaveBeenCalledTimes(1));
     release(service);
     await expect(Promise.all([first, second])).resolves.toEqual([service, service]);
   });

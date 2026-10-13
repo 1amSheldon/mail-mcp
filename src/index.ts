@@ -458,6 +458,9 @@ export class MailMCPServer {
       await service.connect();
       if (closed) throw new Error('IMAP closed during connection');
       if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
+      const current = (await getAccounts()).find(candidate => candidate.id === accountId);
+      if (JSON.stringify(current) !== JSON.stringify(account)) throw new Error('Account configuration changed during connection');
+      this.runtimeState.serviceConfigurations.set(accountId, JSON.stringify(account));
       this.services.set(accountId, service);
       return service;
     } catch (error) {
@@ -469,9 +472,16 @@ export class MailMCPServer {
 
   private async getService(accountId: string): Promise<MailService> {
     if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
-    if (this.services.has(accountId)) {
-      return this.services.get(accountId)!;
+    const account = (await getAccounts()).find(candidate => candidate.id === accountId);
+    const cached = this.services.get(accountId);
+    if (cached && (!account || this.runtimeState.serviceConfigurations.get(accountId) !== JSON.stringify(account))) {
+      // Revoke the cached policy before awaiting disconnect so concurrent calls cannot reuse it.
+      this.services.delete(accountId);
+      this.runtimeState.serviceConfigurations.delete(accountId);
+      await cached.disconnect();
     }
+    if (!account) throw new Error(`Account ${accountId} not found in configuration.`);
+    if (this.services.has(accountId)) return this.services.get(accountId)!;
     const existingCreation = this.serviceCreations.get(accountId);
     if (existingCreation) return existingCreation;
 

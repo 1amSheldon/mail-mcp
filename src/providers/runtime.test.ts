@@ -79,6 +79,25 @@ function options(
 }
 
 describe('ProviderRuntime account and client lifecycle', () => {
+  it('replaces cached provider clients after account configuration changes and evicts removed accounts', async () => {
+    const state = new MailMCPRuntimeState();
+    const first = { listAccounts: vi.fn(async () => []), disconnect: vi.fn(async () => {}) };
+    const second = { listAccounts: vi.fn(async () => []), disconnect: vi.fn(async () => {}) };
+    const factory = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const runtimeOptions = options([APPLE_ACCOUNT], { appleMail: factory });
+    const runtime = new ProviderRuntime(state, runtimeOptions);
+    await runtime.executeAppleRead('apple', 'listAccounts', {});
+    vi.mocked(runtimeOptions.getAccounts!).mockResolvedValue([{ ...APPLE_ACCOUNT, nativeAccountName: 'Changed' }]);
+    await runtime.executeAppleRead('apple', 'listAccounts', {});
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(first.disconnect).toHaveBeenCalledOnce();
+    expect(second.listAccounts).toHaveBeenCalledOnce();
+    vi.mocked(runtimeOptions.getAccounts!).mockResolvedValue([]);
+    await expect(runtime.executeAppleRead('apple', 'listAccounts', {})).rejects.toMatchObject({ code: 'ACCOUNT_NOT_FOUND' });
+    expect(second.disconnect).toHaveBeenCalledOnce();
+    expect(state.appleMailAdapters.size).toBe(0);
+  });
+
   it('shares one lazily-created Apple Mail adapter across HTTP session runtimes', async () => {
     const state = new MailMCPRuntimeState();
     const listAccounts = vi.fn().mockResolvedValue([]);
