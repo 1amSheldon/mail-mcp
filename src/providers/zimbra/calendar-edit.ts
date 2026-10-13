@@ -42,6 +42,18 @@ function parseNativeTime(raw: unknown): CalendarTime | undefined {
   return parsed.data;
 }
 const dayShift = (date: string, days: number) => new Date(Date.parse(date + 'T00:00:00Z') + days * 86400000).toISOString().slice(0, 10);
+function validDuration(value: unknown, start: CalendarTime | undefined): boolean {
+  if (value === undefined || !start) return false;
+  const duration = one(value);
+  if (truth(duration.neg)) return false;
+  let seconds = 0;
+  for (const [key, scale] of [['w', 604800], ['d', 86400], ['h', 3600], ['m', 60], ['s', 1]] as const) {
+    const n = Number(duration[key] ?? 0);
+    if (!Number.isSafeInteger(n) || n < 0 || start.type === 'date' && ['h', 'm', 's'].includes(key) && n !== 0) return false;
+    seconds += n * scale;
+  }
+  return Number.isSafeInteger(seconds);
+}
 const timeValue = (v: CalendarTime) => Date.parse(v.type === 'date' ? v.date + 'T00:00:00Z' : v.type === 'local' ? v.at + 'Z' : v.at);
 function shiftTime(v: CalendarTime, milliseconds: number): CalendarTime {
   const shifted = new Date(timeValue(v) + milliseconds).toISOString();
@@ -211,6 +223,7 @@ export class ZimbraCalendarEdits {
     for (const [key, source] of [['s', 'start'], ['e', task ? 'due' : 'endExclusive']] as const) {
       if (!Object.hasOwn(changes, source)) continue;
       const value = changes[source] as CalendarTime | null;
+      if (key === 'e') delete comp.dur;
       if (value === null) delete comp[key];
       else comp[key] = !task && key === 'e' && value.type === 'date' ? nativeTime({ type: 'date', date: dayShift(value.date, -1) }) : nativeTime(value);
     }
@@ -220,7 +233,10 @@ export class ZimbraCalendarEdits {
     }
     const start = parseNativeTime(comp.s); let end = parseNativeTime(comp.e);
     if (!task && end?.type === 'date') end = { type: 'date', date: dayShift(end.date, 1) };
-    if ((!task && (!start || !end || !(compareTimes(start, end) < 0))) || (task && start && end && !(compareTimes(start, end) <= 0))) throw new ZimbraError('INVALID_INPUT', 'Edited calendar dates are inconsistent. Supply matching start/end forms and timezones.');
+    // Native invitations may omit both end and duration. Zimbra supplies its
+    // effective duration; preserve that form instead of inventing a new end.
+    const durationEnd = !end && !!start && (comp.dur === undefined || validDuration(comp.dur, start));
+    if ((!task && (!start || !(durationEnd || end && compareTimes(start, end) < 0))) || (task && start && end && !(compareTimes(start, end) <= 0)) || comp.dur !== undefined && !end && !durationEnd) throw new ZimbraError('INVALID_INPUT', 'Edited calendar dates are inconsistent. Supply matching start/end forms and timezones.');
     comp.allDay = start?.type === 'date' || !start && end?.type === 'date' ? 1 : 0;
     if (task && ((comp.status === 'COMP' && Number(comp.percentComplete) !== 100) || (comp.status !== 'COMP' && comp.completed))) throw new ZimbraError('INVALID_INPUT', 'Completed tasks require 100 percent; clear completedAt when reopening.');
     if (exception && 'instance' in edit) {

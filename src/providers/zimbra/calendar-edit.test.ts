@@ -17,6 +17,40 @@ function fixture(patch: Record<string, unknown> = {}, allowed?: string[]) {
 }
 
 describe('guarded partial calendar edits', () => {
+  it.each([{ d: '20261014' }, { d: '20261014T090000', tz: 'Europe/Kyiv' }])('preserves a native implicit end during edits and exceptions: %j', async s => {
+    const f = fixture({ s, e: undefined });
+    await f.service.execute('updateAppointment', { ...guard, changes: { location: 'Room 2' } });
+    expect(f.payload().m.inv.comp[0]).toMatchObject({ s, loc: 'Room 2' });
+    expect(f.payload().m.inv.comp[0].e).toBeUndefined();
+    expect(f.payload().m.inv.comp[0].dur).toBeUndefined();
+    const series = fixture({ s, e: undefined, recur: { add: [{ rule: [{ freq: 'WEE' }] }] } });
+    const instance = s.tz ? { type: 'local', at: '2026-10-21T09:00:00', timeZone: s.tz } : { type: 'date', date: '2026-10-21' };
+    await series.service.execute('createAppointmentException', { ...guard, instance, changes: { location: 'Room 2' } });
+    expect(series.payload().m.inv.comp[0].s).toEqual(s.tz ? { d: '20261021T090000', tz: s.tz } : { d: '20261021' });
+    expect(series.payload().m.inv.comp[0].e).toBeUndefined();
+    expect(series.payload().m.inv.comp[0].dur).toBeUndefined();
+  });
+  it.each([{ h: 1 }, { d: 2 }])('preserves native duration during metadata edits: %j', async dur => {
+    const f = fixture({ e: undefined, dur });
+    await f.service.execute('updateAppointment', { ...guard, changes: { location: 'Room 2' } });
+    expect(f.payload().m.inv.comp[0]).toMatchObject({ dur, loc: 'Room 2', s: comp.s });
+    expect(f.payload().m.inv.comp[0].e).toBeUndefined();
+  });
+  it('inherits native duration for a recurring exception and removes it when an explicit end is supplied', async () => {
+    const f = fixture({ e: undefined, dur: { h: 1 }, recur: { add: [{ rule: [{ freq: 'WEE' }] }] } });
+    await f.service.execute('createAppointmentException', { ...guard, instance: { type: 'local', at: '2026-10-21T09:00:00', timeZone: 'Europe/Kyiv' }, changes: { location: 'Room 2' } });
+    expect(f.payload().m.inv.comp[0]).toMatchObject({ dur: { h: 1 }, s: { d: '20261021T090000', tz: 'Europe/Kyiv' } });
+    expect(f.payload().m.inv.comp[0].e).toBeUndefined();
+    const explicit = fixture({ e: undefined, dur: { h: 1 } });
+    await explicit.service.execute('updateAppointment', { ...guard, changes: { endExclusive: { type: 'local', at: '2026-10-14T11:00:00', timeZone: 'Europe/Kyiv' } } });
+    expect(explicit.payload().m.inv.comp[0].dur).toBeUndefined();
+    expect(explicit.payload().m.inv.comp[0].e).toEqual({ d: '20261014T110000', tz: 'Europe/Kyiv' });
+  });
+  it('preserves an all-day duration without applying the native end-date offset', async () => {
+    const f = fixture({ s: { d: '20261014' }, e: undefined, dur: { d: 1 } });
+    await f.service.execute('updateAppointment', { ...guard, changes: { location: 'Room 2' } });
+    expect(f.payload().m.inv.comp[0]).toMatchObject({ s: { d: '20261014' }, dur: { d: 1 }, allDay: 1 });
+  });
   it('forwards an explicitly selected occurrence using the calendar item ID', async () => {
     const f = fixture();
     await f.service.execute('forwardAppointment', { ...guard, to: ['guest@example.test'], instance: { type: 'local', at: '2026-10-14T09:00:00', timeZone: 'Europe/Kyiv' }, message: 'Join us' });
