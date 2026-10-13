@@ -29,6 +29,18 @@ function fixture() {
 }
 
 describe('thread reconstruction', () => {
+  it('shares one real SEARCH budget across a long reference graph and multiple folders', async () => {
+    const { client, flow } = fixture();
+    const ids = Array.from({ length: 40 }, (_, i) => `<id${i}@test>`);
+    flow.search.mockResolvedValue([1]);
+    flow.fetch.mockImplementation(async function* () {
+      yield { uid: 1, headers: Buffer.from(`Message-ID: ${ids[0]}\r\nReferences: ${ids.slice(1).join(' ')}\r\n`), envelope: { date: new Date() } };
+    });
+    const service = new MailService(account);
+    (service as any).imapClient = client;
+    expect((await service.getThread(ids[0], 'INBOX', ['INBOX', 'Sent'])).partial).toBe(true);
+    expect(flow.search.mock.calls.length).toBeLessThanOrEqual(100);
+  });
   it('walks ancestors from the last message and retains explicit partial scope', async () => {
     const { client } = fixture();
     const service = new MailService(account);

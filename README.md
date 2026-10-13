@@ -120,7 +120,7 @@ The important rules are short:
 6. Prefer a draft when recipients or wording are not final.
 7. Never retry `smtp_outcome_unknown` automatically. Use `verifySentMessage` with the returned Message-ID first.
 
-IMAP cursor snapshots are capped at 10,000 UIDs and hydrate only the requested page. Page size is capped at 100.
+IMAP listing/search scan bounded UID windows and hydrate only the requested page. Page size is capped at 500; total is unknown. Follow nextCursor even when a sparse search returns an empty page.
 
 ### Keyword search
 

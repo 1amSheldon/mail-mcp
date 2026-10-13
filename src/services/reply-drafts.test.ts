@@ -37,6 +37,21 @@ async function fixture(overrides: Partial<EmailAccount> = {}) {
 }
 
 describe('threaded reply drafts with real MIME composition', () => {
+  it.each(['draft', 'reply', 'replyAll', 'forward', 'read'] as const)('rejects a mailbox reset between locator validation and %s body fetch', async operation => {
+    const f = await fixture();
+    vi.mocked(f.service.imap.getMailboxIdentity)
+      .mockResolvedValueOnce({ path: 'INBOX', uidValidity: '1' })
+      .mockResolvedValue({ path: 'INBOX', uidValidity: '2' });
+    const action = operation === 'draft' ? f.service.createReplyDraft(f.locator, 'Body')
+      : operation === 'reply' ? f.service.replyLocatedEmail(f.locator, 'Body')
+      : operation === 'replyAll' ? f.service.replyAllEmail(f.locator, 'Body')
+      : operation === 'forward' ? f.service.forwardLocatedEmail(f.locator, 'to@example.test', 'Body')
+      : f.service.readLocatedEmail(f.locator);
+    await expect(action).rejects.toThrow('identity changed');
+    expect(f.service.imap.fetchMessageBody).not.toHaveBeenCalled();
+    expect(f.append).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
   it('reports saved with recovery instructions when mailbox lookup fails after APPEND', async () => {
     const f = await fixture();
     vi.mocked(f.service.imap.getMailboxIdentity).mockImplementation(async path => {

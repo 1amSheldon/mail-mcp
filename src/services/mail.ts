@@ -534,8 +534,8 @@ export class MailService {
     });
   }
 
-  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[]): Promise<SendDeliveryResult> {
-    const parsed = await this._cachedFetchBody(uid, folder);
+  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], expectedUidValidity?: string): Promise<SendDeliveryResult> {
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
 
     const originalMessageId = parsed.messageId;
     const existingReferences = parsed.headers.get('references') as string | undefined;
@@ -595,6 +595,7 @@ export class MailService {
       bcc,
       includeSignature,
       attachments,
+      resolved.uidValidity,
     );
   }
 
@@ -604,7 +605,7 @@ export class MailService {
     options: ReplyOptions = {}
   ): Promise<SendDeliveryResult> {
     const resolved = await this.resolveLocator(locator);
-    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox);
+    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox, resolved.uidValidity);
     return this.sendMessage(this.replyAllMessage(parsed, body, options));
   }
 
@@ -614,7 +615,7 @@ export class MailService {
     options: ReplyOptions & { replyAll?: boolean; cc?: string } = {},
   ): Promise<DraftCreationResult> {
     const resolved = await this.resolveLocator(locator);
-    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox);
+    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox, resolved.uidValidity);
     if (!parsed.messageId) {
       throw new ValidationError('Cannot create a threaded reply draft: the original message has no Message-ID.');
     }
@@ -723,8 +724,8 @@ export class MailService {
     return objects.flatMap(object => object.value.map(address => address.address));
   }
 
-  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], includeOriginalAttachments: boolean = false): Promise<SendDeliveryResult> {
-    const parsed = await this._cachedFetchBody(uid, folder);
+  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], includeOriginalAttachments: boolean = false, expectedUidValidity?: string): Promise<SendDeliveryResult> {
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
 
     // Build subject with "Fwd: " prefix
     const originalSubject = parsed.subject || '';
@@ -799,6 +800,7 @@ export class MailService {
       includeSignature,
       attachments,
       includeOriginalAttachments,
+      resolved.uidValidity,
     );
   }
 
@@ -926,8 +928,9 @@ export class MailService {
     return this.draftWorkflow().send(target);
   }
 
-  private async _cachedFetchBody(uid: string, folder: string): Promise<ParsedMail> {
+  private async _cachedFetchBody(uid: string, folder: string, expectedUidValidity?: string): Promise<ParsedMail> {
     const identity = await this.imapClient.getMailboxIdentity(folder);
+    if (expectedUidValidity !== undefined && identity.uidValidity !== expectedUidValidity) throw new ValidationError('Message locator is stale because the mailbox identity changed.');
     const key = JSON.stringify([this.account.id, folder, identity.uidValidity, uid]);
     const cached = this.bodyCache.get(key);
     if (cached) return cached;
@@ -981,8 +984,8 @@ export class MailService {
     return { https, mailto };
   }
 
-  async readEmail(uid: string, folder: string = 'INBOX'): Promise<string> {
-    const parsed = await this._cachedFetchBody(uid, folder);
+  async readEmail(uid: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<string> {
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
     
     let content = '';
 
@@ -1065,7 +1068,7 @@ export class MailService {
 
   async readLocatedEmail(locator: string): Promise<string> {
     const resolved = await this.resolveLocator(locator);
-    return this.readEmail(resolved.uid.toString(), resolved.mailbox);
+    return this.readEmail(resolved.uid.toString(), resolved.mailbox, resolved.uidValidity);
   }
 
   async getThread(threadId: string, folder: string = 'INBOX', folders?: string[]) {
@@ -1079,6 +1082,7 @@ export class MailService {
     const items = new Map<string, LocatedMessageMetadata>();
     const ids = new Set([threadId]);
     const queried = new Set<string>();
+    const budget = { remaining: 100 };
     // Revisit earlier folders for ancestors discovered in a later folder.
     for (let round = 0; round < 10; round++) {
       let progressed = false;
@@ -1086,10 +1090,10 @@ export class MailService {
         const identity = await this.imapClient.getMailboxIdentity(mailbox);
         for (const id of [...ids]) {
           const key = JSON.stringify([mailbox, id]);
-          if (queried.has(key) || queried.size >= 100 || items.size >= 500) continue;
+          if (queried.has(key) || budget.remaining <= 0 || items.size >= 500) continue;
           queried.add(key);
           progressed = true;
-          const messages = await this.imapClient.fetchThreadMessages(id, mailbox);
+          const messages = await this.imapClient.fetchThreadMessages(id, mailbox, { expand: false, budget });
           const after = await this.imapClient.getMailboxIdentity(mailbox);
           if (after.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed during thread read.');
           for (const message of this.locateMessages(messages, mailbox, identity.uidValidity)) {
@@ -1125,14 +1129,14 @@ export class MailService {
     };
   }
 
-  async downloadAttachment(uid: string, filename: string, folder: string = 'INBOX', maxBytes: number = 50 * 1024 * 1024): Promise<{ content: Buffer, contentType: string }> {
+  async downloadAttachment(uid: string, filename: string, folder: string = 'INBOX', maxBytes: number = 50 * 1024 * 1024, expectedUidValidity?: string): Promise<{ content: Buffer, contentType: string }> {
     const size = await this.imapClient.fetchAttachmentSize(uid, filename, folder);
     if (size != null && size > maxBytes) {
       throw new ValidationError(
         `Attachment "${filename}" is ${Math.round(size / 1024 / 1024)} MB, which exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit. Use an email client to download large attachments directly.`
       );
     }
-    const parsed = await this._cachedFetchBody(uid, folder);
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
     if (!parsed.attachments || parsed.attachments.length === 0) {
       throw new Error('No attachments found in this email');
     }
@@ -1152,11 +1156,11 @@ export class MailService {
     maxBytes: number = 50 * 1024 * 1024,
   ): Promise<{ content: Buffer, contentType: string }> {
     const resolved = await this.resolveLocator(locator);
-    return this.downloadAttachment(resolved.uid.toString(), filename, resolved.mailbox, maxBytes);
+    return this.downloadAttachment(resolved.uid.toString(), filename, resolved.mailbox, maxBytes, resolved.uidValidity);
   }
 
-  async extractAttachmentText(uid: string, filename: string, folder: string = 'INBOX'): Promise<string> {
-    const { content, contentType } = await this.downloadAttachment(uid, filename, folder);
+  async extractAttachmentText(uid: string, filename: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<string> {
+    const { content, contentType } = await this.downloadAttachment(uid, filename, folder, 50 * 1024 * 1024, expectedUidValidity);
     if (contentType === 'application/pdf') {
       // pdf-parse v2 exports the PDFParse class and no default function, so the
       // v1 call shape (`pdf.default || pdf`) resolves to the module namespace
@@ -1178,7 +1182,7 @@ export class MailService {
 
   async extractLocatedAttachmentText(locator: string, filename: string): Promise<string> {
     const resolved = await this.resolveLocator(locator);
-    return this.extractAttachmentText(resolved.uid.toString(), filename, resolved.mailbox);
+    return this.extractAttachmentText(resolved.uid.toString(), filename, resolved.mailbox, resolved.uidValidity);
   }
 
   async extractContacts(folder: string = 'INBOX', count: number = 100): Promise<ContactInfo[]> {

@@ -191,25 +191,29 @@ export class ImapClient {
     }
   }
 
-  async fetchThreadMessages(threadId: string, folder: string = 'INBOX'): Promise<MessageMetadata[]> {
+  async fetchThreadMessages(threadId: string, folder: string = 'INBOX', options: { expand?: boolean; budget?: { remaining: number } } = {}): Promise<MessageMetadata[]> {
     if (!this.client) throw new Error('Not connected');
     if (!threadId || threadId.length > 998 || /[\r\n\0]/.test(threadId)) throw new Error('Invalid thread ID');
     const lock = await this.client.getMailboxLock(folder);
     try {
+      const budget = options.budget ?? { remaining: 100 };
       const messages = new Map<number, MessageMetadata>();
       const pending = [threadId];
       const searched = new Set<string>();
       const gmail = /^\d+$/.test(threadId) && this.client.capabilities?.has('X-GM-EXT-1');
-      while (pending.length && searched.size < 100 && messages.size < 500) {
+      while (pending.length && budget.remaining > 0 && searched.size < 100 && messages.size < 500) {
         const id = pending.shift()!;
         if (searched.has(id)) continue;
         searched.add(id);
         let uids: number[] = [];
         if (gmail) {
+          budget.remaining--;
           const found = await this.client.search({ threadId: id }, { uid: true });
           uids = found || [];
         } else {
           for (const header of ['References', 'In-Reply-To', 'Message-ID']) {
+            if (budget.remaining <= 0) break;
+            budget.remaining--;
             const found = await this.client.search({ header: { [header]: id } }, { uid: true });
             if (found) uids.push(...found);
           }
@@ -232,7 +236,7 @@ export class ImapClient {
             snippet: '', threadId: msg.threadId?.toString() || threadId,
             referenceIds: refs,
           });
-          if (!gmail) for (const ref of refs) if (!searched.has(ref) && pending.length < 100) pending.push(ref);
+          if (!gmail && options.expand !== false) for (const ref of refs) if (!searched.has(ref) && pending.length < 100) pending.push(ref);
         }
       }
       return [...messages.values()].sort((a, b) => (a.date?.getTime() || 0) - (b.date?.getTime() || 0));
