@@ -1,9 +1,17 @@
-# mail-mcp
+# Mail MCP
 
 [![CI](https://github.com/starychenko/mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/starychenko/mail-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-111111.svg)](LICENSE)
 
-An email MCP server for Codex, Claude Code, Claude Desktop, and other MCP clients. It connects to IMAP, SMTP, ManageSieve, Apple Mail, Microsoft Graph, Exchange Web Services, and Mailtrap without putting mail credentials in client configuration.
+Mail MCP is maintained by [starychenko](https://github.com/starychenko) for Codex, Claude Code, Claude Desktop and other MCP clients. It connects to IMAP, SMTP, Zimbra SOAP, ManageSieve, Apple Mail, Microsoft Graph, Exchange Web Services and Mailtrap without putting mail credentials in client configuration.
+
+[Releases](https://github.com/starychenko/mail-mcp/releases) · [Agent skill](skills/mail-mcp/SKILL.md) · [Changelog](CHANGELOG.md)
+
+## Origin and attribution
+
+This project is based on [1amSheldon/mail-mcp](https://github.com/1amSheldon/mail-mcp). Development and releases are maintained here by starychenko. The GitHub fork relationship is retained to preserve existing pull requests and project history; it does not select the upstream package for installation or updates.
+
+The original MIT license and all existing copyright notices are preserved in [LICENSE](LICENSE). The upstream authors and contributors remain credited in the Git history and package metadata. Existing credential-store identifiers are retained for compatibility, so updating does not move or invalidate stored accounts.
 
 See [production hardening qualification](PRODUCTION-READINESS.md) for the audit closure map, compatibility changes, resource limits and live acceptance checks.
 
@@ -12,6 +20,7 @@ See [production hardening qualification](PRODUCTION-READINESS.md) for the audit 
 | Backend | What it supports | Runtime requirement |
 | --- | --- | --- |
 | IMAP + SMTP | Cursor-based listing and search, stable message locators, raw RFC 822, folders, copy/move/trash/permanent delete, flags, threads, contacts, MIME drafts and sends, reply-all, attachments, delivery verification | Any provider exposing IMAP and SMTP |
+| Zimbra SOAP | Native search, tags, address-book reads, conversation metadata, server drafts and native draft sending | Zimbra HTTPS SOAP endpoint and locally authenticated session |
 | ManageSieve | List, read, create, update, and delete server-side filters | A ManageSieve endpoint on the IMAP account |
 | Apple Mail | Accounts, mailboxes, messages, raw source, drafts, compose, reply, reply-all, forward, flags, move, trash, and rule management | macOS with Mail.app and Automation permission |
 | Microsoft Graph | Read by ID, Internet Message-ID lookup, thread lookup, send, reply, inline attachments, and large attachment upload sessions | Pre-provisioned Microsoft OAuth2 credentials |
@@ -31,7 +40,7 @@ remain separate. See [Zimbra setup, operations and limitations](docs/ZIMBRA.md).
 
 ## Install
 
-This is the `starychenko/mail-mcp` fork, version `3.0.1-fork.1`. It is distributed as a reviewed local build, not through the upstream npm package. Keep the checkout at a stable path.
+The current release is `starychenko/mail-mcp` **v3.1.0**. Use a reviewed checkout or the package attached to its [GitHub release](https://github.com/starychenko/mail-mcp/releases/tag/v3.1.0). The upstream npm package is a separate distribution. Keep the checkout at a stable path.
 
 ```bash
 git clone https://github.com/starychenko/mail-mcp.git
@@ -88,7 +97,7 @@ Add `--read-only` to either installer command to expose only read tools. Restart
 node dist/index.js --install-claude
 ```
 
-The installer preserves other MCP servers, creates `claude_desktop_config.json.mail-mcp.bak` when replacing an existing file, and writes an `npx` command that runs this local fork when Claude starts the server. Add `--read-only` for read-only access, then restart Claude Desktop.
+The installer preserves other MCP servers, creates `claude_desktop_config.json.mail-mcp.bak` when replacing an existing file, and writes an `npx` command that runs this local build when Claude starts the server. Add `--read-only` for read-only access, then restart Claude Desktop.
 
 ### Claude Code
 
@@ -121,7 +130,9 @@ Do not put passwords, refresh tokens, client secrets, API tokens, or HTTP bearer
 
 ## Agent workflow
 
-The server publishes the `mail://agent-guide` resource and the `mail_agent_workflow` prompt. The Codex installer also installs the same workflow as a skill.
+The server publishes the `mail://agent-guide` resource and the `mail_agent_workflow` prompt. Both are generated from the [portable skill](skills/mail-mcp/SKILL.md) and its references, so the runtime and bundled instructions have one source. New Codex and Claude Code skill installations include every reference; existing and linked skills remain protected.
+
+Choose the relevant contract: [IMAP/SMTP](skills/mail-mcp/references/imap-smtp.md), [Zimbra](skills/mail-mcp/references/zimbra.md), [Apple Mail](skills/mail-mcp/references/apple-mail.md), [Microsoft](skills/mail-mcp/references/microsoft.md), [Mailtrap](skills/mail-mcp/references/mailtrap.md), [outcomes and recovery](skills/mail-mcp/references/outcomes.md), or [operations and production acceptance](skills/mail-mcp/references/operations.md). These document public input shapes, backend differences and result verification; a router capability flag alone is not an input schema.
 
 The important rules are short:
 
@@ -269,7 +280,7 @@ Nested audit fields are sanitized. Provider errors are reduced to safe codes and
 
 For IMAP/SMTP accounts, `createDraft` returns a stable `draftId`. Keep it to edit or send the same draft later:
 
-This fork also exposes `createReplyDraft` and `createReplyAllDraft`. Call either through
+This project exposes `createReplyDraft` and `createReplyAllDraft`. Call either through
 `mail_mutate` with `{ accountId, operation, input: { locator, body } }` after reading the source.
 They save to Drafts without sending and derive `In-Reply-To`, the `References` chain, the subject
 and recipients from that source. A missing source Message-ID is an error. Optional input fields:
@@ -333,7 +344,7 @@ If the managed service restarts after sleep or an automatic update, requests car
 
 ## Updates
 
-Fork installers keep the local source path; they never switch to the upstream npm package. The upstream registry update monitor is disabled. To update, review and check out the desired fork commit, run `npm ci` and `npm run build`, then rerun the relevant installer and restart the client/service. Credentials remain in their existing store.
+The installers keep the local source path; they never switch to the upstream npm package. The upstream registry update monitor is disabled. To update, review and check out the desired project commit, run `npm ci` and `npm run build`, then rerun the relevant installer and restart the client/service. Credentials remain in their existing store.
 
 Codex preserves existing customized skills and linked/junction-managed skills. Use `--skip-skill` to skip skill installation entirely. Update shared skills in their own source repository. The installer rollback does not write skipped skills.
 
@@ -350,7 +361,7 @@ Checks configured IMAP connections and SMTP hosts without sending mail. Prints a
 ## Develop
 
 ```bash
-git clone https://github.com/1amSheldon/mail-mcp.git
+git clone https://github.com/starychenko/mail-mcp.git
 cd mail-mcp
 npm ci
 npm run release:check
@@ -359,18 +370,20 @@ npm pack --dry-run
 
 `release:check` builds the package, enforces English repository text, runs the complete test suite, exercises stdio and HTTP transports, checks importability, and runs `npm audit`.
 
+After changing the skill or its references, run `npm run docs:generate` and review the generated `src/mcp/agent-guide-content.ts`. Build runs `docs:check` and fails on drift. Documentation tests check public operation coverage, SMTP status coverage, local links and JSON examples; installer tests check reference delivery, backups, linked-skill preservation and rollback. These checks do not certify live mailbox/provider behavior. Follow the production acceptance reference and report untested accounts, devices and write scenarios explicitly.
+
 The default suite uses protocol and provider mocks. It does not access a real mailbox, send mail, call Microsoft or Mailtrap, or automate Mail.app. `--validate-accounts` opens configured IMAP and SMTP connections without sending a message.
 
 ### Local Windows build
 
 
-After building and testing, `node dist/index.js --install-codex-local` runs that checkout as the shared Windows service. This disables npm refresh and runtime auto-update for that installation. Rebuild and rerun the installer to update it. `--install-codex` also keeps this fork; it does not select upstream. Account definitions and credentials are reused.
+After building and testing, `node dist/index.js --install-codex-local` runs that checkout as the shared Windows service. This disables npm refresh and runtime auto-update for that installation. Rebuild and rerun the installer to update it. `--install-codex` also keeps this distribution; it does not select upstream. Account definitions and credentials are reused.
 
 `npm run backup:windows-service` backs up the task, service files, and Codex configuration under the local mail-mcp configuration directory. Keep these backups private. `npm run probe:draft-workflow -- --check` checks the draft operation catalog and lists folders without writing mail. It requires `MAIL_MCP_ACCOUNT_ID` and `MAIL_MCP_BEARER_TOKEN`. The separate `--prepare` mode creates and updates a test draft and must be explicitly requested; it never sends.
 
 ## Release
 
-This fork is marked private in package.json to prevent accidental npm publication. The upstream npm publishing workflow is disabled for this repository. Delivery is a local build from a reviewed commit.
+This package is marked private in package.json to prevent accidental npm publication. The upstream npm publishing workflow is disabled for this repository. Delivery is a local build from a reviewed commit.
 
 ## License
 

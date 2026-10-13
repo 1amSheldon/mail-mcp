@@ -45,7 +45,7 @@ export function isVersionNewer(candidate: string, current: string): boolean {
 }
 
 export async function fetchLatestPackageVersion(): Promise<string> {
-  throw new Error('This fork uses reviewed local builds. Update the fork checkout and rebuild; upstream npm updates are disabled.');
+  throw new Error('This distribution uses reviewed local builds. Update the project checkout and rebuild; upstream npm updates are disabled.');
 }
 
 export function startAutoUpdateMonitor(

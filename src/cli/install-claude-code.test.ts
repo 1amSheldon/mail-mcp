@@ -224,7 +224,7 @@ describe('Claude Code installer', () => {
   it('installs and updates the bundled Claude skill with an exact backup', async () => {
     const first = await installClaudeCodeSkill(claudeHome);
     const bundled = await readFile(first.skillPath, 'utf8');
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       skillPath: join(claudeHome, 'skills', 'mail-mcp', 'SKILL.md'),
       changed: true,
     });

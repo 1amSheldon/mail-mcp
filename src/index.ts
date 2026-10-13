@@ -1704,13 +1704,13 @@ Options:
   --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
-  --install-claude            Write a local-fork command to Claude Desktop config and exit
-  --install-claude-code       Register this local fork at user scope in Claude Code
+  --install-claude            Write a local-build command to Claude Desktop config and exit
+  --install-claude-code       Register this local build at user scope in Claude Code
   --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
   --skip-skill                Preserve skills without installing the bundled skill
   --install-codex-local       Install this local build as the Windows service without npm auto-updates
-  --install-codex-stdio       Write a local-fork stdio command to Codex config
-  --auto-update-seconds N     Compatibility option; upstream updates are disabled in this fork
+  --install-codex-stdio       Write a local-build stdio command to Codex config
+  --auto-update-seconds N     Compatibility option; upstream updates are disabled in this distribution
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);

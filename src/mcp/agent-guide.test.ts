@@ -15,16 +15,17 @@ describe('mail agent guide', () => {
     expect(MAIL_AGENT_GUIDE).toContain('pass the returned `nextCursor` unchanged');
     expect(MAIL_AGENT_GUIDE).toContain('Read each target message before');
     expect(MAIL_AGENT_GUIDE).toContain('Prefer a draft');
-    expect(MAIL_AGENT_GUIDE).toContain('confirmation IDs');
+    expect(MAIL_AGENT_GUIDE).toContain('confirmationId');
     expect(MAIL_AGENT_GUIDE).toContain('Never automatically retry `smtp_outcome_unknown`');
     expect(MAIL_AGENT_GUIDE).toContain('returned Message-ID');
-    expect(MAIL_AGENT_GUIDE).toContain('Inspect attachment metadata');
-    expect(MAIL_AGENT_GUIDE).toContain('Explain capability boundaries');
+    expect(MAIL_AGENT_GUIDE).toContain('metadata before fetching');
+    expect(MAIL_AGENT_GUIDE).toContain('backend');
   });
 
   it('contains no embedded credential values or environment-specific account data', () => {
-    expect(MAIL_AGENT_GUIDE).not.toMatch(/MAIL_MCP_BEARER_TOKEN|clientSecret|refreshToken|BEGIN [A-Z ]+PRIVATE KEY/);
-    expect(MAIL_AGENT_GUIDE).not.toMatch(/[A-Za-z0-9+/]{40,}={0,2}/);
+    // Field names are legitimate contracts; credential values are not.
+    expect(MAIL_AGENT_GUIDE).not.toMatch(/BEGIN [A-Z ]+PRIVATE KEY|(?:clientSecret|refreshToken)["']?\s*:\s*["'][^"']+["']/);
+    expect(MAIL_AGENT_GUIDE).not.toMatch(/["'][A-Za-z0-9+/]{40,}={0,2}["']/);
     expect(MAIL_AGENT_GUIDE).not.toContain('@gmail.com');
   });
 

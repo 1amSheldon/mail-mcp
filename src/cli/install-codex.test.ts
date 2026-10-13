@@ -207,7 +207,7 @@ describe('installCodex', () => {
     const first = await installCodexSkill(codexHome);
     const installed = await readFile(first.skillPath, 'utf8');
 
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       skillPath: join(codexHome, 'skills', 'mail-mcp', 'SKILL.md'),
       changed: true,
     });

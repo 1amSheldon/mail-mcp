@@ -1,7 +1,7 @@
 {
   "name": "@starychenko/mail-mcp",
-  "version": "3.0.1-fork.1",
-  "description": "Email MCP server for Codex and Claude with IMAP, SMTP, Apple Mail, Microsoft, and Mailtrap",
+  "version": "3.1.0",
+  "description": "Mail MCP maintained by starychenko: IMAP/SMTP, Zimbra, Apple Mail, Microsoft and Mailtrap for Codex and Claude",
   "keywords": [
     "mcp",
     "mcp-server",
@@ -22,9 +22,10 @@
     "mailtrap",
     "codex",
     "claude",
-    "email-automation"
+    "email-automation",
+    "zimbra"
   ],
-  "author": "1amSheldon",
+  "author": "starychenko",
   "license": "MIT",
   "publishConfig": {
     "access": "public"
@@ -46,11 +47,13 @@
   },
   "files": [
     "dist/**/*.js",
-    "skills/mail-mcp/SKILL.md"
+    "skills/mail-mcp/**/*.md"
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "npm run clean && tsc && node scripts/prepare-bin.mjs",
+    "build": "npm run docs:check && npm run clean && tsc && node scripts/prepare-bin.mjs",
+    "docs:generate": "node scripts/generate-agent-guide.mjs",
+    "docs:check": "node scripts/generate-agent-guide.mjs --check",
     "start": "node dist/index.js",
     "test": "vitest run",
     "check:english": "node scripts/check-english.mjs",
@@ -93,5 +96,11 @@
   "overrides": {
     "deepmerge-ts": "^8.0.0"
   },
-  "private": true
+  "private": true,
+  "contributors": [
+    "1amSheldon",
+    "honest-magic",
+    "wiederholung",
+    "Patrick Freyer"
+  ]
 }

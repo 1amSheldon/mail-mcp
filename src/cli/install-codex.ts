@@ -1,4 +1,4 @@
-import { copyFile, lstat, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'smol-toml';
@@ -17,6 +17,7 @@ export interface CodexSkillInstallResult {
   backupPath?: string;
   changed: boolean;
   skipped?: string;
+  rollback?: () => Promise<void>;
 }
 
 export interface CodexHttpServerOptions {
@@ -281,36 +282,62 @@ export async function installCodexSkill(codexHome: string, options: { skip?: boo
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
-  const bundledSkill = await readFile(
-    new URL('../../skills/mail-mcp/SKILL.md', import.meta.url),
-    'utf8'
-  );
-
-  let currentSkill: string | undefined;
-  try {
-    currentSkill = await readFile(skillPath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
+  const source = new URL('../../skills/mail-mcp/', import.meta.url);
+  const references = (await readdir(new URL('references/', source), { withFileTypes: true }))
+    .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
+    .map(entry => `references/${entry.name}`).sort();
+  // Install the entrypoint last, after every linked reference is available.
+  const files = [...references, 'SKILL.md'];
+  const paths = files.map(file => join(dirname(skillPath), file));
+  for (const path of [join(dirname(skillPath), 'references'), ...paths, ...paths.map(path => `${path}.mail-mcp.bak`)]) {
+    try {
+      if ((await lstat(path)).isSymbolicLink()) return { skillPath, changed: false, skipped: 'Externally managed linked skill' };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
-
-  if (currentSkill === bundledSkill) {
+  const contents = await Promise.all(files.map(file => readFile(new URL(file, source), 'utf8')));
+  const snapshots = await Promise.all(paths.map(snapshotTextFile));
+  if (snapshots.every((snapshot, index) => snapshot.content === contents[index])) {
     return { skillPath, changed: false };
   }
-  if (currentSkill !== undefined && !options.replaceExisting) {
+  if (snapshots.some(snapshot => snapshot.content !== undefined) && !options.replaceExisting) {
     return { skillPath, changed: false, skipped: 'Existing skill preserved; update it through its source repository or explicitly replace it' };
   }
-
-  await mkdir(dirname(skillPath), { recursive: true });
+  const written: Array<{ before: TextFileSnapshot; installed: string }> = [];
+  let rolledBack = false;
+  const rollback = async () => {
+    if (rolledBack) return;
+    // Do not erase edits made after installation, or follow a newly linked path.
+    for (const { before, installed } of written) {
+      for (const path of [join(codexHome, 'skills'), dirname(skillPath), dirname(before.path), before.path]) {
+        if ((await lstat(path)).isSymbolicLink()) throw new Error(`Skill rollback preserved a linked path: ${path}`);
+      }
+      if (await readFile(before.path, 'utf8') !== installed) throw new Error(`Skill rollback preserved a changed file: ${before.path}`);
+    }
+    for (const { before } of [...written].reverse()) await restoreTextFile(before);
+    rolledBack = true;
+  };
   let backupPath: string | undefined;
-  if (currentSkill !== undefined) {
-    backupPath = `${skillPath}.mail-mcp.bak`;
-    await copyFile(skillPath, backupPath);
+  try {
+    for (const [index, snapshot] of snapshots.entries()) {
+      if (snapshot.content === contents[index]) continue;
+      await mkdir(dirname(snapshot.path), { recursive: true });
+      if (snapshot.content !== undefined) {
+        const backup = await snapshotTextFile(`${snapshot.path}.mail-mcp.bak`);
+        await writeTextFileAtomic(backup.path, snapshot.content);
+        written.push({ before: backup, installed: snapshot.content });
+        if (snapshot.path === skillPath) backupPath = backup.path;
+      }
+      await writeTextFileAtomic(snapshot.path, contents[index]);
+      written.push({ before: snapshot, installed: contents[index] });
+    }
+  } catch (error) {
+    try { await rollback(); }
+    catch (rollbackError) { throw new AggregateError([error, rollbackError], 'Skill installation and rollback failed'); }
+    throw error;
   }
-  await writeTextFileAtomic(skillPath, bundledSkill);
-
-  return { skillPath, backupPath, changed: true };
+  return { skillPath, backupPath, changed: true, rollback };
 }
 
 export function getCodexSkillPath(codexHome: string): string {
@@ -355,19 +382,23 @@ export async function installCodexBundle(
   codexHome: string,
   server: CodexBundleServer
 ): Promise<CodexBundleInstallResult> {
-  const skillPath = getCodexSkillPath(codexHome);
   const snapshots = await Promise.all([
     configPath,
     `${configPath}.mail-mcp.bak`,
   ].map(snapshotTextFile));
 
-  const rollback = () => restoreCodexBundle(snapshots);
+  let skillRollback: (() => Promise<void>) | undefined;
+  const rollback = async () => {
+    const results = await Promise.allSettled([restoreCodexBundle(snapshots), skillRollback?.()]);
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (errors.length) throw new AggregateError(errors.map(result => result.reason), 'Installation rollback failed');
+  };
 
   try {
     const skill = await installCodexSkill(codexHome, { skip: server.skipSkill });
     // Default policy creates only absent skills. Existing/linked/skipped files
     // are never read for rollback or written by it.
-    if (skill.changed) snapshots.push({ path: skillPath });
+    skillRollback = skill.rollback;
     const config = server.transport === 'http'
       ? await installCodexHttp(configPath, server.options, server.serverName)
       : await installCodex(configPath, server.npxArgs, server.serverName);
