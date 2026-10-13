@@ -23,7 +23,7 @@ administrator API. No deployment or changes to corporate mail are part of this P
   explicit partial results, consistent errors and no automatic uncertain writes.
 - [x] Skills: exact discoverable input contracts, realistic end-to-end workflows,
   verification, recovery, side effects and version-dependent limitations.
-- [ ] Qualification: focused tests, full release gates, review agents, fixes, PR.
+- [x] Qualification: focused tests, full release gates, review agents, fixes, PR.
 
 ## Sources and verification
 
@@ -139,8 +139,36 @@ scope. Evidence lives in src/providers/zimbra/*.test.ts, schema-derived catalog
 and documentation tests, plus the pinned source contracts listed above. Live
 corporate writes/delivery, server-specific compatibility and deployment remain
 untested and excluded from this PR's execution authorization. The separate
-ZIMBRA-ACCEPTANCE.md procedure defines that opt-in verification. PR creation,
-independent reviews and resolution of confirmed findings remain pending.
+ZIMBRA-ACCEPTANCE.md procedure defines that opt-in verification.
+
+## Final review and qualification
+
+PR: https://github.com/starychenko/mail-mcp/pull/4
+
+Three independent agents reviewed mail/delivery, calendar/Briefcase protocol,
+and native policy/documentation after PR creation. Six actionable findings were
+fixed, then the responsible agents re-reviewed the fixes and reported no
+remaining findings in those changes:
+
+- 467a425: correct LDAP generalized-time OOO dates and allow revoking Zimbra's
+  special public principal for folders and documents.
+- 7be49fe: preserve native DURATION and implicit-end appointments in partial
+  edits/recurrence exceptions; an explicit end replaces the old duration.
+- b82b6f8: preserve Cc-only/Bcc-only drafts, rebuild threading from a newly
+  selected original (clear it for forwards), and expose dumpster search with
+  scope-bound cursors and a complete recovery workflow in the skill.
+
+Final full release:check passed on Node 24 at b82b6f8: 1,286 unit tests in
+87 files, 8 integration tests, build/docs/English checks, stdio/HTTP/import/
+installed-command smoke and npm audit with zero vulnerabilities. Three external
+IMAP tests remain skipped because the external fixture was not configured.
+Reviewers also independently reran the relevant focused suites. GitHub CI runs
+the repository checks on Windows/Linux with Node 20/22; current status is attached
+to the PR. The following documentation commit only records this qualification.
+
+This is repository/source and automated qualification, not a live-server or
+recipient-delivery certification. No deployment, release, merge or corporate
+mailbox writes were performed.
 
 ## Delivery sequence
 
