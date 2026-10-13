@@ -24,6 +24,13 @@ vi.mock('../security/keychain.js', () => ({
   removeZimbraCredentials: vi.fn(),
 }));
 
+// CLI tests exercise removal ordering, not the filesystem lock. Dedicated
+// login-state tests exercise real locks under their own temporary directories.
+vi.mock('../providers/zimbra/login-state.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../providers/zimbra/login-state.js')>(),
+  withZimbraLoginLock: async (_id: string, action: () => Promise<unknown>) => action(),
+}));
+
 import { handleAccountsCommand, inferSmtpHost } from './accounts.js';
 import { getConfiguredAccounts, saveConfiguredAccounts } from '../config.js';
 import { removeCredentials, saveCredentials, removeZimbraCredentials } from '../security/keychain.js';

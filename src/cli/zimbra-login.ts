@@ -26,11 +26,15 @@ export async function loginZimbraAccount(account: ZimbraConfiguredAccount, promp
       let result: ZimbraAuthentication;
       try { result = await client.authenticateWithDevice(password, undefined, trusted ? { trustedDevice: trusted } : { register: true }); }
       catch (error) {
-        if (!(error instanceof ZimbraAuthChallenge)) throw error;
-        if (error.trustedDevicesEnabled === false) console.log('The server reports that trusted devices are disabled. This login will save only a session.');
+        const challenge = error instanceof ZimbraAuthChallenge ? error : undefined;
+        // Some servers reject revoked trust before returning an OTP challenge.
+        // Only this explicit local login may try fresh password/OTP once.
+        const rejectedSavedTrust = trusted && error instanceof ZimbraError && error.code === 'AUTH_FAILED';
+        if (!challenge && !rejectedSavedTrust) throw error;
+        if (challenge?.trustedDevicesEnabled === false) console.log('The server reports that trusted devices are disabled. This login will save only a session.');
         const code = (await prompt.secret('Current authenticator or one-use backup code: ')).trim();
         if (!code) throw new ZimbraError('INVALID_INPUT', 'Second-factor code is required.');
-        result = await client.authenticateWithDevice(password, code, error.trustedDevicesEnabled === false ? undefined : { register: true });
+        result = await client.authenticateWithDevice(password, code, challenge?.trustedDevicesEnabled === false ? undefined : { register: true });
       }
       let remember = false;
       if (result.trustedDevice) {
