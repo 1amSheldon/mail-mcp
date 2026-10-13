@@ -318,7 +318,7 @@ async function addAccount(): Promise<void> {
     }
 
     // useTLS
-    const tlsRaw = await rl.question('Use TLS? (y/n) [y]: ');
+    const tlsRaw = await rl.question('Use implicit TLS? (y/n; n requires STARTTLS) [y]: ');
     const useTLS = tlsRaw.trim().toLowerCase() !== 'n';
 
     // smtpHost

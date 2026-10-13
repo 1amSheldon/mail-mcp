@@ -112,6 +112,8 @@ export class ImapClient {
       host: this.account.host,
       port: this.account.port,
       secure: this.account.useTLS,
+      // Explicit TLS is mandatory when implicit TLS is disabled; never fall back to LOGIN in cleartext.
+      ...(!this.account.useTLS ? { doSTARTTLS: true } : {}),
       auth: authConfig,
       logger: false
     });

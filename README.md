@@ -213,6 +213,8 @@ Mail.app automation is useful for native rules and accounts that do not expose s
 
 IMAP/SMTP OAuth2 uses pre-provisioned XOAUTH2 credentials and refreshes them at runtime. The package does not create provider applications or run browser consent flows.
 
+IMAP `useTLS: true` uses implicit TLS (normally port 993). `useTLS: false` requires a successful STARTTLS upgrade (normally port 143); servers without STARTTLS are rejected before authentication. Plaintext IMAP authentication is not supported.
+
 For Gmail, the shortest personal setup is usually a Google app password with 2-Step Verification enabled:
 
 | Setting | Value |
