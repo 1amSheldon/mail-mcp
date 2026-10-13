@@ -165,7 +165,7 @@ export class ImapClient {
     }
   }
 
-  async fetchMessageBody(uid: string, folder: string = 'INBOX'): Promise<ParsedMail> {
+  async fetchMessageBody(uid: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<ParsedMail> {
     if (!this.client) {
       throw new Error('Not connected');
     }
@@ -173,6 +173,12 @@ export class ImapClient {
 
     const lock = await this.client.getMailboxLock(folder);
     try {
+      if (expectedUidValidity !== undefined) {
+        const mailbox = this.client.mailbox;
+        if (!mailbox || mailbox.uidValidity.toString() !== expectedUidValidity) {
+          throw new Error('Mailbox identity changed before body fetch');
+        }
+      }
       const msg = await this.client.fetchOne(uid, { source: true, internalDate: true }, { uid: true });
       if (!msg || !msg.source) {
         throw new Error(`Message with UID ${uid} not found`);

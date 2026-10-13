@@ -37,6 +37,19 @@ async function fixture(overrides: Partial<EmailAccount> = {}) {
 }
 
 describe('threaded reply drafts with real MIME composition', () => {
+  it('does not reuse cached bodies across UIDVALIDITY generations', async () => {
+    const f = await fixture();
+    await f.service.createReplyDraft(f.locator, 'Old reply');
+    const next = await simpleParser('From: new@example.test\r\nMessage-ID: <new@example.test>\r\n\r\nNew');
+    vi.mocked(f.service.imap.fetchMessageBody).mockResolvedValue(next);
+    vi.mocked(f.service.imap.getMailboxIdentity).mockImplementation(async path => ({ path, uidValidity: '2' }));
+    const locator = encodeMessageLocator({ accountId: 'reply-test', mailbox: 'INBOX', uidValidity: '2', uid: 1 });
+    await f.service.createReplyDraft(locator, 'New reply');
+    const draft = await simpleParser(f.append.mock.calls[1][1]);
+    expect(draft.to).toMatchObject({ value: [{ address: 'new@example.test' }] });
+    expect(draft.inReplyTo).toBe('<new@example.test>');
+    expect(f.service.imap.fetchMessageBody).toHaveBeenCalledTimes(2);
+  });
   it('saves a reply with Reply-To, a complete reference chain, HTML and a new attachment without SMTP', async () => {
     const f = await fixture();
     const result = await f.service.createReplyDraft(f.locator, '<p>Reviewed reply</p>', {

@@ -10,7 +10,7 @@ interface CacheEntry {
 
 /**
  * In-memory TTL cache for parsed email bodies.
- * Keys use `${accountId}:${folder}:${uid}`. Entries expire on read and the
+ * Keys encode account, folder, UIDVALIDITY and UID. Entries expire on read and the
  * oldest entry is removed at capacity. Each MailService owns one cache.
  */
 export class MessageBodyCache {
@@ -46,6 +46,10 @@ export class MessageBodyCache {
 
   delete(key: string): void {
     this.store.delete(key);
+  }
+
+  clear(): void {
+    this.store.clear();
   }
 
   get size(): number {

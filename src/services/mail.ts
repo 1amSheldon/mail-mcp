@@ -937,14 +937,15 @@ export class MailService {
   }
 
   private async _cachedFetchBody(uid: string, folder: string): Promise<ParsedMail> {
-    const key = `${this.account.id}:${folder}:${uid}`;
+    const identity = await this.imapClient.getMailboxIdentity(folder);
+    const key = JSON.stringify([this.account.id, folder, identity.uidValidity, uid]);
     const cached = this.bodyCache.get(key);
     if (cached) return cached;
 
     const existingFetch = this.bodyFetches.get(key);
     if (existingFetch) return existingFetch;
 
-    const fetch = this.imapClient.fetchMessageBody(uid, folder)
+    const fetch = this.imapClient.fetchMessageBody(uid, folder, identity.uidValidity)
       .then(parsed => {
         if (this.bodyFetches.get(key) === fetch) {
           this.bodyCache.set(key, parsed);
@@ -961,10 +962,11 @@ export class MailService {
     return fetch;
   }
 
-  invalidateBodyCache(folder: string, uid: string): void {
-    const key = `${this.account.id}:${folder}:${uid}`;
-    this.bodyCache.delete(key);
-    this.bodyFetches.delete(key);
+  invalidateBodyCache(_folder: string, _uid: string): void {
+    // Clear every generation, including in-flight reads, so a completed stale
+    // request cannot repopulate the cache after a mutation.
+    this.bodyCache.clear();
+    this.bodyFetches.clear();
   }
 
   /**
@@ -1201,6 +1203,8 @@ export class MailService {
 
   async renameMailbox(path: string, newPath: string): Promise<{ path: string; newPath: string }> {
     const result = await this.imapClient.renameMailbox(path, newPath);
+    this.bodyCache.clear();
+    this.bodyFetches.clear();
     this.clearMailboxResolutionCaches();
     this.paginationStore.clear();
     return result;
@@ -1208,6 +1212,8 @@ export class MailService {
 
   async deleteMailbox(path: string): Promise<{ path: string }> {
     const result = await this.imapClient.deleteMailbox(path);
+    this.bodyCache.clear();
+    this.bodyFetches.clear();
     this.clearMailboxResolutionCaches();
     this.paginationStore.clear();
     return result;

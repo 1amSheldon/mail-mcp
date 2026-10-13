@@ -609,6 +609,8 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     const firstRead = service.readEmail('shared');
     const secondRead = service.readEmail('shared');
 
+    await vi.waitFor(() => expect(mockFetchMessageBody).toHaveBeenCalledTimes(1));
+
     expect(mockFetchMessageBody).toHaveBeenCalledTimes(1);
     resolveBody(makeParsedMail({}));
     await expect(Promise.all([firstRead, secondRead])).resolves.toHaveLength(2);
@@ -638,6 +640,7 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     await service.connect();
 
     const staleRead = service.readEmail('changed');
+    await vi.waitFor(() => expect(mockFetchMessageBody).toHaveBeenCalledTimes(1));
     service.invalidateBodyCache('INBOX', 'changed');
     await expect(service.readEmail('changed')).resolves.toContain('Current subject');
 
@@ -747,7 +750,7 @@ describe('MailService replyEmail', () => {
     const service = new MailService(baseAccount, false);
     await service.connect();
     await service.replyEmail('42', 'INBOX', 'My reply');
-    expect(mockFetchMessageBody).toHaveBeenCalledWith('42', 'INBOX');
+    expect(mockFetchMessageBody).toHaveBeenCalledWith('42', 'INBOX', '1');
   });
 
   it('sends to the original sender address', async () => {
