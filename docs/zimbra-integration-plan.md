@@ -7,7 +7,7 @@ administrator API. No deployment or changes to corporate mail are part of this P
 
 - [x] Mail: local/base64 uploads, MIME originals, attachment extraction, inline
   images, reply/reply-all/forward drafts, signatures, identities and Reply-To.
-- [ ] Draft integrity: partial updates preserve omitted content and attachments;
+- [x] Draft integrity: partial updates preserve omitted content and attachments;
   concurrency conflicts are explicit; send recovery survives process restart;
   recipient restrictions cannot be bypassed by webmail races or scheduling.
 - [x] Organization: folders, copy, flags, spam, deletion/recovery, tags, counts.
@@ -16,12 +16,12 @@ administrator API. No deployment or changes to corporate mail are part of this P
   unsupported server rule constructs, recipient policy for forwarding actions.
 - [x] Preferences: read/update supported user settings, signatures, identities,
   out-of-office, supported server capability discovery.
-- [ ] Collaboration: sharing and mountpoints, calendars, invitations, recurrence,
+- [x] Collaboration: sharing and mountpoints, calendars, invitations, recurrence,
   free/busy, tasks, reminders and native scheduled sending.
 - [x] Briefcase: folders, document upload/download, revisions and document actions.
-- [ ] Operations: authentication lifetime, remote session checks, bounded paging,
+- [x] Operations: authentication lifetime, remote session checks, bounded paging,
   explicit partial results, consistent errors and no automatic uncertain writes.
-- [ ] Skills: exact discoverable input contracts, realistic end-to-end workflows,
+- [x] Skills: exact discoverable input contracts, realistic end-to-end workflows,
   verification, recovery, side effects and version-dependent limitations.
 - [ ] Qualification: focused tests, full release gates, review agents, fixes, PR.
 
@@ -122,17 +122,25 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   subsequent documentation edits passed the five documentation contract tests.
   Before PR: complete new calendar attachment composition, audit remaining
   operational gaps, then rerun relevant final gates and create the review PR.
-- Current increment: appointment/task creation and guarded edits accept new
+- 8a9146a: appointment/task creation and guarded edits accept new
   local/base64 attachments and inline CIDs. Omission preserves original parts;
   an explicit list replaces them and an empty list removes them. All files are
   validated before uploads, with an aggregate 25 MiB bound, and upload failure
   prevents the calendar mutation. The 39 focused calendar tests pass.
 
-Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
-including actual MIME/PDF parsing and mock-transport workflows. Live corporate
-writes remain untested.
-The complete acceptance matrix above is still pending; do not treat these
-increments as release qualification.
+Pre-review qualification at 8a9146a: full release:check passed on Node 24,
+including 1,273 unit tests, 8 integration tests, build/docs/English validation,
+stdio/HTTP/import/installed-command smoke and npm audit (zero vulnerabilities).
+Three external IMAP integration tests were skipped without their fixture.
+The generated public schemas contain 42 reads and 90 mutations for Zimbra.
+
+The checked rows describe implemented and automated/source-qualified repository
+scope. Evidence lives in src/providers/zimbra/*.test.ts, schema-derived catalog
+and documentation tests, plus the pinned source contracts listed above. Live
+corporate writes/delivery, server-specific compatibility and deployment remain
+untested and excluded from this PR's execution authorization. The separate
+ZIMBRA-ACCEPTANCE.md procedure defines that opt-in verification. PR creation,
+independent reviews and resolution of confirmed findings remain pending.
 
 ## Delivery sequence
 
