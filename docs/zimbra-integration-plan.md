@@ -12,7 +12,7 @@ administrator API. No deployment or changes to corporate mail are part of this P
   recipient restrictions cannot be bypassed by webmail races or scheduling.
 - [x] Organization: folders, copy, flags, spam, deletion/recovery, tags, counts.
 - [x] Contacts: create/update/delete, groups, GAL lookup and autocomplete.
-- [ ] Rules: read and safely replace incoming/outgoing rules, activation, preserve
+- [x] Rules: read and safely replace incoming/outgoing rules, activation, preserve
   unsupported server rule constructs, recipient policy for forwarding actions.
 - [x] Preferences: read/update supported user settings, signatures, identities,
   out-of-office, supported server capability discovery.
@@ -49,10 +49,14 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
 - 4b6d5af: reply/reply-all/forward drafts, native identities and
   signatures, both body formats, attachment text extraction, stats and copy.
 
-- Current increment: contact groups, GAL paging, autocomplete, identities, native
+- 0fe06f2: contact groups, GAL paging, autocomplete, identities, native
   preferences and out-of-office with recipient-policy enforcement.
+- Current increment: revisioned incoming/outgoing filter reads, typed nested
+  conditions/actions, targeted/list replacement retaining unknown constructs,
+  bounded apply, forwarding policy and actual read-back. Server lacks atomic CAS;
+  this limitation is explicit in results and skill guidance.
 
-Qualification so far: TypeScript passes; all 1,182 unit tests pass on Node 24,
+Qualification so far: TypeScript passes; all 1,194 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate
 writes remain untested.
 The complete acceptance matrix above is still pending; do not treat these

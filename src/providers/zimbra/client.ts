@@ -11,6 +11,7 @@ import { ZimbraSendJournal, sendStatus } from './send-journal.js';
 import { validateEmailAddresses } from '../../utils/validation.js';
 import { addresses, escapeHtml, parsedAttachments, parseMime, replyEnvelope } from './compose.js';
 import { checkPreferencePolicy } from './preference-policy.js';
+import { ZimbraFilters, FILTER_WRITE_SCHEMAS, type FilterWriteOperation } from './filters.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -87,6 +88,7 @@ export interface ZimbraClientOptions {
 
 /** User SOAP API only. Never retries a write or exports authentication material. */
 export class ZimbraClient {
+  private readonly filters: ZimbraFilters;
   private readonly sendJournal: ZimbraSendJournal;
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
@@ -97,6 +99,7 @@ export class ZimbraClient {
     this.endpoint = validateZimbraEndpoint(account.endpoint);
     this.sendJournal = new ZimbraSendJournal(JSON.stringify([account.id, this.endpoint, account.user]), options.journalDirectory);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.filters = new ZimbraFilters((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.allowedRecipients);
   }
   disconnect(): void { this.closed = true; this.cursors.clear(); for (const c of this.pending) c.abort(); }
 
@@ -186,6 +189,7 @@ export class ZimbraClient {
       return this.request(native.name, native.params, native.namespace);
     }
     switch (operation) {
+      case 'getFilterRules': return this.filters.read((v as { direction: 'incoming' | 'outgoing' }).direction);
       case 'getSendStatus': {
         const record = await this.sendJournal.read((v as { draftId: string }).draftId);
         return record ? sendStatus(record) : { status: 'not_recorded', warning: 'No local record is not evidence that the message was never sent elsewhere.' };
@@ -257,6 +261,7 @@ export class ZimbraClient {
     const parsed = schema.safeParse(input);
     if (!parsed.success) throw new ZimbraError('INVALID_INPUT', 'Invalid fields for Zimbra ' + operation + '.');
     const v = parsed.data;
+    if (Object.hasOwn(FILTER_WRITE_SCHEMAS, operation)) return this.filters.write(operation as FilterWriteOperation, v);
     if (Object.hasOwn(NATIVE_WRITE_OPERATIONS, operation)) {
       const native = NATIVE_WRITE_OPERATIONS[operation as keyof typeof NATIVE_WRITE_OPERATIONS].request(v);
       if (native.name === 'ModifyPrefs') checkPreferencePolicy(native.params._attrs as Record<string, string | string[]>, this.account.allowedRecipients);

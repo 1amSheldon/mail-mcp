@@ -1,5 +1,7 @@
 # Zimbra SOAP
 
+For server filters, see [incoming and outgoing rules](zimbra-rules.md).
+
 Use only when list_accounts reports backend `zimbra`. IMAP accounts on a Zimbra
 host remain IMAP accounts. Do not revive a disabled legacy MCP or change its
 credentials merely because an account name contains Zimbra.

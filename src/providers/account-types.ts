@@ -155,7 +155,7 @@ export interface AccountCapabilityDescriptor {
 export const ACCOUNT_BACKEND_CAPABILITIES = {
   zimbra: {
     backend: 'zimbra', credentialSource: 'keychain', readMail: true, sendMail: true,
-    manageMailboxes: true, manageRules: false, providerApi: true,
+    manageMailboxes: true, manageRules: true, providerApi: true,
     updateDraft: true, sendDraft: true, createReplyDraft: true, createReplyAllDraft: true,
   },
   'imap-smtp': {
