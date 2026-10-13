@@ -27,17 +27,54 @@ describe('Zimbra SOAP transport and authentication', () => {
     expect(body().Body.AuthRequest).toMatchObject({ password: { _content: 'pass' }, twoFactorCode: { _content: '123456' } });
     expect(body().Header.context.authToken).toBeUndefined();
   });
+  it.each([{ authToken: { _content: 'session' } }, { authToken: [{ _content: 'session' }] }])('accepts singleton and list-valued auth tokens: %j', async ({ authToken }) => {
+    const { client, fetch } = make(response('Auth', { authToken, lifetime: 60000 }));
+    await expect(client.authenticate('pass', '123456')).resolves.toMatchObject({ authToken: 'session' });
+    expect(fetch.mock.calls[0][1]!.headers).not.toHaveProperty('cookie');
+  });
+  it.each([{ authToken: [] }, { authToken: [{ _content: 'one' }, { _content: 'two' }] }])('rejects ambiguous or missing tokens: %j', async ({ authToken }) => {
+    const { client } = make(response('Auth', { authToken, lifetime: 60000 }));
+    await expect(client.authenticate('pass')).rejects.toMatchObject({ code: 'AUTH_FAILED' });
+  });
+  it('routes authenticated SOAP requests with a cookie and context token', async () => {
+    const { client, fetch, body } = make(response('GetTag', {}));
+    await client.executeRead('listTags', {});
+    expect(fetch.mock.calls[0][1]!.headers).toMatchObject({ cookie: 'ZM_AUTH_TOKEN=secret-token' });
+    expect(body().Header.context.authToken).toEqual({ _content: 'secret-token' });
+  });
+  it.each(['bad;cookie=x', 'bad\r\nheader', 'bad token', 'bad"token', 'bad\\token'])('rejects unsafe cookie tokens before dispatch: %j', async authToken => {
+    const fetch = vi.fn();
+    const client = new ZimbraClient(account, { fetch, sessionProvider: async () => ({ ...session(), authToken }) });
+    await expect(client.executeRead('listTags', {})).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each([401, 403])('classifies empty and HTML HTTP %s for reads and writes without retries', async status => {
+    for (const body of [null, '<html>denied</html>']) {
+      for (const write of [false, true]) {
+        const { client, fetch } = make(new Response(body, { status }));
+        await expect(write ? client.executeWrite('deleteTag', { tagId: '7' }) : client.executeRead('listTags', {}))
+          .rejects.toMatchObject({ code: status === 401 ? 'AUTH_REQUIRED' : 'ACCESS_DENIED' });
+        expect(fetch).toHaveBeenCalledOnce();
+      }
+    }
+  });
+  it('preserves an explicit SOAP auth fault returned with HTTP 403', async () => {
+    const denied = fault('service.AUTH_EXPIRED');
+    const { client } = make(new Response(await denied.text(), { status: 403 }));
+    await expect(client.executeWrite('deleteTag', { tagId: '7' })).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+  });
   it('rejects a temporary token when a second factor is still required', async () => {
     const { client } = make(response('Auth', { authToken: { _content: 'temporary' }, lifetime: 60000, twoFactorAuthRequired: true }));
     await expect(client.authenticate('pass')).rejects.toMatchObject({ code: 'TWO_FACTOR_REQUIRED' });
   });
   it('accepts a complete MFA session with its server lifetime', async () => {
     const { client, body } = make(response('Auth', { authToken: { _content: 'session' }, lifetime: 60000 }));
-    const result = await client.authenticate('pass', undefined, 'recovery');
+    const result = await client.authenticate('pass', 'backup-code');
     expect(result).toMatchObject({ user: account.user, endpoint: account.endpoint, authToken: 'session' });
     expect(result.expiresAt).toBeGreaterThan(Date.now());
     expect(JSON.stringify(result)).not.toContain('pass');
-    expect(body().Body.AuthRequest.recoveryCode).toEqual({ _content: 'recovery' });
+    expect(body().Body.AuthRequest.twoFactorCode).toEqual({ _content: 'backup-code' });
+    expect(body().Body.AuthRequest.recoveryCode).toBeUndefined();
   });
   it.each(['service.AUTH_EXPIRED', 'service.AUTH_REQUIRED', 'account.AUTH_FAILED'])('requires local reauthentication on %s without retries', async code => {
     const { client, fetch } = make(fault(code));

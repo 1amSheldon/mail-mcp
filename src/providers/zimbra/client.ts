@@ -12,6 +12,12 @@ function object(value: unknown): Obj {
 function content(value: unknown): unknown {
   return value && typeof value === 'object' && '_content' in value ? (value as Obj)._content : value;
 }
+function sessionCookie(token: string): string {
+  if (!token || /[^\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]/.test(token)) {
+    throw new ZimbraError('AUTH_REQUIRED', 'Invalid Zimbra session. Run accounts login ACCOUNT_ID locally.');
+  }
+  return 'ZM_AUTH_TOKEN=' + token;
+}
 const list = (value: unknown): unknown[] => value === undefined ? [] : Array.isArray(value) ? value : [value];
 const truth = (value: unknown) => value === true || value === 1 || value === '1' || value === 'true';
 
@@ -89,6 +95,7 @@ export class ZimbraClient {
     if (session && (session.endpoint !== this.endpoint || session.user !== this.account.user || session.expiresAt <= Date.now() + 5000)) {
       throw new ZimbraError('AUTH_REQUIRED', 'Zimbra session expired or configuration changed. Run accounts login ACCOUNT_ID locally.');
     }
+    const cookie = session ? sessionCookie(session.authToken) : undefined;
     const controller = new AbortController(); this.pending.add(controller);
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30000);
     let dispatched = false;
@@ -96,14 +103,23 @@ export class ZimbraClient {
       dispatched = true;
       const response = await this.fetchImpl(this.endpoint, {
         method: 'POST', redirect: 'error', signal: controller.signal,
-        headers: { 'content-type': 'application/soap+json; charset=utf-8', accept: 'application/json' },
+        headers: { 'content-type': 'application/soap+json; charset=utf-8', accept: 'application/json', ...(cookie ? { cookie } : {}) },
         body: JSON.stringify({ Header: { context: { _jsns: 'urn:zimbra', ...(session ? { authToken: { _content: session.authToken } } : {}) } },
           Body: { [name + 'Request']: { _jsns: namespace, ...params } } }),
       });
+      if (response.status === 401) {
+        await response.body?.cancel();
+        throw new ZimbraError(auth ? 'AUTH_FAILED' : 'AUTH_REQUIRED', 'Zimbra authentication rejected. Run accounts login ACCOUNT_ID locally.');
+      }
+      // Preserve SOAP auth faults in 403 responses; a generic 403 is an access
+      // policy denial and does not establish that the session has expired.
+      const denied = () => new ZimbraError('ACCESS_DENIED', 'Zimbra access denied (HTTP 403). Check account and proxy permissions.');
+      if (response.status === 403 && !response.body) throw denied();
       const bytes = await boundedBytes(response, 8 * 1024 * 1024);
       let root: Obj;
       try { root = object(JSON.parse(bytes.toString('utf8'))); }
-      catch { throw new ZimbraError(write ? 'OUTCOME_UNKNOWN' : 'PROVIDER_ERROR', 'Zimbra returned an invalid response.'); }
+      catch { if (response.status === 403) throw denied(); throw new ZimbraError(write ? 'OUTCOME_UNKNOWN' : 'PROVIDER_ERROR', 'Zimbra returned an invalid response.'); }
+      if (response.status === 403 && (!root.Body || typeof root.Body !== 'object' || Array.isArray(root.Body))) throw denied();
       const body = object(root.Body);
       if (body.Fault) {
         const fault = object(body.Fault);
@@ -118,9 +134,11 @@ export class ZimbraClient {
         if (auth || code === 'account.TWO_FACTOR_AUTH_FAILED') {
           throw new ZimbraError('AUTH_FAILED', 'Zimbra authentication failed. Check the password, second factor and server policy.');
         }
+        if (response.status === 403) throw denied();
         // Some draft metadata faults occur after content was saved. Do not claim a safe retry.
         throw new ZimbraError(write ? 'OUTCOME_UNKNOWN' : 'PROVIDER_ERROR', 'Zimbra rejected the operation; inspect the server state before repeating a write.');
       }
+      if (response.status === 403) throw denied();
       if (!response.ok || !body[name + 'Response']) throw new ZimbraError(write ? 'OUTCOME_UNKNOWN' : 'PROVIDER_ERROR', 'Unexpected Zimbra response.');
       const result = object(body[name + 'Response']);
       return session ? object(withoutSecrets(result, session.authToken)) : result;
@@ -131,14 +149,14 @@ export class ZimbraClient {
     } finally { clearTimeout(timer); this.pending.delete(controller); }
   }
 
-  async authenticate(password: string, twoFactorCode?: string, recoveryCode?: string): Promise<ZimbraSession> {
+  async authenticate(password: string, twoFactorCode?: string): Promise<ZimbraSession> {
     const result = await this.request('Auth', {
       account: { by: 'name', _content: this.account.user }, password: { _content: password },
       ...(twoFactorCode ? { twoFactorCode: { _content: twoFactorCode } } : {}),
-      ...(recoveryCode ? { recoveryCode: { _content: recoveryCode } } : {}),
     }, 'urn:zimbraAccount', false, {});
     if (truth(content(result.twoFactorAuthRequired))) throw new ZimbraError('TWO_FACTOR_REQUIRED', 'A second authentication factor is required.');
-    const token = content(result.authToken); const lifetime = Number(content(result.lifetime));
+    const tokens = list(result.authToken);
+    const token = tokens.length === 1 ? content(tokens[0]) : undefined; const lifetime = Number(content(result.lifetime));
     if (typeof token !== 'string' || !token || token.length > 16384 || !Number.isSafeInteger(lifetime) || lifetime <= 5000 || lifetime > 365 * 86400000) {
       throw new ZimbraError('AUTH_FAILED', 'Zimbra did not return a usable session.');
     }
@@ -258,9 +276,12 @@ export class ZimbraClient {
     const controller = new AbortController(); this.pending.add(controller);
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30000);
     try {
-      if (/[\r\n;\0]/.test(session.authToken)) throw new ZimbraError('AUTH_REQUIRED', 'Invalid Zimbra session.');
-      const response = await this.fetchImpl(url, { redirect: 'error', signal: controller.signal, headers: { cookie: 'ZM_AUTH_TOKEN=' + session.authToken } });
-      if (response.status === 401 || response.status === 403) throw new ZimbraError('AUTH_REQUIRED', 'Zimbra session rejected. Run accounts login ACCOUNT_ID locally.');
+      const cookie = sessionCookie(session.authToken);
+      const response = await this.fetchImpl(url, { redirect: 'error', signal: controller.signal, headers: { cookie } });
+      if (response.status === 401 || response.status === 403) {
+        await response.body?.cancel();
+        throw new ZimbraError(response.status === 401 ? 'AUTH_REQUIRED' : 'ACCESS_DENIED', response.status === 401 ? 'Zimbra session rejected. Run accounts login ACCOUNT_ID locally.' : 'Zimbra access denied. Check account and proxy permissions.');
+      }
       if (!response.ok) { await response.body?.cancel(); throw new ZimbraError('PROVIDER_ERROR', 'Zimbra attachment request failed.'); }
       const bytes = await boundedBytes(response, v.maxBytes);
       return { messageId: v.messageId, partId: v.partId, contentType: response.headers.get('content-type') ?? 'application/octet-stream', size: bytes.length, transferEncoding: 'base64', contentBase64: bytes.toString('base64') };

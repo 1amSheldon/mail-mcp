@@ -213,9 +213,10 @@ function formatProviderResult(result: unknown, uri: string) {
 
 function providerErrorMessage(error: unknown): string {
   if (error instanceof ZimbraError) return JSON.stringify({ provider: 'zimbra', status: error.code.toLowerCase(),
-    retrySafe: false, message: error.message,
-    nextAction: error.code === 'AUTH_REQUIRED' ? 'Run accounts login ACCOUNT_ID locally. Never paste credentials or OTPs into chat.'
-      : error.code === 'OUTCOME_UNKNOWN' ? 'Inspect the current server state. Never retry this write automatically.' : 'Review the input and server policy.' });
+    retrySafe: ['INVALID_INPUT', 'AUTH_REQUIRED', 'AUTH_FAILED', 'TWO_FACTOR_REQUIRED'].includes(error.code), message: error.message,
+    nextAction: ['AUTH_REQUIRED', 'AUTH_FAILED', 'TWO_FACTOR_REQUIRED'].includes(error.code) ? 'Run accounts login ACCOUNT_ID locally. Never paste credentials or OTPs into chat.'
+      : error.code === 'OUTCOME_UNKNOWN' ? 'Inspect the current server state. Never retry this write automatically.'
+        : error.code === 'ACCESS_DENIED' ? 'Review account permissions and server access policy before retrying.' : 'Review the input and server policy.' });
   if (error instanceof ProviderRuntimeError) {
     return `[${error.code}] ${error.message}`;
   }
@@ -350,6 +351,22 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
     case 'microsoft_mail_send':
       return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
+    case 'zimbra_mail_mutate': {
+      const input = args.input && typeof args.input === 'object' && !Array.isArray(args.input)
+        ? args.input as Record<string, unknown>
+        : {};
+      const operation = String(args.operation);
+      // Only describe action metadata, never message bodies or authentication material.
+      const details = [
+        'draftId', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
+        'to', 'cc', 'bcc', 'subject', 'originalMessageId', 'replyType', 'attachOriginal', 'quoteOriginal',
+      ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
+      if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
+      if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
+      if (operation === 'updateDraft') details.push('replace draft contents with the supplied recipients and body');
+      if (operation === 'moveToTrash') details.push('move messages to Trash');
+      return `Execute Zimbra ${operation} for account ${args.accountId as string}${details.length ? ` (${details.join(', ')})` : ''}`;
+    }
     case 'mailtrap_mutate': {
       const input = args.input && typeof args.input === 'object' && !Array.isArray(args.input)
         ? args.input as Record<string, unknown>

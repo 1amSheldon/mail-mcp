@@ -8,12 +8,12 @@ const account: ZimbraConfiguredAccount = { id: 'z', name: 'Z', backend: 'zimbra'
 const session = { kind: 'zimbra-session-v1' as const, authToken: 'session', endpoint: account.endpoint, user: account.user, expiresAt: Date.now() + 60000 };
 
 describe('Local Zimbra login', () => {
-  it('stores only a completed session after a 2FA challenge', async () => {
+  it.each(['n', 'y'])('stores only a completed session after a 2FA challenge (backup=%s)', async backup => {
     const authenticate = vi.fn().mockRejectedValueOnce(new ZimbraError('TWO_FACTOR_REQUIRED', '2FA')).mockResolvedValueOnce(session);
     const disconnect = vi.fn(); const save = vi.fn();
-    const prompt = { secret: vi.fn().mockResolvedValueOnce('main-pass').mockResolvedValueOnce('123456'), question: vi.fn().mockResolvedValue('n'), close: vi.fn() };
+    const prompt = { secret: vi.fn().mockResolvedValueOnce('main-pass').mockResolvedValueOnce('123456'), question: vi.fn().mockResolvedValue(backup), close: vi.fn() };
     await loginZimbraAccount(account, prompt, { client: { authenticate, disconnect } as unknown as ZimbraClient, save });
-    expect(authenticate.mock.calls).toEqual([['main-pass'], ['main-pass', '123456', undefined]]);
+    expect(authenticate.mock.calls).toEqual([['main-pass'], ['main-pass', '123456']]);
     expect(save).toHaveBeenCalledWith('z', session);
     expect(JSON.stringify(save.mock.calls)).not.toMatch(/main-pass|123456/);
     expect(disconnect).toHaveBeenCalledOnce();

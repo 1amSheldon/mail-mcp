@@ -17,7 +17,7 @@ node dist/index.js accounts login ZIMBRA_ACCOUNT_ID
 ```
 
 The masked local prompt asks for the main account password. If the server requires
-a second factor, it asks for the current authenticator code or a recovery code.
+a second factor, it asks for the current authenticator code or a backup/scratch code.
 Do not paste either credential into MCP tools, chat, command arguments or config.
 An IMAP app password is not assumed to work for SOAP.
 
@@ -29,7 +29,7 @@ does not require restarting MCP. Revoked or expired tokens require another local
 `accounts login`; writes are never retried automatically.
 
 This first implementation supports native Zimbra password authentication with
-TOTP or recovery-code completion. It does not request email OTPs, provision 2FA,
+TOTP or backup-code completion. It does not request email OTPs, provision 2FA,
 disable 2FA, generate TOTP codes, register trusted devices, or implement SAML/SSO.
 Server edition, third-party authentication extensions and account policy can
 change compatibility. Authenticate against the actual deployment before rollout.
@@ -114,3 +114,10 @@ Protocol references:
 - https://github.com/Zimbra/zm-mailbox/blob/develop/store/docs/soap.txt
 - https://github.com/Zimbra/zm-api-js-client
 - https://github.com/maldua-suite/zimbra-maldua-2fa/issues/7
+
+HTTP 401 requires local login. A generic HTTP 403 indicates access denial; check
+account/proxy permissions instead of assuming session expiry. Explicit SOAP
+authentication faults still require login. Rejected input and authentication
+failures report retrySafe: true, meaning the operation can be submitted after
+correction; no automatic retry is performed. Unknown write outcomes remain unsafe.
+Conversation IDs may be negative for native virtual conversations.

@@ -38,6 +38,10 @@ describe('Zimbra MCP router gates', () => {
     const server = new MailMCPServer(false, undefined, undefined, true);
     const first = readJSON(await server.dispatchTool('mail_mutate', false, args));
     expect(first.confirmationRequired).toBe(true); expect(fetch).not.toHaveBeenCalled();
+    expect(first.description).toContain('Zimbra createDraft for account z');
+    expect(first.description).toContain('to=["a@example.test"]');
+    expect(first.description).toContain('subject="Draft"');
+    expect(first.description).not.toContain('Test');
     const result = await server.dispatchTool('mail_mutate', false, { ...args, confirmationId: first.confirmationId });
     expect(result.isError).not.toBe(true); expect(readJSON(result).draftId).toBe('7');
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -48,7 +52,7 @@ describe('Zimbra MCP router gates', () => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
     const server = new MailMCPServer(false);
     const result = await server.dispatchTool('mail_query', false, { accountId: 'z', operation: 'zimbra.listFolders', input: {} });
-    expect(result.isError).toBe(true); expect(readJSON(result)).toMatchObject({ status: 'auth_required', retrySafe: false });
+    expect(result.isError).toBe(true); expect(readJSON(result)).toMatchObject({ status: 'auth_required', retrySafe: true });
     expect(fetch).not.toHaveBeenCalled();
     await server.shutdown(); vi.unstubAllGlobals();
   });
@@ -58,5 +62,46 @@ describe('Zimbra MCP router gates', () => {
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain('Unknown mail_mutate operation');
     await server.shutdown();
+  });
+  it.each([
+    ['updateDraft', { draftId: '7', to: ['a@example.test'], cc: ['c@example.test'], bcc: ['b@example.test'], subject: 'Replacement', body: 'PRIVATE BODY' }, ['draftId="7"', 'to=["a@example.test"]', 'cc=["c@example.test"]', 'bcc=["b@example.test"]', 'replace draft contents']],
+    ['sendDraft', { draftId: '7' }, ['draftId="7"', 'send the latest server draft']],
+    ['createTag', { name: 'Urgent', color: 3 }, ['name="Urgent"', 'color=3']],
+    ['deleteTag', { tagId: '8' }, ['tagId="8"']],
+    ['addTag', { messageIds: ['9', '10'], tagName: 'Urgent' }, ['messageIds=["9","10"]', 'tagName="Urgent"']],
+    ['removeTag', { messageIds: ['9'], tagName: 'Urgent' }, ['messageIds=["9"]', 'tagName="Urgent"']],
+    ['moveMessages', { messageIds: ['9'], folderId: '11' }, ['messageIds=["9"]', 'folderId="11"']],
+    ['markRead', { messageIds: ['9'], read: false }, ['messageIds=["9"]', 'mark as unread']],
+    ['markRead', { messageIds: ['9'], read: true }, ['messageIds=["9"]', 'mark as read']],
+    ['moveToTrash', { messageIds: ['9'] }, ['messageIds=["9"]', 'move messages to Trash']],
+  ])('describes %s and its targets without fetching or exposing the body', async (operation, input, details) => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const server = new MailMCPServer(false, undefined, undefined, true);
+    const result = readJSON(await server.dispatchTool('mail_mutate', false, { accountId: 'z', operation: `zimbra.${operation}`, input }));
+    expect(result.confirmationRequired).toBe(true);
+    expect(result.description).toContain(`Zimbra ${operation} for account z`);
+    for (const detail of details as string[]) expect(result.description).toContain(detail);
+    expect(result.description).not.toContain('PRIVATE BODY');
+    expect(fetch).not.toHaveBeenCalled();
+    await server.shutdown(); vi.unstubAllGlobals();
+  });
+  it('marks rejected input safe to retry without performing a write', async () => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch);
+    const server = new MailMCPServer(false);
+    const result = await server.dispatchTool('mail_mutate', false, { accountId: 'z', operation: 'zimbra.sendDraft', input: { draftId: 'invalid' } });
+    expect(result.isError).toBe(true);
+    expect(readJSON(result)).toMatchObject({ status: 'invalid_input', retrySafe: true });
+    expect(fetch).not.toHaveBeenCalled();
+    await server.shutdown(); vi.unstubAllGlobals();
+  });
+  it('never permits automatic retry after an uncertain write', async () => {
+    const fetch = vi.fn().mockRejectedValue(new Error('network connection lost')); vi.stubGlobal('fetch', fetch);
+    const server = new MailMCPServer(false);
+    const result = await server.dispatchTool('mail_mutate', false, args);
+    expect(result.isError).toBe(true);
+    expect(readJSON(result)).toMatchObject({ status: 'outcome_unknown', retrySafe: false });
+    expect(readJSON(result).nextAction).toContain('Never retry');
+    expect(fetch).toHaveBeenCalledTimes(1);
+    await server.shutdown(); vi.unstubAllGlobals();
   });
 });

@@ -16,10 +16,10 @@ export async function loginZimbraAccount(account: ZimbraConfiguredAccount, promp
     try { session = await client.authenticate(password); }
     catch (error) {
       if (!(error instanceof ZimbraError) || error.code !== 'TWO_FACTOR_REQUIRED') throw error;
-      const recovery = (await prompt.question('Use a recovery code instead of an authenticator code? (y/n) [n]: ')).trim().toLowerCase() === 'y';
-      const code = (await prompt.secret(recovery ? 'One-use recovery code: ' : 'Current authenticator code: ')).trim();
+      const recovery = (await prompt.question('Use a backup/scratch code instead of an authenticator code? (y/n) [n]: ')).trim().toLowerCase() === 'y';
+      const code = (await prompt.secret(recovery ? 'One-use backup/scratch code: ' : 'Current authenticator code: ')).trim();
       if (!code) throw new ZimbraError('INVALID_INPUT', 'Second-factor code is required.');
-      session = await client.authenticate(password, recovery ? undefined : code, recovery ? code : undefined);
+      session = await client.authenticate(password, code);
     }
     await (options.save ?? saveZimbraSession)(account.id, session);
     console.log(`Zimbra session saved in the system credential store. Expires: ${new Date(session.expiresAt).toISOString()}.`);

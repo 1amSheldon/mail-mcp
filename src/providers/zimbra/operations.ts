@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
 const id = z.string().regex(/^(?:[a-fA-F0-9-]{36}:)?[1-9][0-9]{0,15}$/);
+// Zimbra represents single-message conversations with a negative item ID.
+const conversationId = z.string().regex(/^(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}:)?-?[1-9][0-9]{0,15}$/);
 const text = z.string().max(200000).refine(v => !v.includes('\0'));
 const short = z.string().min(1).max(256).refine(v => !/[\r\n\0]/.test(v));
 const addresses = z.array(z.email().max(320)).max(100);
@@ -16,7 +18,7 @@ export const ZIMBRA_READ_SCHEMAS = {
   sessionStatus: z.object({}).strict(),
   searchMessages: z.object(page).strict(),
   readMessage: z.object({ messageId: id }).strict(),
-  getThread: z.object({ conversationId: id }).strict(),
+  getThread: z.object({ conversationId }).strict(),
   listFolders: z.object({}).strict(),
   listTags: z.object({}).strict(),
   searchContacts: z.object(page).strict(),
