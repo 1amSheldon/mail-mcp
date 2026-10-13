@@ -80,7 +80,7 @@ export class SieveClient {
     this._assertConnected();
     this._send('LISTSCRIPTS\r\n');
     const response = await this._readResponse();
-    return this._parseScriptList(response.toString('utf8'));
+    return this._parseScriptList(response);
   }
 
   async getScript(name: string): Promise<string> {
@@ -283,31 +283,55 @@ export class SieveClient {
   // Private — response parsers
   // ---------------------------------------------------------------------------
 
-  private _parseScriptList(response: string): SieveScript[] {
+  private _parseScriptList(response: Buffer): SieveScript[] {
     const scripts: SieveScript[] = [];
-    const lines = response.split('\r\n');
-    for (const line of lines) {
-      // Lines: "scriptname" ACTIVE  or  "scriptname"
-      const match = line.match(/^"([^"]+)"(\s+ACTIVE)?/i);
-      if (match) {
-        scripts.push({
-          name: match[1],
-          active: Boolean(match[2]),
-        });
-      }
+    let position = 0;
+    while (position < response.length) {
+      if (/^OK(?:[ (\r]|$)/i.test(response.toString('utf8', position, position + 4))) break;
+      const token = this._parseString(response, position);
+      const end = response.indexOf('\r\n', token.end);
+      if (end < 0) throw new Error('Unexpected LISTSCRIPTS response format');
+      const suffix = response.toString('utf8', token.end, end).trim();
+      if (suffix && suffix.toUpperCase() !== 'ACTIVE') throw new Error('Unexpected LISTSCRIPTS marker');
+      scripts.push({ name: token.value, active: Boolean(suffix) });
+      position = end + 2;
     }
     return scripts;
   }
 
   private _parseLiteralContent(response: Buffer): string {
-    // Response: {N}\r\n<N bytes>\r\nOK\r\n
-    const literalMatch = response.toString('utf8', 0, response.indexOf('\r\n') + 2).match(/^\{(\d+)\}\r\n/);
-    if (!literalMatch) {
-      throw new Error('Unexpected GETSCRIPT response format');
+    const token = this._parseString(response, 0);
+    if (response.toString('ascii', token.end, token.end + 2) !== '\r\n') throw new Error('Unexpected GETSCRIPT response format');
+    return token.value;
+  }
+
+  private _parseString(response: Buffer, start: number): { value: string; end: number } {
+    if (response[start] === 0x22) {
+      const bytes: number[] = [];
+      for (let position = start + 1; position < response.length; position++) {
+        let byte = response[position];
+        if (byte === 0x22) return { value: Buffer.from(bytes).toString('utf8'), end: position + 1 };
+        if (byte === 0x5c) {
+          byte = response[++position];
+          if (byte !== 0x22 && byte !== 0x5c) throw new Error('Invalid ManageSieve quoted escape');
+        }
+        if (byte === 0 || byte === 10 || byte === 13) throw new Error('Invalid ManageSieve quoted string');
+        bytes.push(byte);
+      }
+    } else if (response[start] === 0x7b) {
+      const lineEnd = response.indexOf('\r\n', start);
+      if (lineEnd >= 0) {
+        const match = /^\{(\d+)\+?\}$/.exec(response.toString('ascii', start, lineEnd));
+        if (match) {
+          const length = Number(match[1]);
+          const end = lineEnd + 2 + length;
+          if (Number.isSafeInteger(length) && length <= 16 * 1024 * 1024 && end <= response.length) {
+            return { value: response.toString('utf8', lineEnd + 2, end), end };
+          }
+        }
+      }
     }
-    const byteCount = parseInt(literalMatch[1], 10);
-    const contentStart = literalMatch[0].length;
-    return response.subarray(contentStart, contentStart + byteCount).toString('utf8');
+    throw new Error('Unexpected ManageSieve string response format');
   }
 
   private _quoteString(s: string): string {
