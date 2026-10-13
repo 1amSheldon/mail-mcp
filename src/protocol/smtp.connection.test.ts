@@ -3,6 +3,36 @@ import { expect, it, vi } from 'vitest';
 vi.mock('../security/keychain.js', () => ({ loadCredentials: vi.fn(async () => 'DUMMY_SECRET') }));
 import { SmtpClient } from './smtp.js';
 
+it('sends a TLS ClientHello before SMTP bytes and refuses a plaintext peer in implicit TLS mode', async () => {
+  const received: Buffer[] = [];
+  const sockets = new Set<Socket>();
+  const server = createServer(socket => {
+    sockets.add(socket);
+    socket.on('error', () => undefined);
+    socket.once('close', () => sockets.delete(socket));
+    socket.on('data', chunk => received.push(Buffer.from(chunk)));
+    // An on-path peer tries to downgrade the greeting and solicit plaintext AUTH.
+    socket.write('220 attacker ESMTP\r\n250-AUTH PLAIN LOGIN XOAUTH2\r\n250 OK\r\n');
+  });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const client = new SmtpClient({ id: 'fixture', name: 'fixture', user: 'x@example.test',
+    host: '127.0.0.1', port: 993, smtpPort: (server.address() as AddressInfo).port,
+    smtpSecurity: 'tls', authType: 'login', useTLS: true });
+  try {
+    await expect(client.connect()).rejects.toThrow();
+    await vi.waitFor(() => expect(received.length).toBeGreaterThan(0));
+    const wire = Buffer.concat(received);
+    expect(wire[0]).toBe(0x16); // TLS handshake record
+    expect(wire[1]).toBe(0x03); // TLS record protocol version
+    expect(wire[5]).toBe(0x01); // ClientHello handshake
+    expect(wire.toString('latin1')).not.toMatch(/EHLO|AUTH |DUMMY_SECRET/);
+  } finally {
+    client.disconnect();
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
 it('closes a real verification socket before credentials can be sent after disconnect', async () => {
   let accept!: (socket: Socket) => void;
   const accepted = new Promise<Socket>(resolve => { accept = resolve; });
