@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { simpleParser } from 'mailparser';
@@ -38,6 +38,41 @@ async function fixture() {
   return { workflow, port, messages, raw, store, root };
 }
 describe('server draft workflow', () => {
+  it('refuses old state after account replacement even when mailbox UIDs collide', async () => {
+    const f = await fixture();
+    const id = await f.workflow.adopt(locator(1), (await simpleParser(f.raw)).messageId);
+    const replacement = new DraftWorkflow({ ...account, host: 'new.example.test', user: 'other@example.test' }, f.port, new DraftStore(account.id, f.root));
+    f.messages.set(locator(1), replaceHeaders(f.raw, { To: 'unrelated@example.test', 'Message-ID': '<unrelated>' }));
+    await expect(replacement.send(id)).rejects.toThrow('mailbox identity');
+    await expect(replacement.update(locator(1), { subject: 'Change' })).rejects.toThrow('mailbox identity');
+    expect(f.port.read).not.toHaveBeenCalled();
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+
+  it('refuses unrelated content at a still-readable historical locator', async () => {
+    const f = await fixture();
+    const id = await f.workflow.adopt(locator(1), (await simpleParser(f.raw)).messageId);
+    f.messages.set(locator(1), replaceHeaders(f.raw, { To: 'unrelated@example.test', 'Message-ID': '<unrelated>' }));
+    await expect(f.workflow.send(id)).rejects.toThrow('missing or ambiguous');
+    expect(f.port.send).not.toHaveBeenCalled();
+    f.messages.set(locator(9), f.raw);
+    await f.workflow.send(id);
+    expect(vi.mocked(f.port.send).mock.calls[0][1].envelope.to).not.toContain('unrelated@example.test');
+  });
+
+  it('preserves unbound legacy records for explicit migration instead of guessing an identity', async () => {
+    const f = await fixture();
+    const id = await f.workflow.adopt(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.accountIdentity;
+    const original = JSON.stringify(legacy);
+    await writeFile(file, original, 'utf8');
+    await expect(f.workflow.send(id)).rejects.toThrow('unverified mailbox identity');
+    expect(await readFile(file, 'utf8')).toBe(original);
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+
   it('allows another replacement after a definite APPEND rejection but retains unknown-outcome protection', async () => {
     const { AppendNotSavedError } = await import('../protocol/imap.js');
     const f = await fixture();

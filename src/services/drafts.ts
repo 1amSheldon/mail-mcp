@@ -56,7 +56,7 @@ interface DraftRecord {
   pending?: DraftPending;
   attempt?: DraftAttempt;
 }
-interface DraftState { records: DraftRecord[] }
+interface DraftState { records: DraftRecord[]; accountIdentity?: string }
 const digest = (value: Buffer | string) => createHash('sha256').update(value).digest('hex');
 
 const draftPendingSchema = z.object({
@@ -116,7 +116,10 @@ const draftRecordSchema = z.object({
   pending: draftPendingSchema.optional(),
   attempt: draftAttemptSchema.optional(),
 }).strict();
-const draftStateSchema = z.object({ records: z.array(draftRecordSchema) }).strict();
+const draftStateSchema = z.object({
+  records: z.array(draftRecordSchema),
+  accountIdentity: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+}).strict();
 
 function parseDraftState(value: unknown): DraftState {
   const parsed = draftStateSchema.safeParse(value);
@@ -380,12 +383,25 @@ export async function matchesSentDraft(candidate: Buffer, messageId: string, sin
 export class DraftWorkflow {
   constructor(private account: EmailAccount, private port: DraftPort, private store = new DraftStore(account.id)) {}
 
+  private withState<T>(work: (state: DraftState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+    return this.store.run(async (state, save) => {
+      const accountIdentity = digest(JSON.stringify({
+        backend: 'imap', host: this.account.host.toLowerCase(), port: this.account.port, user: this.account.user,
+      }));
+      if (state.accountIdentity !== accountIdentity && (state.accountIdentity || state.records.length > 0)) {
+        throw new Error('Draft state belongs to a different or unverified mailbox identity; inspect prior delivery records before migrating it. Use a distinct account id for a replacement mailbox.');
+      }
+      state.accountIdentity = accountIdentity;
+      return work(state, save);
+    });
+  }
+
   private addAlias(record: DraftRecord, locator: string): void {
     if (!record.aliases.includes(locator)) record.aliases.push(locator);
   }
 
   async adopt(locator: string, messageId?: string): Promise<string> {
-    return this.store.run(async (state, save) => {
+    return this.withState(async (state, save) => {
       let r = state.records.find(r => r.locator === locator || r.aliases.includes(locator));
       if (!r) {
         r = { draftId: randomUUID(), locator, aliases: [locator], messageIds: messageId ? [messageId] : [] };
@@ -403,14 +419,22 @@ export class DraftWorkflow {
     try { current = await this.port.read(r.locator); } catch { /* Search retained identifiers, never a subject. */ }
     if (current) {
       const id = (await parse(current)).messageId;
-      if (id && new Set(await this.port.search(id)).size > 1) throw new Error('Draft identity ambiguous; select the current draft again');
-      return current;
+      if (r.messageIds.length === 0 || (id && r.messageIds.includes(id))) {
+        if (id && new Set(await this.port.search(id)).size > 1) throw new Error('Draft identity ambiguous; select the current draft again');
+        return current;
+      }
     }
     const matches = new Set<string>();
     for (const id of r.messageIds) for (const locator of await this.port.search(id)) matches.add(locator);
     if (matches.size !== 1) throw new Error('Draft missing or ambiguous; select the current draft again');
-    r.locator = [...matches][0]; this.addAlias(r, r.locator);
-    return this.port.read(r.locator);
+    const replacement = [...matches][0];
+    const replacementIdentity = decodeMessageLocator(replacement);
+    if (replacementIdentity.accountId !== this.account.id || replacementIdentity.mailbox !== expected) throw new Error('Target is not an account draft');
+    const raw = await this.port.read(replacement);
+    const messageId = (await parse(raw)).messageId;
+    if (!messageId || !r.messageIds.includes(messageId)) throw new Error('Draft identity changed during lookup; select the current draft again');
+    r.locator = replacement; this.addAlias(r, replacement);
+    return raw;
   }
 
   private async operate(
@@ -418,7 +442,7 @@ export class DraftWorkflow {
     operation: 'update' | 'send',
     action: (r: DraftRecord, raw: Buffer, save: () => Promise<void>) => Promise<Record<string, unknown>>,
   ) {
-    return this.store.run(async (state, save) => {
+    return this.withState(async (state, save) => {
       if (typeof target !== 'string' || target.length === 0 || target.trim() !== target) {
         throw new Error('Draft target must be a non-empty string');
       }
