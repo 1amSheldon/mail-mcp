@@ -17,6 +17,7 @@ const mockSmtpSend = vi.fn().mockResolvedValue({
   rawMessage: Buffer.from('Message-ID: <test@example.com>\r\n\r\nBody'),
 });
 const mockFetchAttachmentSize = vi.fn();
+const mockFetchAttachment = vi.fn();
 const mockFetchMessageBody = vi.fn();
 const mockGetMailboxStatus = vi.fn().mockResolvedValue([
   { name: 'INBOX', total: 100, unread: 5, recent: 2 },
@@ -37,6 +38,7 @@ vi.mock('../protocol/imap.js', () => {
         getMailboxIdentity: mockGetMailboxIdentity,
         findSpecialUseFolder: mockFindSpecialUseFolder,
         fetchAttachmentSize: mockFetchAttachmentSize,
+        fetchAttachment: mockFetchAttachment,
         fetchMessageBody: mockFetchMessageBody,
         getMailboxStatus: mockGetMailboxStatus,
         listFolders: mockListFolders,
@@ -337,72 +339,22 @@ describe('MailService searchable delivery identifiers', () => {
   });
 });
 
-describe('MailService attachment size guard', () => {
-  const account = { id: 'test', name: 'Test', user: 'test@example.com', imap: {} as any, smtp: {} as any };
-
-  beforeEach(() => {
-    mockFetchAttachmentSize.mockClear();
+describe('MailService bounded attachment downloads', () => {
+  it('delegates the byte limit and generation without loading the full MIME body', async () => {
     mockFetchMessageBody.mockClear();
-  });
-
-  it('throws ValidationError when fetchAttachmentSize returns size exceeding 50MB', async () => {
-    const SIXTY_MB = 60 * 1024 * 1024;
-    mockFetchAttachmentSize.mockResolvedValue(SIXTY_MB);
-    const service = new MailService(account, false);
-    await service.connect();
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toThrow(
-      expect.objectContaining({
-        message: expect.stringContaining('bigfile.pdf'),
-      })
-    );
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toThrow(
-      expect.objectContaining({
-        message: expect.stringContaining('MB'),
-      })
-    );
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toThrow(
-      expect.objectContaining({
-        message: expect.stringContaining('limit'),
-      })
-    );
+    mockFetchAttachment.mockResolvedValue({ content: Buffer.from('data'), contentType: 'application/pdf' });
+    const service = new MailService({ id: 'test', user: 'test@example.com' } as any);
+    const result = await service.downloadAttachment('1', 'small.pdf', 'INBOX', 8, '123');
+    expect(mockFetchAttachment).toHaveBeenLastCalledWith('1', 'small.pdf', 'INBOX', 8, '123');
     expect(mockFetchMessageBody).not.toHaveBeenCalled();
+    expect(result.content.toString()).toBe('data');
   });
-
-  it('throws ValidationError with code ValidationError when size exceeds limit', async () => {
-    const SIXTY_MB = 60 * 1024 * 1024;
-    mockFetchAttachmentSize.mockResolvedValue(SIXTY_MB);
-    const { ValidationError } = await import('../errors.js');
-    const service = new MailService(account, false);
-    await service.connect();
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toBeInstanceOf(ValidationError);
-  });
-
-  it('proceeds to fetchMessageBody when size <= 50MB', async () => {
-    const TEN_MB = 10 * 1024 * 1024;
-    mockFetchAttachmentSize.mockResolvedValue(TEN_MB);
-    mockFetchMessageBody.mockResolvedValue({
-      attachments: [{ filename: 'small.pdf', content: Buffer.from('data'), contentType: 'application/pdf', size: TEN_MB }],
-    });
-    const service = new MailService(account, false);
-    await service.connect();
-    const result = await service.downloadAttachment('1', 'small.pdf');
-    expect(mockFetchMessageBody).toHaveBeenCalledOnce();
-    expect(result.contentType).toBe('application/pdf');
-  });
-
-  it('proceeds to fetchMessageBody when fetchAttachmentSize returns null (BODYSTRUCTURE unavailable)', async () => {
-    mockFetchAttachmentSize.mockResolvedValue(null);
-    mockFetchMessageBody.mockResolvedValue({
-      attachments: [{ filename: 'file.txt', content: Buffer.from('hello'), contentType: 'text/plain', size: 5 }],
-    });
-    const service = new MailService(account, false);
-    await service.connect();
-    const result = await service.downloadAttachment('1', 'file.txt');
-    expect(mockFetchMessageBody).toHaveBeenCalledOnce();
-    expect(result.contentType).toBe('text/plain');
+  it('propagates an actual-byte-limit rejection', async () => {
+    mockFetchAttachment.mockRejectedValueOnce(new Error('Attachment exceeds the 8 byte limit'));
+    const service = new MailService({ id: 'test', user: 'test@example.com' } as any);
+    await expect(service.downloadAttachment('1', 'file.bin', 'INBOX', 8)).rejects.toThrow('byte limit');
   });
 });
-
 // ---------------------------------------------------------------------------
 // applySignature pure helper tests
 // ---------------------------------------------------------------------------

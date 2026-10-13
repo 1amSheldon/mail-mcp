@@ -213,6 +213,8 @@ export class MailService {
   }
 
   async disconnect() {
+    this.bodyCache.clear();
+    this.bodyFetches.clear();
     this.smtpClient.disconnect();
     await this.imapClient.disconnect();
     this.paginationStore.clear();
@@ -1140,24 +1142,7 @@ export class MailService {
   }
 
   async downloadAttachment(uid: string, filename: string, folder: string = 'INBOX', maxBytes: number = 50 * 1024 * 1024, expectedUidValidity?: string): Promise<{ content: Buffer, contentType: string }> {
-    const size = await this.imapClient.fetchAttachmentSize(uid, filename, folder, expectedUidValidity);
-    if (size != null && size > maxBytes) {
-      throw new ValidationError(
-        `Attachment "${filename}" is ${Math.round(size / 1024 / 1024)} MB, which exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit. Use an email client to download large attachments directly.`
-      );
-    }
-    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
-    if (!parsed.attachments || parsed.attachments.length === 0) {
-      throw new Error('No attachments found in this email');
-    }
-    const attachment = parsed.attachments.find(a => a.filename === filename);
-    if (!attachment) {
-      throw new Error(`Attachment "${filename}" not found`);
-    }
-    return {
-      content: attachment.content,
-      contentType: attachment.contentType
-    };
+    return this.imapClient.fetchAttachment(uid, filename, folder, maxBytes, expectedUidValidity);
   }
 
   async downloadLocatedAttachment(

@@ -215,6 +215,8 @@ IMAP/SMTP OAuth2 uses pre-provisioned XOAUTH2 credentials and refreshes them at 
 
 IMAP `useTLS: true` uses implicit TLS (normally port 993). `useTLS: false` requires a successful STARTTLS upgrade (normally port 143); servers without STARTTLS are rejected before authentication. Plaintext IMAP authentication is not supported.
 
+IMAP listing previews fetch at most 4 KiB of each MIME body. Full parsed-message reads are limited to 32 MiB before parsing. Attachment downloads fetch the selected MIME part with a decoded-byte limit (up to 50 MiB); missing part metadata uses a bounded 32 MiB full-message fallback. Oversized messages are rejected rather than silently truncated. Parsed-body caches have a 64 MiB payload budget per account, at most 100 entries, and a five-minute expiry that releases entries without another read.
+
 For Gmail, the shortest personal setup is usually a Google app password with 2-Step Verification enabled:
 
 | Setting | Value |
