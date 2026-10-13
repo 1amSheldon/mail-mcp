@@ -183,7 +183,17 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   };
 
   const httpServer = createServer(async (req, res) => {
-    const pathname = new URL(req.url ?? '/', `http://${urlHost}`).pathname;
+    try {
+    let pathname: string;
+    try {
+      // Accept origin-form only. Never let a network-path target replace the host.
+      const target = req.url ?? '/';
+      if (!target.startsWith('/') || target.startsWith('//')) throw new Error('Invalid target');
+      pathname = new URL(target, `http://${urlHost}`).pathname;
+    } catch {
+      rpcError(res, 400, 'Invalid request target');
+      return;
+    }
 
     if (pathname === '/health' && req.method === 'GET') {
       json(res, shuttingDown ? 503 : 200, {
@@ -212,7 +222,6 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
       return;
     }
 
-    try {
       const id = sessionIdFrom(req);
       let record = id ? sessions.get(id) : undefined;
 
