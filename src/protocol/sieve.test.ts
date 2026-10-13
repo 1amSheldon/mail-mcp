@@ -79,6 +79,55 @@ function setupAutoReplySocket(
 // ---------------------------------------------------------------------------
 
 describe('SieveClient', () => {
+  it('verifies TLS identity and accepts an explicit trusted CA', async () => {
+    setupAutoReplySocket('OK\r\n', {});
+    await new SieveClient('sieve.example.test', 4190, 'u', 'p', { ca: 'test-ca' }).connect();
+    expect(vi.mocked(tls.connect).mock.calls.at(-1)?.[0]).toMatchObject({
+      rejectUnauthorized: true, servername: 'sieve.example.test', ca: 'test-ca',
+    });
+  });
+
+  it('never authenticates when TLS verification fails', async () => {
+    const sock = new MockSocket();
+    vi.mocked(tls.connect).mockImplementation((() => {
+      setImmediate(() => sock.emit('error', new Error('certificate has expired')));
+      return sock;
+    }) as any);
+    await expect(new SieveClient('localhost', 4190, 'u', 'p').connect()).rejects.toThrow('certificate');
+    expect(sock.written).toEqual([]);
+    expect(sock.destroyed).toBe(true);
+  });
+
+  it('frames UTF-8 literals split within a character and ignores terminal words inside them', async () => {
+    const sock = setupAutoReplySocket('OK\r\n', {});
+    const client = new SieveClient('localhost', 4190, 'u', 'p');
+    await client.connect();
+    const content = '# Український фільтр\r\nNO not a terminal\r\n';
+    const response = Buffer.from(`{${Buffer.byteLength(content)}}\r\n${content}\r\nOK\r\n`);
+    sock.write = () => {
+      setImmediate(() => { for (const byte of response) sock.emit('data', Buffer.from([byte])); });
+      return true;
+    };
+    expect(await client.getScript('фільтр')).toBe(content);
+    await expect(client.deleteScript('x\r\nLOGOUT')).rejects.toThrow('Invalid');
+  });
+
+  it('rejects a pending command on close', async () => {
+    const sock = setupAutoReplySocket('OK\r\n', {});
+    const client = new SieveClient('localhost', 4190, 'u', 'p');
+    await client.connect();
+    sock.write = () => { setImmediate(() => sock.destroy()); return true; };
+    await expect(client.listScripts()).rejects.toThrow('closed');
+  });
+
+  it('times out a silent command and destroys the desynchronized socket', async () => {
+    const sock = setupAutoReplySocket('OK\r\n', {});
+    const client = new SieveClient('localhost', 4190, 'u', 'p', { timeoutMs: 30 });
+    await client.connect();
+    sock.write = () => true;
+    await expect(client.listScripts()).rejects.toThrow('timeout');
+    expect(sock.destroyed).toBe(true);
+  });
   afterEach(() => {
     vi.clearAllMocks();
   });

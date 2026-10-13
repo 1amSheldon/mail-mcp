@@ -17,7 +17,7 @@
  */
 
 import * as tls from 'node:tls';
-import { EventEmitter } from 'node:events';
+import { isIP } from 'node:net';
 
 export interface SieveScript {
   name: string;
@@ -27,16 +27,18 @@ export interface SieveScript {
 const CONNECTION_TIMEOUT_MS = 10_000;
 
 export class SieveClient {
-  private socket: (tls.TLSSocket & EventEmitter) | null = null;
-  private buffer = '';
+  private socket: tls.TLSSocket | null = null;
+  private buffer: Buffer = Buffer.alloc(0);
+  private failure?: Error;
   /** Resolvers waiting for the next complete response */
-  private waiters: Array<(buf: string) => void> = [];
+  private waiters: Array<{ resolve: (buf: Buffer) => void; reject: (error: Error) => void }> = [];
 
   constructor(
     private readonly host: string,
     private readonly port: number,
     private readonly user: string,
     private readonly password: string,
+    private readonly options: { ca?: tls.ConnectionOptions['ca']; timeoutMs?: number } = {},
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -44,11 +46,18 @@ export class SieveClient {
   // ---------------------------------------------------------------------------
 
   async connect(): Promise<void> {
+    this.failure = undefined;
+    this.buffer = Buffer.alloc(0);
+    try {
     await this._tlsConnect();
     // Read server greeting
     await this._readResponse();
     // Authenticate
     await this._authenticate();
+    } catch (error) {
+      this._fail(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -59,10 +68,10 @@ export class SieveClient {
     } catch {
       // Ignore errors during logout
     } finally {
-      this.socket.destroy();
+      this.socket?.destroy();
       this.socket = null;
-      this.buffer = '';
-      this.waiters = [];
+      this.buffer = Buffer.alloc(0);
+      this._fail(new Error('ManageSieve disconnected'));
     }
   }
 
@@ -70,7 +79,7 @@ export class SieveClient {
     this._assertConnected();
     this._send('LISTSCRIPTS\r\n');
     const response = await this._readResponse();
-    return this._parseScriptList(response);
+    return this._parseScriptList(response.toString('utf8'));
   }
 
   async getScript(name: string): Promise<string> {
@@ -102,18 +111,22 @@ export class SieveClient {
   private _tlsConnect(): Promise<void> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(
+        const error = new Error(
           'ManageSieve not supported by this server (connection timeout). ' +
           'SIEVE filters require ManageSieve (RFC 5804), typically available on ' +
           'self-hosted servers but not on Gmail or Outlook.'
-        ));
-      }, CONNECTION_TIMEOUT_MS);
+        );
+        reject(error);
+        this._fail(error);
+      }, this.options.timeoutMs ?? CONNECTION_TIMEOUT_MS);
 
       const sock = tls.connect(
         {
           host: this.host,
           port: this.port,
-          rejectUnauthorized: false, // self-signed certs common on self-hosted servers
+          rejectUnauthorized: true,
+          servername: isIP(this.host) ? undefined : this.host,
+          ...(this.options.ca ? { ca: this.options.ca } : {}),
         },
         () => {
           clearTimeout(timer);
@@ -123,7 +136,11 @@ export class SieveClient {
 
       // Accumulate incoming data into our buffer
       sock.on('data', (chunk: string | Buffer) => {
-        this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+        this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+        if (this.buffer.length > 16 * 1024 * 1024) {
+          this._fail(new Error('ManageSieve response exceeds 16 MiB'));
+          return;
+        }
         this._drainWaiters();
       });
 
@@ -139,9 +156,16 @@ export class SieveClient {
         } else {
           reject(err);
         }
+        this._fail(err);
       });
 
-      this.socket = sock as unknown as (tls.TLSSocket & EventEmitter);
+      sock.on('close', () => {
+        clearTimeout(timer);
+        const error = new Error('ManageSieve connection closed');
+        reject(error);
+        this._fail(error);
+      });
+      this.socket = sock;
     });
   }
 
@@ -158,7 +182,8 @@ export class SieveClient {
   // ---------------------------------------------------------------------------
 
   private _assertConnected(): void {
-    if (!this.socket) {
+    if (this.failure) throw this.failure;
+    if (!this.socket || this.socket.destroyed) {
       throw new Error('SieveClient: not connected. Call connect() first.');
     }
   }
@@ -171,10 +196,15 @@ export class SieveClient {
    * Resolves when a complete response is available in the buffer.
    * Throws on NO or BYE responses.
    */
-  private _readResponse(): Promise<string> {
+  private _readResponse(): Promise<Buffer> {
+    if (this.failure) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
-      const waiter = (full: string) => {
-        const termMatch = full.match(/^(OK|NO|BYE)[^\r\n]*/im);
+      const timer = setTimeout(() => this._fail(new Error('ManageSieve response timeout')), this.options.timeoutMs ?? CONNECTION_TIMEOUT_MS);
+      const waiter = (full: Buffer) => {
+        clearTimeout(timer);
+        // The framing parser has found the terminal line outside any literal.
+        const lastLine = full.toString('utf8').trimEnd().split('\r\n').at(-1)!;
+        const termMatch = lastLine.match(/^(OK|NO|BYE)(?:\s|$)/i);
         if (!termMatch) {
           resolve(full);
           return;
@@ -182,8 +212,6 @@ export class SieveClient {
         const terminal = termMatch[1].toUpperCase();
         if (terminal === 'NO' || terminal === 'BYE') {
           // Extract message from last line
-          const lines = full.trimEnd().split('\r\n');
-          const lastLine = lines[lines.length - 1];
           const msgMatch = lastLine.match(/^(?:NO|BYE)\s+"?([^"]*)"?/i);
           const msg = msgMatch?.[1] ?? lastLine;
           reject(new Error(msg || `ManageSieve error: ${terminal}`));
@@ -197,7 +225,7 @@ export class SieveClient {
       if (result !== null) {
         waiter(result);
       } else {
-        this.waiters.push(waiter);
+        this.waiters.push({ resolve: waiter, reject: error => { clearTimeout(timer); reject(error); } });
       }
     });
   }
@@ -211,7 +239,7 @@ export class SieveClient {
       const result = this._tryConsumeResponse();
       if (result === null) break;
       const waiter = this.waiters.shift()!;
-      waiter(result);
+      waiter.resolve(result);
     }
   }
 
@@ -221,7 +249,7 @@ export class SieveClient {
    * May contain literal strings: {N}\r\n followed by N bytes.
    * Returns null if the response is not yet complete.
    */
-  private _tryConsumeResponse(): string | null {
+  private _tryConsumeResponse(): Buffer | null {
     let pos = 0;
     const buf = this.buffer;
 
@@ -232,7 +260,7 @@ export class SieveClient {
         return null;
       }
 
-      const line = buf.slice(pos, lineEnd);
+      const line = buf.subarray(pos, lineEnd).toString('utf8');
       const nextPos = lineEnd + 2;
 
       // Check for literal string: {N} or {N+}
@@ -283,18 +311,25 @@ export class SieveClient {
     return scripts;
   }
 
-  private _parseLiteralContent(response: string): string {
+  private _parseLiteralContent(response: Buffer): string {
     // Response: {N}\r\n<N bytes>\r\nOK\r\n
-    const literalMatch = response.match(/^\{(\d+)\}\r\n/);
+    const literalMatch = response.toString('utf8', 0, response.indexOf('\r\n') + 2).match(/^\{(\d+)\}\r\n/);
     if (!literalMatch) {
       throw new Error('Unexpected GETSCRIPT response format');
     }
     const byteCount = parseInt(literalMatch[1], 10);
     const contentStart = literalMatch[0].length;
-    return response.slice(contentStart, contentStart + byteCount);
+    return response.subarray(contentStart, contentStart + byteCount).toString('utf8');
   }
 
   private _quoteString(s: string): string {
+    if (/[\r\n\0]/.test(s)) throw new Error('Invalid ManageSieve script name');
     return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+
+  private _fail(error: Error): void {
+    this.failure ??= error;
+    for (const waiter of this.waiters.splice(0)) waiter.reject(this.failure);
+    if (this.socket && !this.socket.destroyed) this.socket.destroy();
   }
 }
