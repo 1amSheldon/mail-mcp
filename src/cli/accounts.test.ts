@@ -18,6 +18,7 @@ vi.mock('../config.js', () => ({
 }));
 
 vi.mock('../security/keychain.js', () => ({
+  loadCredentials: vi.fn(),
   saveCredentials: vi.fn(),
   removeCredentials: vi.fn(),
 }));
@@ -101,14 +102,14 @@ describe('handleAccountsCommand', () => {
         'process.exit(1)'
       );
       expect(consoleSpy).toHaveBeenCalledWith(
-        'Usage: mail-mcp accounts <add|list|remove|login>'
+        'Usage: mail-mcp accounts <add|list|remove|login|disable-auto-login>'
       );
     });
 
     it('prints usage and exits when no subcommand is given', async () => {
       await expect(handleAccountsCommand(['accounts'])).rejects.toThrow('process.exit(1)');
       expect(consoleSpy).toHaveBeenCalledWith(
-        'Usage: mail-mcp accounts <add|list|remove|login>'
+        'Usage: mail-mcp accounts <add|list|remove|login|disable-auto-login>'
       );
     });
   });

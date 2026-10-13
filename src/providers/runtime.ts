@@ -66,7 +66,7 @@ import type {
 } from './microsoft/graph.js';
 import type { PaginationPage, PaginationScope } from '../utils/pagination-store.js';
 import { ZimbraClient } from './zimbra/client.js';
-import { readZimbraSession } from './zimbra/session.js';
+import { ZimbraLoginStore } from './zimbra/login-state.js';
 import type { ZimbraReadOperation, ZimbraWriteOperation } from './zimbra/operations.js';
 
 export const APPLE_READ_OPERATIONS = [
@@ -277,9 +277,14 @@ export class ProviderRuntime {
     this.getAccessToken = options.getValidAccessToken ?? getValidAccessToken;
     this.redact = options.redact ?? false;
     this.factories = {
-      zimbra: options.factories?.zimbra ?? (account => new ZimbraClient(account, {
-        fetch: fetchImpl, sessionProvider: () => readZimbraSession(account),
-      })),
+      zimbra: options.factories?.zimbra ?? (account => {
+        const login = new ZimbraLoginStore(account);
+        const client: ZimbraClient = new ZimbraClient(account, {
+          fetch: fetchImpl, sessionInspector: () => login.status(),
+          sessionProvider: () => login.session((password, trustedDevice) => client.authenticateWithDevice(password, undefined, { trustedDevice })),
+        });
+        return client;
+      }),
       appleMail: options.factories?.appleMail ?? (account => new AppleMailAdapter({
         allowGlobalRules: account.allowGlobalRules,
         allowedAttachmentRoots: account.allowedAttachmentRoots,

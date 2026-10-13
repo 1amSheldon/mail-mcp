@@ -17,15 +17,49 @@ Local provisioning: `node dist/index.js accounts add`, backend Zimbra, then
 `node dist/index.js accounts login ACCOUNT_ID`. Endpoint must be HTTPS with path
 /service/soap, without query/fragment or admin SOAP. Login prompts locally for
 password and, if requested, TOTP or backup code. Never request these in chat,
-tool parameters or command arguments. Only the completed session is stored.
+tool parameters or command arguments. By default only the completed session is stored.
 IMAP app passwords are not assumed to authenticate SOAP. SAML/SSO, email OTP,
-2FA enrollment and trusted-device registration are not implemented.
+and 2FA enrollment are not implemented.
+
+For server-supported trusted devices, the user can run locally:
+`node dist/index.js accounts login ACCOUNT_ID --trusted-device`.
+This explicitly requests device registration (or reuses unexpired saved trust).
+The server may still require a second factor or deny/omit trust. Only after a
+usable trusted token, device ID and trust lifetime are returned does the CLI ask
+whether to store the MAIN password in the OS credential store. Default is no.
+Never answer that prompt or enable password storage on the user's behalf from a
+mail task. OTP/backup codes are never saved. No trust/password enters accounts.json,
+MCP inputs, logs or the local lock files. Trust is per device; never copy it.
+Trusted-login storage requires a native OS keychain backend (or Linux Secret
+Service). Shell-command, file and null fallback backends are refused; fix native
+keychain availability rather than putting the password into a config file.
+
+If explicitly enabled, an expired session is replaced by password + trusted-device
+authentication before the next network operation. This obtains a new session;
+it does not extend an existing token or server policy. A local interprocess lock
+serializes attempts and a durable blocked marker is saved before authentication.
+Any failed/interrupted automatic attempt needs local login, including a transient
+network failure; there is no background retry loop. Expired/revoked trust requires
+local login and possibly 2FA. A rejected in-flight mail request is never replayed.
+Successful authentication does not prove a previous write failed or permit resending.
+
+`node dist/index.js accounts disable-auto-login ACCOUNT_ID` removes the stored
+password while retaining the current session and trust. Ordinary login without
+`--trusted-device` replaces the local record with a session-only record. Neither
+action revokes server-side device trust; revoke it in webmail when required.
+If a process dies while owning a login lock, the error identifies the lock file.
+Inspect its recorded PID and close mail-mcp processes before removing only that
+abandoned file. Locks contain process metadata only, never credentials. Do not
+remove active locks or any durable send-state records.
 
 Use a separate account ID from IMAP. Do not replace an IMAP password with a SOAP
 session. Each operation loads the current session: successful login does not need
 an MCP restart. auth_required/auth_failed require local reauthentication, not
-automatic credential changes. `zimbra.sessionStatus` checks cached availability by
-default; pass remote=true for an authenticated GetInfo check, without renewing login.
+automatic credential changes. `zimbra.sessionStatus` inspects local availability,
+session/trust expiry and automatic-login state without attempting authentication.
+With remote=true it performs GetInfo and may first run an explicitly enabled
+automatic login. Missing server capability fields mean unknown, not enabled;
+`trustedDevicesEnabled=false` during login means this route needs a policy change.
 
 Native IDs must come from this account. Do not reuse IMAP UIDs/locators. Message,
 folder, contact, tag and draft IDs are strings; conversation IDs may be negative.

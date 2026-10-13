@@ -8,6 +8,16 @@ export const zimbraSessionSchema = z.object({
   expiresAt: z.number().finite().positive(),
 }).strict();
 export type ZimbraSession = z.infer<typeof zimbraSessionSchema>;
+export const trustedDeviceSchema = z.object({
+  token: z.string().min(1).max(16384), deviceId: z.string().min(1).max(256),
+  expiresAt: z.number().finite().positive(),
+}).strict();
+export type ZimbraTrustedDevice = z.infer<typeof trustedDeviceSchema>;
+export interface ZimbraAuthentication { session: ZimbraSession; trustedDevice?: ZimbraTrustedDevice }
+export class ZimbraAuthChallenge extends Error {
+  readonly code = 'TWO_FACTOR_REQUIRED';
+  constructor(public readonly trustedDevicesEnabled?: boolean) { super('A second authentication factor is required.'); this.name = 'ZimbraAuthChallenge'; }
+}
 
 export class ZimbraError extends Error {
   constructor(public readonly code: 'AUTH_REQUIRED' | 'TWO_FACTOR_REQUIRED' | 'AUTH_FAILED' | 'INVALID_INPUT' | 'ACCESS_DENIED' | 'PROVIDER_ERROR' | 'OUTCOME_UNKNOWN' | 'CONFLICT', message: string) {

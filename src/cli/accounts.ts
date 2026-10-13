@@ -8,8 +8,9 @@ import {
 } from '../config.js';
 import { saveCredentials, removeCredentials } from '../security/keychain.js';
 import { validateOAuth2TokenEndpoint } from '../security/oauth2.js';
-import { handleZimbraLogin } from './zimbra-login.js';
+import { handleZimbraLogin, disableZimbraAutomaticLogin } from './zimbra-login.js';
 import { validateZimbraEndpoint } from '../providers/zimbra/session.js';
+import { withZimbraLoginLock } from '../providers/zimbra/login-state.js';
 
 export function inferSmtpHost(imapHost: string): string {
   return /^imap\./i.test(imapHost) ? imapHost.replace(/^imap\./i, 'smtp.') : '';
@@ -45,7 +46,10 @@ export async function handleAccountsCommand(args: string[]): Promise<boolean> {
 
   switch (subcommand) {
     case 'login':
-      await handleZimbraLogin(args[2]);
+      await handleZimbraLogin(args[2], args.slice(3));
+      return true;
+    case 'disable-auto-login':
+      await disableZimbraAutomaticLogin(args[2]);
       return true;
     case 'list':
       await listAccounts();
@@ -60,7 +64,7 @@ export async function handleAccountsCommand(args: string[]): Promise<boolean> {
       return true;
 
     default:
-      console.log('Usage: mail-mcp accounts <add|list|remove|login>');
+      console.log('Usage: mail-mcp accounts <add|list|remove|login|disable-auto-login>');
       process.exit(1);
   }
 }
@@ -238,14 +242,15 @@ async function removeAccount(id: string | undefined): Promise<void> {
     process.exit(1);
   }
 
-  accounts.splice(index, 1);
-  saveConfiguredAccounts(accounts);
-
-  try {
-    await removeCredentials(id);
-  } catch {
-    console.error(`Warning: could not remove keychain entry for '${id}' (may not exist).`);
-  }
+  const isZimbra = accounts[index].backend === 'zimbra';
+  const remove = async () => {
+    accounts.splice(index, 1);
+    saveConfiguredAccounts(accounts);
+    try { await removeCredentials(id); }
+    catch { console.error(`Warning: could not remove keychain entry for '${id}' (may not exist).`); }
+  };
+  if (isZimbra) await withZimbraLoginLock(id, remove);
+  else await remove();
 
   console.log(`Account '${id}' removed.`);
 }

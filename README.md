@@ -36,8 +36,10 @@ draft edits, contacts/groups, filters, user settings, sharing, calendars/tasks,
 invitations, Briefcase and scheduled delivery. Recipient restrictions and native
 concurrency limits are explicit in the operation references.
 Authenticate locally with `node dist/index.js accounts login ACCOUNT_ID`;
-only the completed session is stored, not the password or OTP. Expired or revoked
-sessions require local reauthentication. Existing IMAP/SMTP app-password accounts
+by default only the completed session is stored, not the password or OTP.
+Optional `--trusted-device` login supports server-approved device trust and asks
+separately before storing the main password for automatic reauthentication.
+Trust expiry or a failed automatic attempt requires local login. Existing IMAP/SMTP app-password accounts
 remain separate. See [Zimbra setup, operations and limitations](docs/ZIMBRA.md).
 
 ## Install

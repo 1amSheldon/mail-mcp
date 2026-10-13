@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+- Add explicit local Zimbra trusted-device registration/reuse and optional
+  OS-protected password storage for on-demand automatic login after session expiry.
+- Serialize login attempts across local processes, persist failure/crash blocking,
+  keep local status inspection free of authentication, and never replay mail writes.
+- Add a local command to disable automatic login, retain legacy session support,
+  and document trust expiry, server policy, crash recovery and downgrade boundaries.
+
 ## 3.2.0 - 2026-10-13
 
 - Expand Zimbra user-mailbox integration with MIME uploads, reply/reply-all/forward,

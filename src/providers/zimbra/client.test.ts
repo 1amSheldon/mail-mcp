@@ -21,6 +21,39 @@ function make(...responses: Response[]) {
 }
 
 describe('Zimbra SOAP transport and authentication', () => {
+  it('registers a device only on explicit request and parses its bounded lifetime', async () => {
+    const { client, body } = make(response('Auth', { authToken: { _content: 'session' }, lifetime: 60000, trustedToken: { _content: 'trust' }, deviceId: { _content: 'device' }, trustLifetime: 86400000 }));
+    const before = Date.now(); const result = await client.authenticateWithDevice('pass', '123456', { register: true });
+    expect(body().Body.AuthRequest).toMatchObject({ deviceTrusted: true, generateDeviceId: true, twoFactorCode: { _content: '123456' } });
+    expect(body().Header.context.ua).toEqual({ name: 'mail-mcp-trusted-login', version: '1' });
+    expect(result.trustedDevice).toMatchObject({ token: 'trust', deviceId: 'device' });
+    expect(result.trustedDevice!.expiresAt).toBeGreaterThanOrEqual(before + 86400000);
+  });
+  it('reuses device trust without re-registering, requesting an OTP, or extending its expiry', async () => {
+    const trustedDevice = { token: 'trust', deviceId: 'device', expiresAt: Date.now() + 86400000 };
+    const { client, body } = make(response('Auth', { authToken: { _content: 'session' }, lifetime: 60000 }));
+    const result = await client.authenticateWithDevice('pass', undefined, { trustedDevice });
+    expect(body().Body.AuthRequest).toEqual({ _jsns: 'urn:zimbraAccount', account: { by: 'name', _content: account.user }, password: { _content: 'pass' }, trustedToken: { _content: 'trust' }, deviceId: { _content: 'device' } });
+    expect(result.trustedDevice).toEqual(trustedDevice);
+  });
+  it('reports an explicit disabled capability without exposing intermediate auth tokens', async () => {
+    const { client } = make(response('Auth', { twoFactorAuthRequired: true, trustedDevicesEnabled: false, authToken: { _content: 'intermediate-secret' } }));
+    await expect(client.authenticateWithDevice('pass', undefined, { register: true })).rejects.toMatchObject({ code: 'TWO_FACTOR_REQUIRED', trustedDevicesEnabled: false });
+  });
+  it('does not treat a password-reset token as a mailbox session', async () => {
+    const { client } = make(response('Auth', { resetPassword: true, authToken: { _content: 'reset' }, lifetime: 60000 }));
+    await expect(client.authenticate('pass')).rejects.toMatchObject({ code: 'AUTH_REQUIRED' });
+  });
+  it('does not accept incomplete trust metadata for automatic login', async () => {
+    const { client } = make(response('Auth', { authToken: { _content: 'session' }, lifetime: 60000, trustedToken: { _content: 'trust' }, deviceId: { _content: 'device' } }));
+    expect((await client.authenticateWithDevice('pass', undefined, { register: true })).trustedDevice).toBeUndefined();
+  });
+  it('inspects local login state without invoking automatic authentication', async () => {
+    const provider = vi.fn(); const fetch = vi.fn();
+    const client = new ZimbraClient(account, { fetch, sessionProvider: provider, sessionInspector: async () => ({ status: 'session_expired', automaticLogin: 'enabled' }) });
+    expect(await client.executeRead('sessionStatus', {})).toEqual({ status: 'session_expired', automaticLogin: 'enabled', remoteVerified: false });
+    expect(provider).not.toHaveBeenCalled(); expect(fetch).not.toHaveBeenCalled();
+  });
   it('accepts only user HTTPS SOAP endpoints without embedded secrets', () => {
     for (const endpoint of ['http://mail/service/soap', 'https://x/service/admin/soap', 'https://a:b@x/service/soap', 'https://x/service/soap?token=x', 'nonsense']) {
       expect(zimbraAccountSchema.safeParse({ ...account, endpoint }).success).toBe(false);
