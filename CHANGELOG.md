@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+- Expand Zimbra user-mailbox integration with MIME uploads, reply/reply-all/forward,
+  partial draft edits, immutable send snapshots, durable attempt recovery and
+  native scheduled-delivery management.
+- Add contacts/groups/GAL, identities/signatures/preferences/out-of-office,
+  incoming/outgoing filters, sharing/mountpoints and Briefcase revision workflows.
+- Add calendars/tasks, recurrence/exceptions, free/busy/working hours, invitation
+  responses/forwarding/counter proposals, reminders and ICS import/export.
+- Enforce recipient restrictions across supported side effects; refuse native
+  paths whose mutable or server-derived recipients cannot be checked reliably.
+- Document exact operation contracts, concurrency/partial-result limitations and
+  disposable-account acceptance. Mock/source qualification does not claim live
+  corporate compatibility, outbound delivery or deployment.
+
 ## 3.1.0 - 2026-10-13
 
 ### Agent workflow and documentation

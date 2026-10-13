@@ -106,13 +106,22 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   and report cancellation as observed state rather than proof of non-delivery.
   Scheduling and delivery are distinct: read-back of autoSendTime does not prove
   the scheduler task exists or has delivered anything. No live mailbox writes.
-- Current increment: scheduleDraft, getScheduledDraft and cancelScheduledDraft
+- f32c0d9: scheduleDraft, getScheduledDraft and cancelScheduledDraft
   preserve raw MIME, use revision guards/read-back and share durable claims with
   immediate sending. Claims survive cancellation and uncertain writes; a new
   authorized send needs a new reviewed draft ID after reconciliation. Restricted
   accounts can cancel but cannot schedule mutable native drafts. Native scheduler
   state/delivery are not implied by draft metadata. All 242 focused Zimbra/router/
   documentation tests pass, including concurrent manual-vs-scheduled attempts.
+- Current increment: README, backend documentation, changelog and cross-provider
+  outcome/acceptance guidance now describe the expanded integration. Added an
+  explicit disposable-account acceptance matrix, with no corporate writes.
+  Full release:check passed on Node 24 at f32c0d9: 1,268 unit tests, 8 integration
+  tests (3 external IMAP tests skipped), build/docs/English checks, stdio/HTTP,
+  import and installed-command smoke, npm audit with zero vulnerabilities. The
+  subsequent documentation edits passed the five documentation contract tests.
+  Before PR: complete new calendar attachment composition, audit remaining
+  operational gaps, then rerun relevant final gates and create the review PR.
 
 Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate
