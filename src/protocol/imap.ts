@@ -284,6 +284,33 @@ export class ImapClient {
     }
   }
 
+  async searchUidPage(folder: string, uidValidity: string, criteria: object, limit: number, before?: number): Promise<{ uids: number[]; nextBefore: number | null }> {
+    if (!this.client) throw new Error('Not connected');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('Pagination limit must be between 1 and 500');
+    const lock = await this.client.getMailboxLock(folder);
+    try {
+      const mailbox = this.client.mailbox;
+      if (!mailbox || mailbox.uidValidity.toString() !== uidValidity) throw new Error('Mailbox identity changed during pagination');
+      let high = Math.min(before === undefined ? 4_294_967_295 : before - 1, mailbox.uidNext - 1);
+      const uids: number[] = [];
+      // At most 10 bounded SEARCH replies, even for sparse UID spaces. A page
+      // may be empty with a continuation: callers must follow nextCursor.
+      for (let window = 0; high > 0 && window < 10; window++) {
+        const low = Math.max(1, high - 9_999);
+        const found = await this.client.search({ ...criteria, uid: `${low}:${high}` }, { uid: true });
+        const matches = (found || []).filter(uid => uid >= low && uid <= high).sort((a, b) => b - a);
+        for (const uid of matches) {
+          uids.push(uid);
+          if (uids.length === limit) return { uids, nextBefore: uid > 1 ? uid : null };
+        }
+        high = low - 1;
+      }
+      return { uids, nextBefore: high > 0 ? high + 1 : null };
+    } finally {
+      lock.release();
+    }
+  }
+
   async searchMessageUids(
     criteria: unknown,
     folder: string = 'INBOX',

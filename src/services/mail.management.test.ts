@@ -9,6 +9,7 @@ const imap = {
   })),
   listMessages: vi.fn().mockResolvedValue([]),
   searchMessages: vi.fn().mockResolvedValue([]),
+  searchUidPage: vi.fn().mockResolvedValue({ uids: [], nextBefore: null }),
   listMessageUids: vi.fn().mockResolvedValue([]),
   searchMessageUids: vi.fn().mockResolvedValue([]),
   fetchMessagesByUids: vi.fn().mockResolvedValue([]),
@@ -100,6 +101,7 @@ beforeEach(() => {
   }));
   imap.listMessages.mockResolvedValue([]);
   imap.searchMessages.mockResolvedValue([]);
+  imap.searchUidPage.mockResolvedValue({ uids: [], nextBefore: null });
   imap.listMessageUids.mockResolvedValue([]);
   imap.searchMessageUids.mockResolvedValue([]);
   imap.fetchMessagesByUids.mockResolvedValue([]);
@@ -122,8 +124,8 @@ beforeEach(() => {
 });
 
 describe('MailService cursor and locator contracts', () => {
-  it('continues from an immutable snapshot and returns stable message locators', async () => {
-    imap.listMessageUids.mockResolvedValue([3, 2, 1]);
+  it('continues from a UID boundary and returns stable message locators', async () => {
+    imap.searchUidPage.mockResolvedValueOnce({ uids: [3, 2], nextBefore: 2 }).mockResolvedValueOnce({ uids: [1], nextBefore: null });
     imap.fetchMessagesByUids.mockImplementation(async (uids: number[]) => uids.map(uid => ({
       id: String(uid),
       uid,
@@ -138,12 +140,12 @@ describe('MailService cursor and locator contracts', () => {
     expect(first.items[0]?.id).toBe(first.items[0]?.locator);
     expect(first.items[0]?.locator).toMatch(/^imap:v1:/);
     expect(second.items.map(item => item.uid)).toEqual([1]);
-    expect(imap.listMessageUids).toHaveBeenCalledTimes(1);
+    expect(imap.searchUidPage).toHaveBeenLastCalledWith('INBOX', '123', { all: true }, 2, 2);
     expect(imap.fetchMessagesByUids).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a cursor reused for another mailbox', async () => {
-    imap.listMessageUids.mockResolvedValue([2, 1]);
+    imap.searchUidPage.mockResolvedValue({ uids: [2], nextBefore: 2 });
     imap.fetchMessagesByUids.mockImplementation(async (uids: number[]) => (
       uids.map(uid => ({ id: String(uid), uid }))
     ));
@@ -175,7 +177,7 @@ describe('MailService cursor and locator contracts', () => {
 
 describe('MailService redaction on standard reads', () => {
   it('redacts list and search metadata without changing stable identifiers', async () => {
-    imap.listMessageUids.mockResolvedValue([7]);
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: null });
     imap.searchMessageUids.mockResolvedValue([7]);
     imap.fetchMessagesByUids.mockResolvedValue([{
       id: '7',

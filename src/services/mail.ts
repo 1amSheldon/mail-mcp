@@ -24,10 +24,9 @@ import {
 } from '../domain/message-locator.js';
 import type { OutgoingAttachment, OutgoingMessage as SmtpOutgoingMessage } from '../domain/outgoing-message.js';
 import {
-  PaginationSnapshotStore,
-  type PaginationPage,
   type PaginationScope,
 } from '../utils/pagination-store.js';
+import { UidCursorStore } from '../utils/uid-cursors.js';
 import type { ParsedMail } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import { DraftWorkflow, contentFingerprint, matchesSentDraft } from './drafts.js';
@@ -44,7 +43,6 @@ export type { SearchEmailsQuery } from '../domain/mail-search.js';
 const DEFAULT_SENT_FOLDER = 'Sent';
 const DEFAULT_DRAFTS_FOLDER = 'Drafts';
 const DEFAULT_TRASH_FOLDER = 'Trash';
-const MAX_PAGINATION_SNAPSHOT_ITEMS = 10_000;
 const MAX_READ_BODY_CHARS = 200_000;
 const INLINE_DATA_IMAGE_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/_=-]+/gi;
 
@@ -193,9 +191,7 @@ export class MailService {
   private trashFolderPromise: Promise<string> | null = null;
   private readonly bodyCache = new MessageBodyCache();
   private readonly bodyFetches = new Map<string, Promise<ParsedMail>>();
-  private readonly paginationStore = new PaginationSnapshotStore<number>({
-    maxItemsPerSnapshot: MAX_PAGINATION_SNAPSHOT_ITEMS,
-  });
+  private readonly paginationStore = new UidCursorStore();
 
   constructor(account: EmailAccount, private readonly redact: boolean = false) {
     this.account = account;
@@ -221,64 +217,31 @@ export class MailService {
     this.paginationStore.clear();
   }
 
-  async listEmailsPage(options: ListEmailsPageOptions = {}): Promise<PaginationPage<LocatedMessageMetadata>> {
-    const folder = options.folder ?? 'INBOX';
-    const limit = options.limit ?? 10;
-    const identity = await this.imapClient.getMailboxIdentity(folder);
-    const scope = this.paginationScope(identity.path, identity.uidValidity, JSON.stringify({
-      kind: 'list',
-      headerOnly: options.headerOnly ?? false,
-    }));
-
-    const page = options.cursor
-      ? this.paginationStore.getNextPage(options.cursor, scope, limit)
-      : this.paginationStore.getFirstPage(
-          scope,
-          await this.imapClient.listMessageUids(identity.path, MAX_PAGINATION_SNAPSHOT_ITEMS),
-          limit,
-        );
-    return this.hydrateUidPage(page, identity.path, identity.uidValidity, options.headerOnly ?? false);
+  async listEmailsPage(options: ListEmailsPageOptions = {}) {
+    return this.uidPage({ all: true }, options, JSON.stringify({ kind: 'list', headerOnly: options.headerOnly ?? false }));
   }
 
-  async searchEmailsPage(
-    query: SearchEmailsQuery,
-    options: SearchEmailsPageOptions = {}
-  ): Promise<PaginationPage<LocatedMessageMetadata>> {
-    const folder = options.folder ?? 'INBOX';
-    const limit = options.limit ?? 10;
+  async searchEmailsPage(query: SearchEmailsQuery, options: SearchEmailsPageOptions = {}) {
     const normalizedQuery = normalizeSearchQuery(query);
-    const identity = await this.imapClient.getMailboxIdentity(folder);
-    const scope = this.paginationScope(
-      identity.path,
-      identity.uidValidity,
-      searchPaginationKey(normalizedQuery, options.headerOnly ?? false),
-    );
-
-    const page = options.cursor
-      ? this.paginationStore.getNextPage(options.cursor, scope, limit)
-      : this.paginationStore.getFirstPage(
-          scope,
-          await this.imapClient.searchMessageUids(
-            buildSearchCriteria(normalizedQuery),
-            identity.path,
-            MAX_PAGINATION_SNAPSHOT_ITEMS,
-          ),
-          limit,
-        );
-    return this.hydrateUidPage(page, identity.path, identity.uidValidity, options.headerOnly ?? false);
+    return this.uidPage(buildSearchCriteria(normalizedQuery), options, searchPaginationKey(normalizedQuery, options.headerOnly ?? false));
   }
 
-  private async hydrateUidPage(
-    page: PaginationPage<number>,
-    mailbox: string,
-    uidValidity: string,
-    headerOnly: boolean,
-  ): Promise<PaginationPage<LocatedMessageMetadata>> {
-    const messages = await this.imapClient.fetchMessagesByUids(page.items, mailbox, headerOnly);
+  private async uidPage(criteria: object, options: ListEmailsPageOptions, queryKey: string) {
+    const folder = options.folder ?? 'INBOX';
+    const limit = options.limit ?? 10;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new ValidationError('Pagination limit must be between 1 and 500');
+    const identity = await this.imapClient.getMailboxIdentity(folder);
+    const scope = this.paginationScope(identity.path, identity.uidValidity, queryKey);
+    const before = options.cursor ? this.paginationStore.read(options.cursor, scope) : undefined;
+    const page = await this.imapClient.searchUidPage(folder, identity.uidValidity, criteria, limit, before);
+    const messages = await this.imapClient.fetchMessagesByUids(page.uids, folder, options.headerOnly ?? false);
+    const after = await this.imapClient.getMailboxIdentity(folder);
+    if (after.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed during pagination');
     return {
-      items: this.locateMessages(messages, mailbox, uidValidity),
-      nextCursor: page.nextCursor,
-      total: page.total,
+      items: this.locateMessages(messages, folder, identity.uidValidity),
+      nextCursor: page.nextBefore === null ? null : this.paginationStore.issue(scope, page.nextBefore),
+      total: null,
+      partial: page.nextBefore !== null,
     };
   }
 
