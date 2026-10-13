@@ -14,6 +14,7 @@ export type MicrosoftProviderErrorKind =
   | 'validation';
 
 export class MicrosoftProviderError extends Error {
+  draftId?: string;
   constructor(
     public readonly provider: 'graph' | 'ews',
     public readonly kind: MicrosoftProviderErrorKind,

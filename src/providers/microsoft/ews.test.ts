@@ -106,7 +106,8 @@ describe('EwsClient', () => {
   });
 
   it('escapes every user-controlled send field and embeds attachment bytes safely', async () => {
-    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(SOAP_OK, {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValueOnce(new Response(SOAP_MESSAGES))
+      .mockResolvedValueOnce(new Response(SOAP_OK, {
       status: 200,
       headers: { 'request-id': 'ews-request' },
     }));
@@ -130,7 +131,12 @@ describe('EwsClient', () => {
     });
 
     const body = requestBody(fetchMock);
-    expect(result).toEqual({ provider: 'ews', status: 'accepted', requestId: 'ews-request' });
+    expect(result).toEqual({ provider: 'ews', status: 'accepted', draftId: 'item-1', requestId: 'ews-request' });
+    expect(body).toContain('MessageDisposition="SaveOnly"');
+    expect(body.indexOf('<t:Attachments>')).toBeLessThan(body.indexOf('<t:ToRecipients>'));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(String(fetchMock.mock.calls[1][1]?.body)).toContain('<m:SendItem SaveItemToFolder="true">');
+    expect(String(fetchMock.mock.calls[1][1]?.body)).toContain('Id="item-1" ChangeKey="change-1"');
     expect(body).toContain('<t:Subject>Quarterly &lt;report&gt; &amp; &quot;notes&quot;</t:Subject>');
     expect(body).toContain('&lt;img src=x onerror=&quot;alert(&apos;x&apos;)&quot;&gt; &amp; text');
     expect(body).toContain('valid@example.com&lt;/t:EmailAddress&gt;&lt;t:Mailbox&gt;');
@@ -142,6 +148,15 @@ describe('EwsClient', () => {
       Authorization: 'Bearer token',
       SOAPAction: '"http://schemas.microsoft.com/exchange/services/2006/messages/CreateItem"',
     });
+  });
+
+  it('preserves the saved draft ID when SendItem outcome is unknown', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValueOnce(new Response(SOAP_MESSAGES))
+      .mockRejectedValueOnce(new Error('connection reset after SendItem'));
+    const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });
+    await expect(client.sendMessage({ subject: 'S', body: 'B', to: ['to@example.com'], attachments: [{ name: 'a.txt', content: Buffer.from('a') }] }))
+      .rejects.toMatchObject({ kind: 'outcome_unknown', draftId: 'item-1' });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it('rejects bodyType values outside the EWS enum before serializing XML', async () => {
@@ -166,7 +181,8 @@ describe('EwsClient', () => {
   });
 
   it('accepts strict base64 attachment content from JSON callers', async () => {
-    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(SOAP_OK, { status: 200 }));
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValueOnce(new Response(SOAP_MESSAGES))
+      .mockResolvedValueOnce(new Response(SOAP_OK));
     const client = new EwsClient({
       endpoint: 'https://exchange.example/EWS/Exchange.asmx',
       fetch: fetchMock,

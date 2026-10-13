@@ -227,11 +227,13 @@ function providerErrorMessage(error: unknown): string {
     if (error.kind === 'outcome_unknown') {
       return JSON.stringify({ provider: error.provider, status: 'outcome_unknown', retrySafe: false,
         ...(error.requestId ? { requestId: error.requestId } : {}),
+        ...(error.draftId ? { draftId: error.draftId } : {}),
         nextAction: 'Do not resend automatically. Inspect Sent items and provider delivery logs before deciding whether to retry.' });
     }
     const metadata = [
       error.status !== undefined ? `HTTP ${error.status}` : undefined,
       error.requestId ? `request ${error.requestId}` : undefined,
+      error.draftId ? `draft ${error.draftId}` : undefined,
     ].filter(Boolean).join(', ');
     if (error.kind === 'validation' || error.kind === 'invalid_response') {
       return `[${error.provider}:${error.kind}] ${error.message}`;

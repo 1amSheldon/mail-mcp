@@ -243,21 +243,38 @@ export class EwsClient {
   async sendMessage(message: MicrosoftMessageContent): Promise<MicrosoftSendResult> {
     assertMessageContent(message, 'ews');
     const bodyType = messageBodyType(message.bodyType, 'ews');
-    const operation = '<m:CreateItem MessageDisposition="SendAndSaveCopy">'
-      + '<m:SavedItemFolderId><t:DistinguishedFolderId Id="sentitems" /></m:SavedItemFolderId>'
+    const hasAttachments = Boolean(message.attachments?.length);
+    const operation = `<m:CreateItem MessageDisposition="${hasAttachments ? 'SaveOnly' : 'SendAndSaveCopy'}">`
+      + `<m:SavedItemFolderId><t:DistinguishedFolderId Id="${hasAttachments ? 'drafts' : 'sentitems'}" /></m:SavedItemFolderId>`
       + '<m:Items><t:Message>'
       + `<t:Subject>${escapeXml(message.subject)}</t:Subject>`
       + `<t:Body BodyType="${bodyType}">${escapeXml(message.body)}</t:Body>`
+      + attachmentXml(message.attachments)
       + recipients('ToRecipients', message.to)
       + recipients('CcRecipients', message.cc)
       + recipients('BccRecipients', message.bcc)
       + recipients('ReplyTo', message.replyTo)
-      + attachmentXml(message.attachments)
       + '</t:Message></m:Items></m:CreateItem>';
-    const { response } = await this.soapResponse('CreateItem', operation, true);
+    let { response, body } = await this.soapResponse('CreateItem', operation, !hasAttachments);
+    let draftId: string | undefined;
+    if (hasAttachments) {
+      const draft = parseMessages(body)[0];
+      if (!draft) throw new MicrosoftProviderError('ews', 'invalid_response', 'EWS created no identifiable draft; no SendItem request was issued. Inspect Drafts before retrying.');
+      draftId = draft.itemId;
+      const send = '<m:SendItem SaveItemToFolder="true"><m:ItemIds>'
+        + `<t:ItemId Id="${escapeXml(draftId)}"${draft.changeKey ? ` ChangeKey="${escapeXml(draft.changeKey)}"` : ''} />`
+        + '</m:ItemIds><m:SavedItemFolderId><t:DistinguishedFolderId Id="sentitems" /></m:SavedItemFolderId></m:SendItem>';
+      try {
+        ({ response } = await this.soapResponse('SendItem', send, true));
+      } catch (error) {
+        if (error instanceof MicrosoftProviderError) error.draftId = draftId;
+        throw error;
+      }
+    }
     return {
       provider: 'ews',
       status: 'accepted',
+      ...(draftId ? { draftId } : {}),
       ...(requestIdFrom(response) ? { requestId: requestIdFrom(response) } : {}),
     };
   }
