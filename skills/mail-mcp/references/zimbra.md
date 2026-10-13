@@ -38,7 +38,7 @@ Preserve the returned ID exactly, including any shared-mailbox prefix.
 | `zimbra.sessionStatus` | `remote?` | Local state by default; remote=true also verifies current server access |
 | `zimbra.getSendStatus` | `draftId` | Durable local attempt state; no network request |
 | `zimbra.verifySentMessage` | RFC `messageId`, `limit?` (1-100, default 20) | Exact Message-ID verification in Sent; found/not_found/indeterminate |
-| `zimbra.searchMessages` | `query`, `limit?`, `cursor?` | Native query, compact items and continuation |
+| `zimbra.searchMessages` | `query`, `limit?`, `cursor?`, `inDumpster?` | Native query, compact items and continuation; dumpster defaults false and is bound to the cursor |
 | `zimbra.readMessage` | `messageId` | Body, recipients, headers/attachment metadata; does not mark read |
 | `zimbra.getRawMessage` | `messageId`, `maxBytes?` | Original RFC 822 bytes; default 10 MiB, maximum 50 MiB |
 | `zimbra.getThread` | `conversationId` | Conversation metadata; read individual messages afterward |
@@ -226,6 +226,15 @@ Writes through `mail_mutate`:
 | `zimbra.createSignature` | `name`, `contents` | May become default if the account has no default signature |
 | `zimbra.updateSignature` | `signatureId`, `name?`, `contents?` | Change supplied attributes; at least one change required |
 | `zimbra.deleteSignature` | `signatureId` | Delete selected signature |
+
+To recover deleted mail, search with `inDumpster: true` and inspect the returned
+candidate metadata/content before selecting IDs. Keep that flag on every cursor
+page. Dumpster availability depends on server retention and permissions; an empty
+result does not prove physical erasure. After explicit recovery authorization,
+call `recoverMessages` with those IDs and the destination folder, then search the
+destination normally and verify the recovered content (IDs can change). Do not
+assume ordinary `readMessage` can read a dumpster ID, or repeat a recovery after
+an uncertain write without checking both scopes.
 
 Arrays of message/contact IDs accept 1-100 entries. Contact fields are a map, e.g.
 `{"firstName":"Alex","email":"alex@example.test","company":"Supplier"}`;

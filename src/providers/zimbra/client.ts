@@ -261,8 +261,8 @@ export class ZimbraClient {
     throw new ZimbraError('INVALID_INPUT', 'Unknown Zimbra read operation.');
   }
 
-  private async search(operation: string, v: { query: string; limit: number; cursor?: string; type?: string; startsAt?: string; endsAt?: string }): Promise<unknown> {
-    const key = JSON.stringify([operation, v.query, v.limit, v.type, v.startsAt, v.endsAt]);
+  private async search(operation: string, v: { query: string; limit: number; cursor?: string; type?: string; startsAt?: string; endsAt?: string; inDumpster?: boolean }): Promise<unknown> {
+    const key = JSON.stringify([operation, v.query, v.limit, v.type, v.startsAt, v.endsAt, v.inDumpster ?? false]);
     const cursor = v.cursor ? this.cursors.get(v.cursor) : undefined;
     if (v.cursor && (!cursor || cursor.key !== key || cursor.expires <= Date.now())) throw new ZimbraError('INVALID_INPUT', 'Zimbra cursor expired or does not match the query. Restart the search.');
     const offset = cursor?.offset ?? 0;
@@ -273,6 +273,7 @@ export class ZimbraClient {
       : operation === 'searchTasks' ? ['task', 'task'] : ['message', 'm'];
     const result = gal ? await this.request('SearchGal', { name: { _content: v.query }, type: v.type, limit: v.limit, offset, sortBy: 'nameAsc', needExp: 1 }, 'urn:zimbraAccount')
       : await this.request('Search', { query: { _content: v.query }, limit: v.limit, offset, types, fetch: 'all', read: 0, max: 20000, sortBy: 'dateDesc',
+        ...(operation === 'searchMessages' ? { inDumpster: v.inDumpster ? 1 : 0 } : {}),
         ...(operation === 'searchAppointments' ? { calExpandInstStart: Date.parse(v.startsAt!), calExpandInstEnd: Date.parse(v.endsAt!) } : {}) });
     const received = list(result[gal ? 'cn' : resultKey]);
     const pageable = !gal || truth(result.paginationSupported);
@@ -330,6 +331,7 @@ export class ZimbraClient {
         const sender = await this.composeIdentity(d);
         const signature = d.includeSignature ? await this.composeSignature(d.signatureId) : undefined;
         let inReplyTo: string | undefined;
+        let replacementReferences: string[] | undefined;
         let textBody = d.textBody ?? (!d.isHtml ? d.body : undefined);
         let htmlBody = d.htmlBody ?? (d.isHtml ? d.body : undefined);
         if (signature) {
@@ -347,6 +349,12 @@ export class ZimbraClient {
           if (d.replyType === 'r') {
             if (typeof mid !== 'string' || !/^<[^<>\s]+>$/.test(mid)) throw new ZimbraError('INVALID_INPUT', 'The original message has no usable RFC Message-ID for a threaded reply.');
             inReplyTo = mid;
+            if (operation === 'updateDraft') {
+              const rawSource = await parseMime(await this.attachment({ messageId: d.originalMessageId, maxBytes: MAX_MIME_BYTES }) as Buffer);
+              if (rawSource.messageId !== mid) throw new ZimbraError('CONFLICT', 'The selected original message changed while reading its threading headers.');
+              const references = Array.isArray(rawSource.references) ? rawSource.references : rawSource.references ? [rawSource.references] : [];
+              replacementReferences = [...new Set([...references, mid])].slice(-100);
+            }
           }
         }
         if ((textBody?.length ?? 0) > 200000 || (htmlBody?.length ?? 0) > 200000) throw new ZimbraError('INVALID_INPUT', 'Body including signature and quote exceeds 200,000 characters.');
@@ -356,7 +364,7 @@ export class ZimbraClient {
           ...(d.from || d.identityId ? { from: sender.from } : {}), ...(d.replyTo !== undefined ? { replyTo: d.replyTo } : {}),
           ...(d.identityId ? { identityId: d.identityId } : {}),
           ...(d.attachments === undefined ? {} : { attachments: d.attachments }),
-        } }, d.originalMessageId ? { originalMessageId: d.originalMessageId, replyType: d.replyType!, inReplyTo, attachOriginal: d.attachOriginal } : undefined);
+        } }, d.originalMessageId ? { originalMessageId: d.originalMessageId, replyType: d.replyType!, inReplyTo, references: replacementReferences, attachOriginal: d.attachOriginal } : undefined);
         const parts = [
           ...(textBody === undefined ? [] : [{ ct: 'text/plain', content: { _content: textBody } }]),
           ...(htmlBody === undefined ? [] : [{ ct: 'text/html', content: { _content: htmlBody } }]),
@@ -575,7 +583,7 @@ export class ZimbraClient {
     return { ...sendStatus(record), result };
   }
 
-  private async patchDraft(v: Extract<typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output, { changes: unknown }>, linkage?: { originalMessageId: string; replyType: 'r' | 'w'; inReplyTo?: string; attachOriginal: boolean }): Promise<unknown> {
+  private async patchDraft(v: Extract<typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output, { changes: unknown }>, linkage?: { originalMessageId: string; replyType: 'r' | 'w'; inReplyTo?: string; references?: string[]; attachOriginal: boolean }): Promise<unknown> {
     const source = await this.assertDraft(v.draftId);
     if (source.autoSendTime && Number(source.autoSendTime) > 0) throw new ZimbraError('CONFLICT', 'This draft has native scheduled delivery. Cancel the schedule explicitly before editing; ordinary SaveDraft would silently cancel it.');
     const revision = String(source.ms ?? '');
@@ -609,9 +617,9 @@ export class ZimbraClient {
       to: c.to?.join(', ') ?? field(parsed.to), cc: c.cc?.join(', ') ?? field(parsed.cc), bcc: c.bcc?.join(', ') ?? field(parsed.bcc),
       replyTo: c.replyTo ?? sender?.replyTo ?? field(parsed.replyTo), subject: c.subject ?? parsed.subject ?? '',
       ...(text !== undefined ? { text } : {}), ...(html !== undefined ? { html } : {}), attachments, headers,
-      threading: { inReplyTo: linkage?.inReplyTo ?? parsed.inReplyTo, references: parsed.references },
+      threading: linkage ? { inReplyTo: linkage.inReplyTo, references: linkage.references } : { inReplyTo: parsed.inReplyTo, references: parsed.references },
     };
-    if (!message.to) throw new ZimbraError('INVALID_INPUT', 'The draft has no To recipients.');
+    if (![message.to, message.cc, message.bcc].some(value => value?.trim())) throw new ZimbraError('INVALID_INPUT', 'The draft has no To, Cc or Bcc recipients.');
     const composed = await composeMime(message, this.account.user, this.account.allowedAttachmentRoots ?? [], { messageId: parsed.messageId, date: parsed.date });
     const aid = await this.upload(composed, 'message.eml', 'message/rfc822');
     const result = await this.request('SaveDraft', { m: { aid, id: v.draftId,

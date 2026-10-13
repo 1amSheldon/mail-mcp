@@ -7,6 +7,47 @@ const account = { id: 'z', name: 'Zimbra', backend: 'zimbra' as const, user: 'me
 const session = () => ({ kind: 'zimbra-session-v1' as const, endpoint: account.endpoint, user: account.user, authToken: 'session', expiresAt: Date.now() + 60000 });
 
 describe('Zimbra MIME composition and upload', () => {
+  it.each(['cc', 'bcc'] as const)('patches a draft addressed only through %s', async field => {
+    const raw = Buffer.from(`From: me@example.test\r\n${field}: recipient@example.test\r\nSubject: Old\r\n\r\nBody`);
+    let uploaded: Buffer | undefined;
+    const fetch = vi.fn<typeof globalThis.fetch>()
+      .mockResolvedValueOnce(new Response(JSON.stringify({ Body: { GetMsgResponse: { m: [{ id: '8', f: 'd', ms: 42 }] } } })))
+      .mockResolvedValueOnce(new Response(raw))
+      .mockImplementationOnce(async (_url, init) => {
+        const form = init?.body as FormData;
+        uploaded = Buffer.from(await (form.get('file') as Blob).arrayBuffer());
+        return new Response(`200,'${form.get('requestId')}','aid'`);
+      })
+      .mockResolvedValueOnce(new Response(JSON.stringify({ Body: { SaveDraftResponse: { m: [{ id: '8' }] } } })));
+    const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session() });
+    await client.executeWrite('updateDraft', { draftId: '8', changes: { subject: 'New' } });
+    const updated = await simpleParser(uploaded!);
+    expect(updated.subject).toBe('New');
+    expect(updated.to).toBeUndefined();
+    expect(updated[field]).toMatchObject({ value: [{ address: 'recipient@example.test' }] });
+  });
+  it.each(['r', 'w'] as const)('replaces old threading when explicitly relinking a draft as %s', async replyType => {
+    const oldRaw = Buffer.from('From: me@example.test\r\nTo: to@example.test\r\nSubject: Old\r\nIn-Reply-To: <old@example.test>\r\nReferences: <old-root@example.test> <old@example.test>\r\n\r\nBody');
+    let uploaded: Buffer | undefined;
+    const payloads: any[] = [];
+    const fetch = vi.fn<typeof globalThis.fetch>(async (url, init) => {
+      if (String(url).includes('/service/home/')) return new Response(String(url).includes('id=7&') ? 'Message-ID: <new@example.test>\r\nReferences: <new-root@example.test>\r\n\r\nSource' : oldRaw);
+      if (String(url).includes('/service/upload')) {
+        const form = init?.body as FormData;
+        uploaded = Buffer.from(await (form.get('file') as Blob).arrayBuffer());
+        return new Response(`200,'${form.get('requestId')}','aid'`);
+      }
+      const payload = JSON.parse(String(init?.body)); payloads.push(payload);
+      const read = payload.Body.GetMsgRequest;
+      return new Response(JSON.stringify({ Body: read ? { GetMsgResponse: { m: [read.m.id === '7' ? { id: '7', mid: { _content: '<new@example.test>' } } : { id: '8', f: 'd', ms: 42 }] } } : { SaveDraftResponse: { m: [{ id: '8' }] } } }));
+    });
+    const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session() });
+    await client.executeWrite('updateDraft', { draftId: '8', to: ['to@example.test'], subject: 'New', body: 'Body', originalMessageId: '7', replyType });
+    const updated = await simpleParser(uploaded!);
+    expect(updated.inReplyTo).toBe(replyType === 'r' ? '<new@example.test>' : undefined);
+    expect(updated.references).toEqual(replyType === 'r' ? ['<new-root@example.test>', '<new@example.test>'] : undefined);
+    expect(payloads.at(-1).Body.SaveDraftRequest.m).toMatchObject({ origid: '7', rt: replyType });
+  });
   it('does not silently cancel a native schedule while patching a draft', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>().mockResolvedValueOnce(new Response(JSON.stringify({ Body: { GetMsgResponse: { m: [{ id: '8', f: 'd', ms: 42, autoSendTime: Date.now() + 3600000 }] } } })));
     const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session() });

@@ -130,6 +130,15 @@ describe('Zimbra SOAP transport and authentication', () => {
 });
 
 describe('Zimbra operations', () => {
+  it('searches the dumpster explicitly and binds continuation to that scope', async () => {
+    const { client, body, fetch } = make(response('Search', { m: [{ id: '7' }], more: true }), response('Search', { m: [{ id: '6' }], more: false }));
+    const first = await client.executeRead('searchMessages', { query: '*', limit: 1, inDumpster: true }) as { nextCursor: string };
+    expect(body().Body.SearchRequest).toMatchObject({ inDumpster: 1, read: 0, fetch: 'all' });
+    await expect(client.executeRead('searchMessages', { query: '*', limit: 1, cursor: first.nextCursor })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(fetch).toHaveBeenCalledOnce();
+    await client.executeRead('searchMessages', { query: '*', limit: 1, inDumpster: true, cursor: first.nextCursor });
+    expect(body(1).Body.SearchRequest).toMatchObject({ inDumpster: 1, offset: 1 });
+  });
   it('reads without marking messages read', async () => {
     const { client, body } = make(response('GetMsg', { m: [{ id: '7' }] }));
     await client.executeRead('readMessage', { messageId: '7' });

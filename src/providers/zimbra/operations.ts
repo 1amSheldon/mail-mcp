@@ -52,7 +52,7 @@ export const ZIMBRA_READ_SCHEMAS = {
   getSendStatus: z.object({ draftId: id }).strict(),
   getScheduledDraft: z.object({ draftId: id }).strict(),
   verifySentMessage: z.object({ messageId: rfcMessageId, limit: z.number().int().min(1).max(100).default(20) }).strict(),
-  searchMessages: z.object(page).strict(),
+  searchMessages: z.object({ ...page, inDumpster: z.boolean().default(false) }).strict(),
   searchDocuments: z.object(page).strict(),
   searchAppointments: z.object({ ...page, ...calendarWindow }).strict().refine(validWindow),
   searchTasks: z.object(page).strict(),
