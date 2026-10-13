@@ -184,7 +184,7 @@ export class ZimbraClient {
         return { status: 'session_available', remoteVerified: false, expiresAt: new Date(session.expiresAt).toISOString(), nextAction: 'Run accounts login ACCOUNT_ID locally when the session expires.' };
       }
       case 'searchMessages': case 'searchContacts': return this.search(operation, v as { query: string; limit: number; cursor?: string });
-      case 'readMessage': return this.request('GetMsg', { m: { id: (v as { messageId: string }).messageId, html: 1, read: 0, max: 200000 } });
+      case 'readMessage': return this.request('GetMsg', { m: { id: (v as { messageId: string }).messageId, html: 1, read: 0, wantModSeq: 1, max: 200000 } });
       case 'getRawMessage': return this.attachment(v as { messageId: string; maxBytes: number });
       case 'getThread': return { ...await this.request('GetConv', { c: { id: (v as { conversationId: string }).conversationId } }), partial: true, warning: 'Conversation metadata only. Read individual messages explicitly; completeness is not guaranteed.' };
       case 'listFolders': return this.request('GetFolder', { folder: { path: '/' } });

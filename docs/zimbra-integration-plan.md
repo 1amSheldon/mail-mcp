@@ -33,6 +33,23 @@ final documentation. Mock transport tests establish payload/error behavior; they
 do not establish compatibility with the corporate server. Record unverified live
 flows explicitly and provide an opt-in disposable-account acceptance procedure.
 
+Protocol reference revision: Zimbra/zm-mailbox
+`bb771f67c53ab99a202ef0a70e1768f2fa05209b` (develop, inspected 2026-10-13).
+GetMsg's `MsgSpec.wantModSeq` must be requested to obtain the `ms` used by safe
+draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
+`soap/src/java/com/zimbra/soap/mail/type/MsgSpec.java` at that revision.
+
+## Completed increments
+
+- c1c18bd: typed folder/contact/signature operations and schema-derived routing.
+- c574244: MIME uploads, raw reads and conflict-guarded partial draft updates.
+
+Qualification so far: TypeScript passes; 1,155 unit tests were exercised. The only
+failure was an invalid placeholder in a documentation example; after correcting
+it, all five documentation tests passed. Live corporate writes remain untested.
+The complete acceptance matrix above is still pending; do not treat these
+increments as release qualification.
+
 ## Delivery sequence
 
 1. Typed native operations and mailbox organization/contact foundations.

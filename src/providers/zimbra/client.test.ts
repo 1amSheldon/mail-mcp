@@ -127,7 +127,7 @@ describe('Zimbra operations', () => {
   it('reads without marking messages read', async () => {
     const { client, body } = make(response('GetMsg', { m: [{ id: '7' }] }));
     await client.executeRead('readMessage', { messageId: '7' });
-    expect(body().Body.GetMsgRequest.m).toMatchObject({ id: '7', read: 0, max: 200000 });
+    expect(body().Body.GetMsgRequest.m).toMatchObject({ id: '7', read: 0, wantModSeq: 1, max: 200000 });
   });
   it('uses opaque query-bound consumed cursors for native paging', async () => {
     const { client, body } = make(response('Search', { m: [{ id: '7' }], more: true }), response('Search', { m: [{ id: '6' }], more: false }));
