@@ -1,4 +1,4 @@
-import { AppleMailError } from './errors.js';
+import { AppleMailError, AppleMailSendOutcomeUnknownError } from './errors.js';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import { OsascriptRunner } from './runner.js';
@@ -125,7 +125,7 @@ export class AppleMailAdapter {
 
   async compose(input: AppleComposeInput): Promise<AppleMailMutationResult> {
     const validated = await this.withValidatedAttachments(input);
-    return await this.execute('compose', composeScript(validated));
+    return await this.execute('compose', composeScript(validated), true);
   }
 
   async createDraft(input: AppleDraftInput): Promise<AppleMailMutationResult> {
@@ -135,17 +135,17 @@ export class AppleMailAdapter {
 
   async reply(input: AppleReplyInput): Promise<AppleMailMutationResult> {
     const validated = await this.withValidatedAttachments(input);
-    return await this.execute('reply', replyScript(validated));
+    return await this.execute('reply', replyScript(validated), input.send !== false);
   }
 
   async replyAll(input: AppleReplyInput): Promise<AppleMailMutationResult> {
     const validated = await this.withValidatedAttachments(input);
-    return await this.execute('replyAll', replyAllScript(validated));
+    return await this.execute('replyAll', replyAllScript(validated), input.send !== false);
   }
 
   async forward(input: AppleForwardInput): Promise<AppleMailMutationResult> {
     const validated = await this.withValidatedAttachments(input);
-    return await this.execute('forward', forwardScript(validated));
+    return await this.execute('forward', forwardScript(validated), input.send !== false);
   }
 
   async updateMessage(input: AppleMessageUpdateInput): Promise<AppleMailMutationResult> {
@@ -188,7 +188,7 @@ export class AppleMailAdapter {
     return await this.execute('deleteRule', deleteRuleScript(input));
   }
 
-  private async execute<T>(operation: AppleMailOperation, script: string): Promise<T> {
+  private async execute<T>(operation: AppleMailOperation, script: string, sendsMail = false): Promise<T> {
     if (['listRules', 'createRule', 'updateRule', 'deleteRule'].includes(operation) && !this.allowGlobalRules) {
       throw new AppleMailError('INVALID_ARGUMENT', 'Apple Mail rules are application-global. Configure allowGlobalRules=true only when access to rules across all Mail.app accounts is intended.');
     }
@@ -199,10 +199,14 @@ export class AppleMailAdapter {
       );
     }
     return await this.executor.run(async () => {
-      const output = await this.runner.run(script, { timeoutMs: this.timeoutMs });
       try {
+        const output = await this.runner.run(script, { timeoutMs: this.timeoutMs });
         return JSON.parse(output) as T;
       } catch (error) {
+        if (sendsMail && !(error instanceof AppleMailError && error.code === 'PERMISSION_DENIED')) {
+          throw new AppleMailSendOutcomeUnknownError(error);
+        }
+        if (error instanceof AppleMailError) throw error;
         throw new AppleMailError(
           'INVALID_RESPONSE',
           `Apple Mail returned invalid JSON for ${operation}.`,

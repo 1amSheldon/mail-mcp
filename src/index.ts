@@ -214,12 +214,21 @@ function providerErrorMessage(error: unknown): string {
     return `[${error.code}] ${error.message}`;
   }
   if (error instanceof AppleMailError) {
+    if (error.code === 'OUTCOME_UNKNOWN') {
+      return JSON.stringify({ provider: 'apple-mail', status: 'outcome_unknown', retrySafe: false,
+        nextAction: 'Do not resend automatically. Check Outbox and Sent in Mail.app before deciding whether to retry.' });
+    }
     const safeMessage = error.code === 'EXECUTION_FAILED'
       ? 'Apple Mail automation failed. Check Mail.app state and macOS Automation permissions.'
       : error.message;
     return `[${error.code}] ${safeMessage}`;
   }
   if (error instanceof MicrosoftProviderError) {
+    if (error.kind === 'outcome_unknown') {
+      return JSON.stringify({ provider: error.provider, status: 'outcome_unknown', retrySafe: false,
+        ...(error.requestId ? { requestId: error.requestId } : {}),
+        nextAction: 'Do not resend automatically. Inspect Sent items and provider delivery logs before deciding whether to retry.' });
+    }
     const metadata = [
       error.status !== undefined ? `HTTP ${error.status}` : undefined,
       error.requestId ? `request ${error.requestId}` : undefined,

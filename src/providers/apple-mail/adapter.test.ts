@@ -10,6 +10,23 @@ import { APPLE_MAIL_OPERATION_KINDS } from './types.js';
 import type { AppleScriptRunner } from './runner.js';
 
 describe('AppleMailAdapter', () => {
+  it.each(['timeout', 'invalid-json'])('preserves send uncertainty after %s', async failure => {
+    const run = failure === 'timeout' ? vi.fn().mockRejectedValue(new AppleMailError('TIMEOUT', 'timed out'))
+      : vi.fn().mockResolvedValue('{bad json');
+    const adapter = new AppleMailAdapter({ platform: 'darwin', runner: { run } });
+    await expect(adapter.compose({ account: 'Personal', to: ['to@example.com'], subject: 'S', body: 'B' }))
+      .rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN', retrySafe: false });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('keeps definite permission denial and draft-only timeouts separate from sending', async () => {
+    const run = vi.fn().mockRejectedValueOnce(new AppleMailError('PERMISSION_DENIED', 'denied'))
+      .mockRejectedValueOnce(new AppleMailError('TIMEOUT', 'timed out'));
+    const adapter = new AppleMailAdapter({ platform: 'darwin', runner: { run } });
+    await expect(adapter.compose({ to: ['to@example.com'], subject: 'S', body: 'B' })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(adapter.reply({ account: 'Personal', messageId: '1', body: 'B', send: false }))
+      .rejects.toMatchObject({ code: 'TIMEOUT' });
+  });
   it('blocks global rule access by default before invoking Mail.app', async () => {
     const runner: AppleScriptRunner = { run: vi.fn() };
     const adapter = new AppleMailAdapter({ runner, platform: 'darwin' });
