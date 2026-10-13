@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { getConfiguredAccounts } from '../config.js';
-import { MailMCPRuntimeState } from '../runtime-state.js';
+import { MailMCPRuntimeState, disconnectIfSupported } from '../runtime-state.js';
 import type { RuntimeProviderClient } from '../runtime-state.js';
 import { loadCredentials } from '../security/keychain.js';
 import { getValidAccessToken } from '../security/oauth2.js';
@@ -54,10 +54,12 @@ import type {
 } from './mailtrap/types.js';
 import type { MicrosoftMessageContent, MicrosoftSendResult } from './microsoft/common.js';
 import { EwsClient } from './microsoft/ews.js';
-import type { EwsMessageSummary, EwsSearchOptions } from './microsoft/ews.js';
+import type { EwsMessage, EwsSearchResult, EwsSearchOptions } from './microsoft/ews.js';
 import { MicrosoftGraphClient } from './microsoft/graph.js';
 import type {
   GraphMessageSummary,
+  GraphMessage,
+  GraphLookupResult,
   GraphThreadResult,
 } from './microsoft/graph.js';
 import type { PaginationPage, PaginationScope } from '../utils/pagination-store.js';
@@ -139,7 +141,7 @@ export interface AppleReadResultMap {
   searchMessages: PaginationPage<AppleMailMessageSummary>;
   readMessage: AppleMailMessage;
   getRawSource: { rawSource: string };
-  listRules: AppleMailRule[];
+  listRules: { scope: 'application-global'; rules: AppleMailRule[] };
 }
 
 export interface AppleWriteInputMap {
@@ -171,10 +173,10 @@ export interface MicrosoftReadInputMap {
 }
 
 export interface MicrosoftReadResultMap {
-  getMessage: GraphMessageSummary | EwsMessageSummary;
-  findByInternetMessageId: GraphMessageSummary[];
+  getMessage: GraphMessage | EwsMessage;
+  findByInternetMessageId: GraphLookupResult;
   getThread: GraphThreadResult;
-  searchMessages: EwsMessageSummary[];
+  searchMessages: EwsSearchResult;
 }
 
 export interface MicrosoftWriteInputMap {
@@ -270,6 +272,7 @@ export class ProviderRuntime {
     this.redact = options.redact ?? false;
     this.factories = {
       appleMail: options.factories?.appleMail ?? (account => new AppleMailAdapter({
+        allowGlobalRules: account.allowGlobalRules,
         allowedAttachmentRoots: account.allowedAttachmentRoots,
       })),
       microsoftGraph: options.factories?.microsoftGraph ?? ((account, tokenProvider) => (
@@ -301,6 +304,7 @@ export class ProviderRuntime {
   ): Promise<AppleReadResultMap[Operation]> {
     const account = await this.resolveAccount(accountId);
     if (!isAppleMailAccount(account)) this.backendMismatch(account, 'apple-mail');
+    this.assertAppleRuleAccess(account, operation);
     const scopedInput = operation === 'listAccounts'
       ? input
       : this.scopeAppleInput(account, input as { account?: string });
@@ -329,9 +333,9 @@ export class ProviderRuntime {
       case 'getRawSource': return this.redactResult(await client.getRawSource(
         scopedInput as AppleReadInputMap['getRawSource'],
       )) as AppleReadResultMap[Operation];
-      case 'listRules': return this.redactResult(await client.listRules(
+      case 'listRules': return this.redactResult({ scope: 'application-global', rules: await client.listRules(
         scopedInput as AppleReadInputMap['listRules'],
-      )) as AppleReadResultMap[Operation];
+      ) }) as AppleReadResultMap[Operation];
       default: return this.unsupportedOperation(accountId, operation);
     }
   }
@@ -343,6 +347,7 @@ export class ProviderRuntime {
   ): Promise<AppleWriteResultMap[Operation]> {
     const account = await this.resolveAccount(accountId);
     if (!isAppleMailAccount(account)) this.backendMismatch(account, 'apple-mail');
+    this.assertAppleRuleAccess(account, operation);
     const scopedInput = this.scopeAppleInput(account, input);
     const client = await this.appleMailClient(account);
 
@@ -432,7 +437,7 @@ export class ProviderRuntime {
         return this.unsupportedOperation(accountId, operation, 'ews');
       }
       const value = input as MicrosoftWriteInputMap['sendMessage'];
-      return this.redactResult(await (await this.ewsClient(account)).sendMessage(value.message));
+      return this.redactResult(await (await this.ewsClient(account)).sendMessage(value.message, value.saveToSentItems));
     }
     return this.backendMismatch(account, 'microsoft-graph or ews');
   }
@@ -479,6 +484,13 @@ export class ProviderRuntime {
   private async resolveAccount(accountId: string): Promise<ConfiguredAccount> {
     const account = (await this.getAccounts()).find(candidate => candidate.id === accountId);
     if (!account) {
+      const removed = [];
+      for (const clients of [this.state.appleMailAdapters, this.state.microsoftGraphClients, this.state.ewsClients, this.state.mailtrapClients]) {
+        const client = clients.get(accountId);
+        clients.delete(accountId);
+        if (client) removed.push(disconnectIfSupported(client));
+      }
+      await Promise.allSettled(removed);
       throw new ProviderRuntimeError(
         'ACCOUNT_NOT_FOUND',
         `Configured account ${accountId} was not found`,
@@ -494,6 +506,13 @@ export class ProviderRuntime {
       `Account ${account.id} uses backend ${backendName(account)}; expected ${expected}`,
       account.id,
     );
+  }
+
+  private assertAppleRuleAccess(account: AppleMailConfiguredAccount, operation: string): void {
+    if (['listRules', 'createRule', 'updateRule', 'deleteRule'].includes(operation) && account.allowGlobalRules !== true) {
+      throw new ProviderRuntimeError('OPERATION_NOT_ALLOWED',
+        'Apple Mail rules affect all Mail.app accounts. The local account configuration must explicitly set allowGlobalRules=true.');
+    }
   }
 
   private scopeAppleInput<Input extends { account?: string }>(
@@ -592,20 +611,38 @@ export class ProviderRuntime {
   }
 
   private async getOrCreate<Client extends RuntimeProviderClient>(
-    accountId: string,
+    account: ConfiguredAccount,
     backend: string,
     clients: Map<string, Client>,
     factory: () => Promise<Client> | Client,
   ): Promise<Client> {
+    const accountId = account.id;
     this.assertRunning(accountId);
-    const cached = clients.get(accountId);
-    if (cached) return cached;
-
     const creationKey = `${backend}:${accountId}`;
-    const inProgress = this.state.providerCreations.get(creationKey) as Promise<Client> | undefined;
-    if (inProgress) return await inProgress;
+    const fingerprint = JSON.stringify(account);
+    const cached = clients.get(accountId);
+    if (cached && this.state.providerConfigurations.get(creationKey) === fingerprint) return cached;
+    if (cached) clients.delete(accountId);
 
-    const creation = Promise.resolve().then(factory).then(client => {
+    const inProgress = this.state.providerCreations.get(creationKey) as Promise<Client> | undefined;
+    if (inProgress) {
+      await inProgress;
+      if (JSON.stringify(await this.resolveAccount(accountId)) !== fingerprint) {
+        throw new ProviderRuntimeError('ACCOUNT_SCOPE_MISMATCH', 'Account configuration changed during client creation', accountId);
+      }
+      return this.getOrCreate(account, backend, clients, factory);
+    }
+
+    const creation = Promise.resolve().then(async () => {
+      if (cached) await disconnectIfSupported(cached);
+      return factory();
+    }).then(async client => {
+      const current = (await this.getAccounts()).find(candidate => candidate.id === accountId);
+      if (JSON.stringify(current) !== fingerprint) {
+        await disconnectIfSupported(client);
+        throw new ProviderRuntimeError('ACCOUNT_SCOPE_MISMATCH', 'Account configuration changed during client creation', accountId);
+      }
+      this.state.providerConfigurations.set(creationKey, fingerprint);
       clients.set(accountId, client);
       return client;
     }).finally(() => {
@@ -619,7 +656,7 @@ export class ProviderRuntime {
 
   private async appleMailClient(account: AppleMailConfiguredAccount): Promise<AppleMailAdapter> {
     return await this.getOrCreate(
-      account.id,
+      account,
       'apple-mail',
       this.state.appleMailAdapters,
       () => this.factories.appleMail(account),
@@ -630,7 +667,7 @@ export class ProviderRuntime {
     account: MicrosoftGraphConfiguredAccount,
   ): Promise<MicrosoftGraphClient> {
     return await this.getOrCreate(
-      account.id,
+      account,
       'microsoft-graph',
       this.state.microsoftGraphClients,
       () => this.factories.microsoftGraph(account, () => this.getAccessToken(account.id)),
@@ -639,7 +676,7 @@ export class ProviderRuntime {
 
   private async ewsClient(account: EwsConfiguredAccount): Promise<EwsClient> {
     return await this.getOrCreate(
-      account.id,
+      account,
       'ews',
       this.state.ewsClients,
       () => this.factories.ews(account, () => this.getAccessToken(account.id)),
@@ -648,7 +685,7 @@ export class ProviderRuntime {
 
   private async mailtrapClient(account: MailtrapConfiguredAccount): Promise<MailtrapClient> {
     return await this.getOrCreate(
-      account.id,
+      account,
       'mailtrap',
       this.state.mailtrapClients,
       async () => {

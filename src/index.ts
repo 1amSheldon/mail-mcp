@@ -66,7 +66,7 @@ import {
 } from './providers/runtime.js';
 import type { MailtrapAction } from './providers/mailtrap/types.js';
 import { AppleMailError } from './providers/apple-mail/errors.js';
-import { MailtrapHttpError } from './providers/mailtrap/client.js';
+import { MailtrapHttpError, MailtrapSendOutcomeUnknownError } from './providers/mailtrap/client.js';
 import { MicrosoftProviderError } from './providers/microsoft/common.js';
 import type { OutgoingAttachment } from './domain/outgoing-message.js';
 import { validateOAuth2TokenEndpoint } from './security/oauth2.js';
@@ -125,6 +125,7 @@ export function parseAllowedTools(raw: string | undefined): Set<string> | undefi
 function formatDeliveryResult(result: { status?: unknown }) {
   const isError = result.status === 'smtp_rejected' ||
     result.status === 'smtp_connection_failed' ||
+    result.status === 'smtp_preflight_failed' ||
     result.status === 'smtp_outcome_unknown';
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
@@ -140,6 +141,19 @@ function requireObject(value: unknown, field: string): Record<string, unknown> {
 }
 
 function outgoingMessageFromArgs(args: Record<string, unknown>): MailSendMessage {
+  for (const field of ['to', 'subject', 'body', 'textBody', 'htmlBody', 'cc', 'bcc', 'replyTo', 'from']) {
+    if (args[field] !== undefined && typeof args[field] !== 'string') {
+      throw new Error(`${field} must be a string`);
+    }
+  }
+  for (const field of ['isHtml', 'includeSignature']) {
+    if (args[field] !== undefined && typeof args[field] !== 'boolean') {
+      throw new Error(`${field} must be a boolean`);
+    }
+  }
+  if (args.attachments !== undefined && !Array.isArray(args.attachments)) {
+    throw new Error('attachments must be an array');
+  }
   const body = args.body as string | undefined;
   const isHtml = args.isHtml === true;
   const text = (args.textBody as string | undefined) ?? (!isHtml ? body : undefined);
@@ -200,15 +214,29 @@ function providerErrorMessage(error: unknown): string {
     return `[${error.code}] ${error.message}`;
   }
   if (error instanceof AppleMailError) {
+    if (error.code === 'OUTCOME_UNKNOWN') {
+      return JSON.stringify({ provider: 'apple-mail', status: 'outcome_unknown', retrySafe: false,
+        nextAction: 'Do not resend automatically. Check Outbox and Sent in Mail.app before deciding whether to retry.' });
+    }
     const safeMessage = error.code === 'EXECUTION_FAILED'
       ? 'Apple Mail automation failed. Check Mail.app state and macOS Automation permissions.'
       : error.message;
     return `[${error.code}] ${safeMessage}`;
   }
   if (error instanceof MicrosoftProviderError) {
+    if (error.kind === 'outcome_unknown') {
+      return JSON.stringify({ provider: error.provider, status: 'outcome_unknown', retrySafe: false,
+        ...(error.requestId ? { requestId: error.requestId } : {}),
+        ...(error.draftId ? { draftId: error.draftId } : {}),
+        ...(error.operation === 'createDraft' ? { operation: 'createDraft', deliveryAttempted: false } : {}),
+        nextAction: error.operation === 'createDraft'
+          ? 'Do not create another draft automatically. Delivery was not attempted. Inspect Drafts for the saved copy before deciding whether to retry.'
+          : 'Do not resend automatically. Inspect Sent items and provider delivery logs before deciding whether to retry.' });
+    }
     const metadata = [
       error.status !== undefined ? `HTTP ${error.status}` : undefined,
       error.requestId ? `request ${error.requestId}` : undefined,
+      error.draftId ? `draft ${error.draftId}` : undefined,
     ].filter(Boolean).join(', ');
     if (error.kind === 'validation' || error.kind === 'invalid_response') {
       return `[${error.provider}:${error.kind}] ${error.message}`;
@@ -216,6 +244,10 @@ function providerErrorMessage(error: unknown): string {
     return `[${error.provider}:${error.kind}] Provider request failed${metadata ? ` (${metadata})` : ''}.`;
   }
   if (error instanceof MailtrapHttpError) {
+    if (error instanceof MailtrapSendOutcomeUnknownError) {
+      return JSON.stringify({ provider: 'mailtrap', status: error.kind, retrySafe: false,
+        ...(error.status ? { httpStatus: error.status } : {}), nextAction: error.nextAction });
+    }
     return `[mailtrap${error.status ? `:${error.status}` : ''}] ${error.message}`;
   }
   return error instanceof Error ? error.message : String(error);
@@ -306,6 +338,10 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
     case 'delete_filter':
       return `Delete SIEVE filter '${args.name as string}' on account ${args.accountId as string}`;
     case 'apple_mail_mutate':
+      if (['createRule', 'updateRule', 'deleteRule'].includes(args.operation as string)) {
+        return `Execute ${args.operation as string} on GLOBAL Apple Mail rules affecting ALL Mail.app accounts (configured access: ${args.accountId as string})`;
+      }
+      return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
     case 'microsoft_mail_send':
       return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
     case 'mailtrap_mutate': {
@@ -445,6 +481,9 @@ export class MailMCPServer {
       await service.connect();
       if (closed) throw new Error('IMAP closed during connection');
       if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
+      const current = (await getAccounts()).find(candidate => candidate.id === accountId);
+      if (JSON.stringify(current) !== JSON.stringify(account)) throw new Error('Account configuration changed during connection');
+      this.runtimeState.serviceConfigurations.set(accountId, JSON.stringify(account));
       this.services.set(accountId, service);
       return service;
     } catch (error) {
@@ -456,9 +495,16 @@ export class MailMCPServer {
 
   private async getService(accountId: string): Promise<MailService> {
     if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
-    if (this.services.has(accountId)) {
-      return this.services.get(accountId)!;
+    const account = (await getAccounts()).find(candidate => candidate.id === accountId);
+    const cached = this.services.get(accountId);
+    if (cached && (!account || this.runtimeState.serviceConfigurations.get(accountId) !== JSON.stringify(account))) {
+      // Revoke the cached policy before awaiting disconnect so concurrent calls cannot reuse it.
+      this.services.delete(accountId);
+      this.runtimeState.serviceConfigurations.delete(accountId);
+      await cached.disconnect();
     }
+    if (!account) throw new Error(`Account ${accountId} not found in configuration.`);
+    if (this.services.has(accountId)) return this.services.get(accountId)!;
     const existingCreation = this.serviceCreations.get(accountId);
     if (existingCreation) return existingCreation;
 
@@ -1102,8 +1148,9 @@ export class MailMCPServer {
       }
 
       if (name === 'create_draft') {
+        const message = outgoingMessageFromArgs(args);
         const service = await this.getService(args.accountId as string);
-        const draft = await service.createDraftMessage(outgoingMessageFromArgs(args));
+        const draft = await service.createDraftMessage(message);
         return {
           content: [{ type: 'text', text: JSON.stringify(draft, null, 2) }],
         };
@@ -1397,6 +1444,9 @@ export class MailMCPServer {
         const account = accounts.find(a => a.id === accountId);
         if (!account) {
           throw new Error(`Account ${accountId} not found in configuration.`);
+        }
+        if (account.authType !== 'login') {
+          throw new Error('ManageSieve currently supports login credentials only; OAuth2 accounts cannot use filter operations.');
         }
         const { loadCredentials } = await import('./security/keychain.js');
         const password = await loadCredentials(accountId);

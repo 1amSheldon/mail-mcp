@@ -1,4 +1,4 @@
-export { MailtrapClient, MailtrapHttpError } from './client.js';
+export { MailtrapClient, MailtrapHttpError, MailtrapSendOutcomeUnknownError } from './client.js';
 export { classifyMailtrapAction } from './classification.js';
 export { MAILTRAP_REDACTED, redactMailtrapSecrets } from './redaction.js';
 export type {

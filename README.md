@@ -5,6 +5,8 @@
 
 An email MCP server for Codex, Claude Code, Claude Desktop, and other MCP clients. It connects to IMAP, SMTP, ManageSieve, Apple Mail, Microsoft Graph, Exchange Web Services, and Mailtrap without putting mail credentials in client configuration.
 
+See [production hardening qualification](PRODUCTION-READINESS.md) for the audit closure map, compatibility changes, resource limits and live acceptance checks.
+
 ## Backends
 
 | Backend | What it supports | Runtime requirement |
@@ -48,6 +50,8 @@ The wizard supports IMAP/SMTP, Apple Mail, Microsoft Graph, EWS, and Mailtrap. L
 node dist/index.js accounts list
 node dist/index.js accounts remove ACCOUNT_ID
 ```
+
+Apple Mail rules are global to Mail.app and may affect every native account. Rule reads and mutations are disabled by default. An administrator may explicitly set `allowGlobalRules: true` on an Apple Mail account in the local account configuration to grant this broader access. The account selector then identifies access and destination mailboxes; it does not restrict which messages a rule matches. Rule listings report `scope: "application-global"`, and mutation confirmations name the global scope. Duplicate rule names must be resolved in Mail.app before updating or deleting them through MCP.
 
 Account definitions are stored in `~/.config/mail-mcp/accounts.json`. Passwords, OAuth2 credentials, and API tokens are stored in the operating-system credential store under `com.1amsheldon.mail-mcp`.
 
@@ -192,6 +196,10 @@ Provider operations use a prefix, for example `apple.listMessages`, `microsoft.s
 
 `microsoft.searchMessages` is available through EWS. Microsoft Graph supports ID lookup, Internet Message-ID lookup, and thread lookup instead.
 
+Microsoft lookup/search results use `{ messages, partial }`. Graph Internet Message-ID lookup follows all validated pages up to 100 pages or 10,000 messages; failures or limits return `partial: true` with a warning. EWS search returns one page (default 50, maximum 1,000). When `nextOffset` is present, pass it as `offset` with the same search options to continue until `partial: false`. EWS offsets refer to a live mailbox, not a snapshot; concurrent changes can affect paging. Missing paging metadata is reported as incomplete.
+
+`microsoft.getMessage` returns the full text or HTML body with its content type, sender, recipients, dates and attachment metadata. Search and thread operations return compact summaries. Attachment bytes are not embedded in message reads. Returned HTML is email content and must be treated as untrusted by clients; the server's configured text redaction also applies to provider message bodies.
+
 Moving to Trash and permanent deletion remain separate operations: `moveToTrash` and `permanentlyDelete`.
 
 ## Account configuration
@@ -212,6 +220,10 @@ Apple Mail accounts also accept `allowedAttachmentRoots`. Path-based attachments
 Mail.app automation is useful for native rules and accounts that do not expose server credentials, but AppleScript scans can be slow on large mailboxes. Configure the same mailbox through the IMAP + SMTP backend when fast server-side listing and search are required; use the Apple Mail backend only for Mail.app-specific operations.
 
 IMAP/SMTP OAuth2 uses pre-provisioned XOAUTH2 credentials and refreshes them at runtime. The package does not create provider applications or run browser consent flows.
+
+IMAP `useTLS: true` uses implicit TLS (normally port 993). `useTLS: false` requires a successful STARTTLS upgrade (normally port 143); servers without STARTTLS are rejected before authentication. Plaintext IMAP authentication is not supported.
+
+IMAP listing previews fetch at most 4 KiB of each MIME body. Full parsed-message reads are limited to 32 MiB before parsing. Attachment downloads fetch the selected MIME part with a decoded-byte limit (up to 50 MiB); missing part metadata uses a bounded 32 MiB full-message fallback. Oversized messages are rejected rather than silently truncated. Parsed-body caches have a 64 MiB payload budget per account, at most 100 entries, and a five-minute expiry that releases entries without another read.
 
 For Gmail, the shortest personal setup is usually a Google app password with 2-Step Verification enabled:
 
@@ -238,7 +250,7 @@ mail-mcp --confirm --audit-log --redact
 - `--allow-tools` narrows `mail_mutate` to named operations. Version 1 internal names remain accepted as CLI selectors during upgrades, but they are not advertised as MCP tools.
 - `--confirm` requires a short-lived confirmation ID bound to the exact tool arguments.
 - `--audit-log` writes JSONL diagnostics to `~/.config/mail-mcp/audit.log`.
-- `--redact` masks selected sensitive values before content reaches the client.
+- `--redact` masks selected sensitive text values before content reaches the client. Raw RFC 822 and binary attachment downloads remain byte-for-byte originals and are not sanitized.
 
 Nested audit fields are sanitized. Provider errors are reduced to safe codes and request metadata instead of returning raw response bodies or process stderr.
 
@@ -292,6 +304,7 @@ SMTP acceptance and the Sent-folder copy are independent. Send, reply, and forwa
 | `smtp_partially_accepted_sent_not_confirmed` | Partial SMTP acceptance without a confirmed Sent copy |
 | `smtp_rejected` | SMTP rejected every recipient |
 | `smtp_connection_failed` | The connection failed before a confirmed delivery attempt |
+| `smtp_preflight_failed` | Local validation or MIME composition failed; no SMTP message was attempted |
 | `smtp_outcome_unknown` | Delivery may have happened; do not retry automatically |
 
 Use `retrySafe`, `messageId`, and the `verifySentMessage` query operation. Absence from Sent is not proof that SMTP delivery failed.

@@ -69,12 +69,12 @@ describe('MessageBodyCache', () => {
   });
 
   describe('size', () => {
-    it('reports count of all entries including stale', () => {
+    it('expires entries without waiting for another cache read', () => {
       cache.set('a:inbox:1', makeMail('one'));
       cache.set('a:inbox:2', makeMail('two'));
       vi.advanceTimersByTime(101); // both now stale
-      // size reports raw store count (Map semantics), not live-only count
-      expect(cache.size).toBe(2);
+      expect(cache.size).toBe(0);
+      expect(cache.byteSize).toBe(0);
     });
 
     it('size is 0 for empty cache', () => {
@@ -133,6 +133,19 @@ describe('MessageBodyCache', () => {
   });
 
   describe('default constructor values', () => {
+    it('enforces a byte budget and does not cache oversized parsed messages', () => {
+      const bounded = new MessageBodyCache(100, 100, 1024);
+      const mail = { attachments: [{ content: Buffer.alloc(600) }] } as ParsedMail;
+      bounded.set('first', mail);
+      bounded.set('second', mail);
+      expect(bounded.get('first')).toBeUndefined();
+      expect(bounded.get('second')).toBe(mail);
+      expect(bounded.byteSize).toBeLessThanOrEqual(1024);
+      bounded.set('oversized', { attachments: [{ content: Buffer.alloc(2048) }] } as ParsedMail);
+      expect(bounded.get('oversized')).toBeUndefined();
+      bounded.clear();
+      expect(bounded.byteSize).toBe(0);
+    });
     it('default instance uses MESSAGE_CACHE_TTL_MS and MESSAGE_CACHE_MAX_SIZE', () => {
       const defaultCache = new MessageBodyCache();
       // Set 100 entries — should all fit

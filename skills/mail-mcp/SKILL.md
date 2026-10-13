@@ -69,3 +69,5 @@ Use the server's `mail://agent-guide` resource when available; it is the runtime
 Do not assume that every backend supports every operation. Report the actual capability boundary when a requested operation is unavailable.
 
 `microsoft.searchMessages` is EWS-only. Microsoft Graph supports `microsoft.getMessage`, `microsoft.findByInternetMessageId`, and `microsoft.getThread`.
+
+Microsoft search and Message-ID lookup return `{ messages, partial }`. For EWS only, continue with the returned `nextOffset` as `offset` and the same search options. Do not invent offsets. Never treat `partial: true` as proof that no other matching message exists.

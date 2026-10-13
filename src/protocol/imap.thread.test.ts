@@ -58,4 +58,20 @@ describe('thread reconstruction', () => {
     expect(flow.search).toHaveBeenCalledExactlyOnceWith({ threadId: '123' }, { uid: true });
     expect(flow.fetch).toHaveBeenCalledWith('1', expect.objectContaining({ threadId: true }), { uid: true });
   });
+
+  it('uses only the Gmail thread ID in every requested folder despite long References', async () => {
+    const { client, flow } = fixture();
+    flow.capabilities.set('X-GM-EXT-1', true);
+    flow.search.mockResolvedValue([1]);
+    flow.fetch.mockImplementation(async function* () {
+      yield {
+        uid: 1, threadId: 123n, envelope: {},
+        headers: Buffer.from(`Message-ID: <root@test>\r\nReferences: ${Array.from({ length: 40 }, (_, i) => `<ref${i}@test>`).join(' ')}\r\n`),
+      };
+    });
+    const service = new MailService(account);
+    (service as any).imapClient = client;
+    await service.getThread('123', 'INBOX', ['INBOX', 'Sent', 'Archive']);
+    expect(flow.search.mock.calls).toEqual(Array.from({ length: 3 }, () => [{ threadId: '123' }, { uid: true }]));
+  });
 });

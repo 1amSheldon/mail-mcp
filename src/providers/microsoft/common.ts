@@ -1,3 +1,4 @@
+import { readBoundedResponseText } from '../../utils/http-body.js';
 export type MicrosoftFetch = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -14,6 +15,8 @@ export type MicrosoftProviderErrorKind =
   | 'validation';
 
 export class MicrosoftProviderError extends Error {
+  draftId?: string;
+  operation?: 'createDraft';
   constructor(
     public readonly provider: 'graph' | 'ews',
     public readonly kind: MicrosoftProviderErrorKind,
@@ -155,7 +158,7 @@ export function assertMessageContent(
 
 export async function responseText(response: Response, limit = 16_384): Promise<string> {
   try {
-    return (await response.text()).slice(0, limit);
+    return await readBoundedResponseText(response, limit);
   } catch {
     return '';
   }
@@ -194,3 +197,4 @@ export function transportError(
     { cause: error },
   );
 }
+

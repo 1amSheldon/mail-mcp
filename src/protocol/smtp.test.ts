@@ -2,13 +2,17 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import nodemailer from 'nodemailer';
 import { SmtpClient, SmtpRecipientRejectedError } from './smtp.js';
 import type { EmailAccount } from '../config.js';
+import { loadCredentials } from '../security/keychain.js';
 
 const mocks = vi.hoisted(() => ({
   compose: vi.fn(),
   send: vi.fn(),
   verify: vi.fn(),
   close: vi.fn(),
+  getToken: vi.fn(),
 }));
+
+vi.mock('../security/oauth2.js', () => ({ getValidAccessToken: mocks.getToken }));
 
 vi.mock('../security/keychain.js', () => ({
   loadCredentials: vi.fn(() => Promise.resolve('test-password')),
@@ -68,6 +72,84 @@ describe('SmtpClient', () => {
     expect(mocks.verify).toHaveBeenCalledTimes(1);
     release();
     await Promise.all([first, second]);
+  });
+
+  it('consults the credential store on each OAuth connection and honors renewal', async () => {
+    const client = new SmtpClient({ ...account, authType: 'oauth2' });
+    await client.connect();
+    const options = vi.mocked(nodemailer.createTransport).mock.calls.at(-1)![0] as any;
+    expect(options.auth.accessToken).toBeUndefined();
+    const callback = options.auth.provisionCallback;
+    mocks.getToken.mockResolvedValueOnce('first').mockResolvedValueOnce('renewed');
+    const get = (renew: boolean) => new Promise<any[]>((resolve, reject) => {
+      callback(account.user, renew, (error: Error | null, ...values: any[]) => error ? reject(error) : resolve(values));
+    });
+    const [first, expiry] = await get(false);
+    expect(first).toBe('first');
+    expect(expiry).toBeLessThan(Date.now());
+    expect((await get(true))[0]).toBe('renewed');
+    expect(mocks.getToken.mock.calls).toEqual([[account.id, false], [account.id, true]]);
+  });
+
+  it('cancels pending verification without resurrecting a disconnected transport', async () => {
+    let release!: () => void;
+    mocks.verify.mockImplementationOnce(() => new Promise<void>(resolve => { release = resolve; }));
+    const client = new SmtpClient(account);
+    const pending = client.connect();
+    const cancelled = expect(pending).rejects.toThrow('cancelled');
+    await vi.waitFor(() => expect(mocks.verify).toHaveBeenCalledOnce());
+    client.disconnect();
+    expect(mocks.close).toHaveBeenCalled();
+    release();
+    await cancelled;
+    await expect(client.send('to@example.test', 'Subject', 'Body')).rejects.toThrow('not connected');
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it('cancels credential loading and preserves a replacement connection', async () => {
+    let release!: (value: string) => void;
+    vi.mocked(loadCredentials).mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const client = new SmtpClient(account);
+    const cancelled = expect(client.connect()).rejects.toThrow('cancelled');
+    client.disconnect();
+    await client.connect();
+    release('old-password');
+    await cancelled;
+    expect(mocks.verify).toHaveBeenCalledOnce();
+    await client.send('to@example.test', 'Subject', 'Body');
+    expect(mocks.send).toHaveBeenCalledOnce();
+  });
+
+  it('does not send a message composed across disconnect and reconnect', async () => {
+    let release!: (value: unknown) => void;
+    mocks.compose.mockImplementationOnce(() => new Promise(resolve => { release = resolve; }));
+    const client = new SmtpClient(account);
+    await client.connect();
+    const pending = client.send('to@example.test', 'Subject', 'Body');
+    const cancelled = expect(pending).rejects.toMatchObject({ name: 'SmtpPreflightError' });
+    await vi.waitFor(() => expect(mocks.compose).toHaveBeenCalledOnce());
+    client.disconnect();
+    await client.connect();
+    release({ message: Buffer.from('Body'), messageId: '<old>', envelope: {} });
+    await cancelled;
+    expect(mocks.send).not.toHaveBeenCalled();
+  });
+
+  it('does not close a replacement transport when an old send fails later', async () => {
+    let reject!: (error: Error) => void;
+    mocks.send.mockImplementationOnce(() => new Promise((_resolve, fail) => { reject = fail; }));
+    const client = new SmtpClient(account);
+    await client.connect();
+    const pending = client.sendRawMessage({ rawMessage: Buffer.from('Body'), messageId: '<old>', envelope: {} });
+    const failed = expect(pending).rejects.toThrow('outcome is unknown');
+    client.disconnect();
+    await client.connect();
+    const closes = mocks.close.mock.calls.length;
+    reject(new Error('old connection failed'));
+    await failed;
+    expect(mocks.close).toHaveBeenCalledTimes(closes);
+    await client.send('to@example.test', 'Subject', 'Body');
+    expect(mocks.send).toHaveBeenCalledTimes(2);
   });
 
   it('requires STARTTLS by default on submission ports', async () => {

@@ -81,6 +81,20 @@ vi.mock('./services/mail.js', () => {
 
 import { MailMCPServer } from './index.js';
 import { SieveClient } from './protocol/sieve.js';
+import { getAccounts } from './config.js';
+import { loadCredentials } from './security/keychain.js';
+
+it('rejects OAuth2 Sieve access before exposing the token bundle as a PLAIN password', async () => {
+  vi.clearAllMocks();
+  vi.mocked(getAccounts).mockResolvedValueOnce([{ id: 'oauth', name: 'OAuth', host: 'mail.example.com', port: 993,
+    user: 'user@example.com', authType: 'oauth2', useTLS: true }]);
+  const server = new MailMCPServer(false);
+  const result = await server.dispatchTool('list_filters', false, { accountId: 'oauth' });
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toContain('login credentials only');
+  expect(loadCredentials).not.toHaveBeenCalled();
+  expect(SieveClient).not.toHaveBeenCalled();
+});
 
 // ---------------------------------------------------------------------------
 // Tests

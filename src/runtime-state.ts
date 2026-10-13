@@ -14,7 +14,7 @@ export type RuntimeProviderClient =
   | EwsClient
   | MailtrapClient;
 
-async function disconnectIfSupported(client: unknown): Promise<void> {
+export async function disconnectIfSupported(client: unknown): Promise<void> {
   if (
     typeof client === 'object'
     && client !== null
@@ -27,6 +27,8 @@ async function disconnectIfSupported(client: unknown): Promise<void> {
 
 export class MailMCPRuntimeState {
   readonly services = new Map<string, MailService>();
+  readonly serviceConfigurations = new Map<string, string>();
+  readonly providerConfigurations = new Map<string, string>();
   readonly serviceCreations = new Map<string, Promise<MailService>>();
   readonly appleMailAdapters = new Map<string, AppleMailAdapter>();
   readonly microsoftGraphClients = new Map<string, MicrosoftGraphClient>();
@@ -69,6 +71,8 @@ export class MailMCPRuntimeState {
         Array.from(providerClients).map(client => disconnectIfSupported(client))
       );
       this.services.clear();
+      this.serviceConfigurations.clear();
+      this.providerConfigurations.clear();
       this.serviceCreations.clear();
       this.appleMailAdapters.clear();
       this.microsoftGraphClients.clear();

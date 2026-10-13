@@ -97,6 +97,7 @@ import { MailMCPServer, parseAllowedTools, parseCliArgs } from './index.js';
 import { MailService } from './services/mail.js';
 import { getAccounts, getConfiguredAccounts } from './config.js';
 import { AuditLogger } from './utils/audit-logger.js';
+import { MicrosoftProviderError } from './providers/microsoft/common.js';
 
 const successfulDelivery = () => ({
   status: 'sent_and_saved' as const,
@@ -904,7 +905,7 @@ describe('CONN-02: IMAP reconnect via close-event + getService retry', () => {
 
     const first = (server as any).getService('acc1');
     const second = (server as any).getService('acc1');
-    expect(creation).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(creation).toHaveBeenCalledTimes(1));
     release(service);
     await expect(Promise.all([first, second])).resolves.toEqual([service, service]);
   });
@@ -1712,6 +1713,21 @@ describe('Provider MCP dispatch', () => {
     expect(result.isError).not.toBe(true);
     expect(execute).toHaveBeenCalledWith('native', 'listAccounts', {});
     expect(JSON.parse(result.content[0].text)).toEqual([{ name: 'iCloud', uuid: 'uuid-1' }]);
+  });
+
+  it('distinguishes uncertain provider draft creation from attempted delivery', async () => {
+    const server = new MailMCPServer(false);
+    const error = new MicrosoftProviderError('ews', 'outcome_unknown', 'Saved draft response lost');
+    error.operation = 'createDraft';
+    vi.spyOn((server as any).providerRuntime, 'executeMicrosoftWrite').mockRejectedValue(error);
+    const result = await server.dispatchTool('microsoft_mail_send', false, {
+      accountId: 'ews', operation: 'sendMessage', input: { message: { subject: 'S', body: 'B', to: ['to@example.com'] } },
+    });
+    expect(result.isError).toBe(true);
+    const text = result.content[0].text;
+    expect(text).toContain('"deliveryAttempted":false');
+    expect(text).toContain('"retrySafe":false');
+    expect(text).toContain('Inspect Drafts');
   });
 
   it('returns binary Mailtrap results as an embedded resource', async () => {

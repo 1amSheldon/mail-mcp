@@ -1,14 +1,17 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, rm } from 'node:fs/promises';
+import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { createRequire } from 'node:module';
-import { buildMailMcpNpxArgs, prepareMailMcpNpxRuntime } from '../dist/cli/npm-runtime.js';
+import { FORK_ENTRYPOINT, buildMailMcpNpxArgs, prepareMailMcpNpxRuntime } from '../dist/cli/npm-runtime.js';
 
 // Exercise the actual generated npx command, including npm's package symlink.
 // Initialize/list tools only: no accounts or mailbox contents are requested.
 if (!process.env.npm_execpath) throw new Error('Run through npm run smoke:installed');
+// Assert the build contract before npm can repair permissions during a cold install.
+if (process.platform !== 'win32') await access(FORK_ENTRYPOINT, constants.X_OK);
 const home = await mkdtemp(join(tmpdir(), 'mail-mcp-install-smoke-'));
 await prepareMailMcpNpxRuntime(home);
 const client = new Client({ name: 'installed-fork-smoke', version: '1' });

@@ -72,7 +72,7 @@ const WRITE_TOOL_NAMES = ['mail_mutate'];
 const READ_TOOL_NAMES = ['list_accounts', 'mail_query'];
 
 describe('draft router delivery results', () => {
-  it.each(['smtp_rejected', 'smtp_connection_failed', 'smtp_outcome_unknown'])('marks %s as a tool error', async status => {
+  it.each(['smtp_rejected', 'smtp_connection_failed', 'smtp_preflight_failed', 'smtp_outcome_unknown'])('marks %s as a tool error', async status => {
     const server = new MailMCPServer(false);
     const service = await (server as any).getService('acc1');
     vi.mocked(service.sendDraft).mockResolvedValueOnce({ status, retrySafe: false });

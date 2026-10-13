@@ -163,6 +163,26 @@ describe('installCodex', () => {
     expect(updated).toContain('[mcp_servers.mail]\r\ncommand = "npx"');
   });
 
+  it.each(['"""', "'''"])('preserves apparent table headers inside multiline %s strings', delimiter => {
+    const source = ['instructions = ' + delimiter, '[mcp_servers.mail]', 'command = "example, not config"',
+      '[features]', delimiter, '', '[mcp_servers.mail]', 'command = "old"',
+      'notes = ' + delimiter, '[features.fake]', delimiter, '', '[features]', 'enabled = true', '',
+    ].join('\n');
+    const updated = upsertCodexServer(source, ['mail-mcp']);
+    const before = parse(source), after = parse(updated);
+    expect(after.instructions).toBe(before.instructions);
+    expect(after.features).toEqual(before.features);
+    expect((after.mcp_servers as any).mail.command).toBe('npx');
+  });
+
+  it('preserves BOM, CRLF and quoted keys with Unicode escapes', () => {
+    const source = '\uFEFFinstructions = "literal \\\" text" # """\r\n["mcp_servers" . "m\\u0061il"]\r\ncommand = "old"\r\n[features]\r\nenabled = true\r\n';
+    const updated = upsertCodexServer(source, ['mail-mcp']);
+    expect(updated.startsWith('\uFEFF')).toBe(true);
+    expect(updated).not.toContain('command = "old"');
+    expect(updated).toContain('[features]\r\nenabled = true');
+  });
+
   it('does not rewrite an unchanged config', async () => {
     const npxArgs = buildMailMcpNpxArgs(['--confirm'], tempDir);
     await installCodex(configPath, npxArgs);

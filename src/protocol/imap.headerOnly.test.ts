@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { ImapClient } from './imap.js';
+import { ImapClient, MAX_SNIPPET_BYTES } from './imap.js';
 import type { EmailAccount } from '../config.js';
 
 // Minimal stub account
@@ -88,7 +88,7 @@ describe('ImapClient.fetchMessagesByUids headerOnly flag', () => {
     expect(mockFlow.fetch).toHaveBeenCalledOnce();
     const [, fetchOptions] = mockFlow.fetch.mock.calls[0];
     expect(fetchOptions).toHaveProperty('bodyParts');
-    expect(fetchOptions.bodyParts).toContain('TEXT');
+    expect(fetchOptions.bodyParts).toEqual([{ key: 'TEXT', start: 0, maxLength: MAX_SNIPPET_BYTES }]);
 
     expect(results).toHaveLength(1);
     expect(results[0].snippet).toBeTruthy();
@@ -120,7 +120,7 @@ describe('ImapClient.fetchMessagesByUids headerOnly flag', () => {
     expect(mockFlow.fetch).toHaveBeenCalledOnce();
     const [, fetchOptions] = mockFlow.fetch.mock.calls[0];
     expect(fetchOptions).toHaveProperty('bodyParts');
-    expect(fetchOptions.bodyParts).toContain('TEXT');
+    expect(fetchOptions.bodyParts).toEqual([{ key: 'TEXT', start: 0, maxLength: MAX_SNIPPET_BYTES }]);
 
     expect(results).toHaveLength(1);
     // snippet should be populated
@@ -153,5 +153,22 @@ describe('ImapClient.fetchMessagesByUids headerOnly flag', () => {
     expect(results).toHaveLength(1);
     // snippet should gracefully be '' when no TEXT part
     expect(results[0].snippet).toBe('');
+  });
+
+  it.each([
+    ['base64', 'SGVsbG8gd29ybGQ=', 'Hello world'],
+    ['quoted-printable', 'Hello=20world', 'Hello world'],
+  ])('decodes %s previews using MIME headers', async (encoding, body, expected) => {
+    const msg = { ...makeMsg(body), headers: Buffer.from(`Content-Type: text/plain; charset=utf-8\r\nContent-Transfer-Encoding: ${encoding}\r\n`) };
+    await setupClient([msg]);
+    expect((await client.fetchMessagesByUids([42]))[0].snippet).toBe(expected);
+  });
+
+  it('limits a multipart preview without fetching the large attachment after its text', async () => {
+    const msg = { ...makeMsg('--x\r\nContent-Type: text/plain\r\n\r\nSmall preview\r\n--x\r\nContent-Type: application/octet-stream\r\nContent-Transfer-Encoding: base64\r\n\r\n' + 'A'.repeat(MAX_SNIPPET_BYTES)),
+      headers: Buffer.from('Content-Type: multipart/mixed; boundary=x\r\n') };
+    await setupClient([msg]);
+    expect((await client.fetchMessagesByUids([42]))[0].snippet).toBe('Small preview');
+    expect(mockFlow.fetch.mock.calls[0][1].bodyParts[0].maxLength).toBe(MAX_SNIPPET_BYTES);
   });
 });

@@ -5,7 +5,8 @@ export type AppleMailErrorCode =
   | 'OUTPUT_LIMIT'
   | 'EXECUTION_FAILED'
   | 'INVALID_ARGUMENT'
-  | 'INVALID_RESPONSE';
+  | 'INVALID_RESPONSE'
+  | 'OUTCOME_UNKNOWN';
 
 export class AppleMailError extends Error {
   constructor(
@@ -15,6 +16,14 @@ export class AppleMailError extends Error {
   ) {
     super(message, options);
     this.name = 'AppleMailError';
+  }
+}
+
+export class AppleMailSendOutcomeUnknownError extends AppleMailError {
+  readonly retrySafe = false;
+  readonly nextAction = 'Do not resend automatically. Check Outbox and Sent in Mail.app before deciding whether to retry.';
+  constructor(cause: unknown) {
+    super('OUTCOME_UNKNOWN', 'Apple Mail may already have sent the message.', { cause });
   }
 }
 

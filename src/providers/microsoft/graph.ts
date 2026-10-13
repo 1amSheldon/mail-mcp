@@ -1,3 +1,4 @@
+import { readBoundedResponseText } from '../../utils/http-body.js';
 import {
   assertMessageContent,
   attachmentBytes,
@@ -63,6 +64,50 @@ export interface GraphMessageSummary {
   receivedDateTime?: string;
 }
 
+export interface GraphMessage extends GraphMessageSummary {
+  body?: { contentType: string; content: string };
+  from?: { emailAddress: { address: string; name?: string } };
+  toRecipients: Array<{ emailAddress: { address: string; name?: string } }>;
+  ccRecipients: Array<{ emailAddress: { address: string; name?: string } }>;
+  bccRecipients: Array<{ emailAddress: { address: string; name?: string } }>;
+  sentDateTime?: string;
+  hasAttachments?: boolean;
+  attachments: Array<{ id: string; name?: string; contentType?: string; size?: number; isInline?: boolean }>;
+}
+
+function parseDetailedMessage(value: unknown): GraphMessage {
+  const summary = parseMessage(value);
+  const record = value as Record<string, any>;
+  const address = (item: any): GraphMessage['from'] => {
+    if (typeof item?.emailAddress?.address !== 'string') return undefined;
+    return { emailAddress: { address: item.emailAddress.address,
+      ...(typeof item.emailAddress.name === 'string' ? { name: item.emailAddress.name } : {}),
+    } };
+  };
+  const addresses = (items: unknown): GraphMessage['toRecipients'] => Array.isArray(items)
+    ? items.flatMap(item => { const result = address(item); return result ? [result] : []; }) : [];
+  return {
+    ...summary,
+    ...(typeof record.body?.content === 'string' && typeof record.body?.contentType === 'string'
+      ? { body: { content: record.body.content, contentType: record.body.contentType } } : {}),
+    ...(address(record.from) ? { from: address(record.from) } : {}),
+    toRecipients: addresses(record.toRecipients),
+    ccRecipients: addresses(record.ccRecipients),
+    bccRecipients: addresses(record.bccRecipients),
+    ...(typeof record.sentDateTime === 'string' ? { sentDateTime: record.sentDateTime } : {}),
+    ...(typeof record.hasAttachments === 'boolean' ? { hasAttachments: record.hasAttachments } : {}),
+    attachments: Array.isArray(record.attachments) ? record.attachments.flatMap((item: any) => {
+      if (typeof item?.id !== 'string') return [];
+      return [{ id: item.id,
+        ...(typeof item.name === 'string' ? { name: item.name } : {}),
+        ...(typeof item.contentType === 'string' ? { contentType: item.contentType } : {}),
+        ...(typeof item.size === 'number' ? { size: item.size } : {}),
+        ...(typeof item.isInline === 'boolean' ? { isInline: item.isInline } : {}),
+      }];
+    }) : [],
+  };
+}
+
 export interface GraphThreadWarning {
   code:
     | 'conversation_lookup_failed'
@@ -79,6 +124,12 @@ export interface GraphThreadResult {
   warning?: GraphThreadWarning;
 }
 
+export interface GraphLookupResult {
+  messages: GraphMessageSummary[];
+  partial: boolean;
+  warning?: string;
+}
+
 interface GraphCollection<T> {
   value?: T[];
   '@odata.nextLink'?: string;
@@ -91,6 +142,11 @@ function encodePathSegment(value: string): string {
 
 function escapeODataString(value: string): string {
   return value.replace(/'/g, "''");
+}
+
+function chronological(messages: GraphMessageSummary[]): GraphMessageSummary[] {
+  return messages.sort((left, right) => (Date.parse(left.receivedDateTime ?? '') || 0)
+    - (Date.parse(right.receivedDateTime ?? '') || 0));
 }
 
 function recipients(addresses?: string[]): GraphRecipient[] | undefined {
@@ -203,11 +259,10 @@ export class MicrosoftGraphClient {
       );
     }
 
-    const draft = await this.requestJson<Record<string, unknown>>(
+    const draftId = await this.createDraft(
       `${this.mailboxPath}/messages`,
       { method: 'POST', body: JSON.stringify(messagePayload(message, false)) },
     );
-    const draftId = this.requiredId(draft, 'draft');
     await this.attachToDraft(draftId, attachments);
     const response = await this.request(
       `${this.mailboxPath}/messages/${encodePathSegment(draftId)}/send`,
@@ -243,11 +298,10 @@ export class MicrosoftGraphClient {
       };
     }
 
-    const draft = await this.requestJson<Record<string, unknown>>(
+    const draftId = await this.createDraft(
       `${this.mailboxPath}/messages/${encodedId}/createReply`,
       { method: 'POST' },
     );
-    const draftId = this.requiredId(draft, 'reply draft');
     await this.request(
       `${this.mailboxPath}/messages/${encodePathSegment(draftId)}`,
       { method: 'PATCH', body: JSON.stringify(messagePayload(message, false)) },
@@ -266,18 +320,19 @@ export class MicrosoftGraphClient {
     };
   }
 
-  async getMessage(messageId: string): Promise<GraphMessageSummary> {
+  async getMessage(messageId: string): Promise<GraphMessage> {
     if (!messageId) {
       throw new MicrosoftProviderError('graph', 'validation', 'Graph message id is required');
     }
-    return parseMessage(await this.requestJson(
+    return parseDetailedMessage(await this.requestJson(
       `${this.mailboxPath}/messages/${encodePathSegment(messageId)}?${new URLSearchParams({
-        '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime',
+        '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime,sentDateTime,body,from,toRecipients,ccRecipients,bccRecipients,hasAttachments',
+        '$expand': 'attachments($select=id,name,contentType,size,isInline)',
       })}`,
     ));
   }
 
-  async findByInternetMessageId(internetMessageId: string): Promise<GraphMessageSummary[]> {
+  async findByInternetMessageId(internetMessageId: string): Promise<GraphLookupResult> {
     if (!internetMessageId) {
       throw new MicrosoftProviderError('graph', 'validation', 'Internet Message-ID is required');
     }
@@ -285,10 +340,35 @@ export class MicrosoftGraphClient {
       '$filter': `internetMessageId eq '${escapeODataString(internetMessageId)}'`,
       '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime',
     });
-    const collection = await this.requestJson<GraphCollection<unknown>>(
-      `${this.mailboxPath}/messages?${params.toString()}`,
-    );
-    return (collection.value ?? []).map(parseMessage);
+    let path: string | undefined = `${this.mailboxPath}/messages?${params.toString()}`;
+    const messages = new Map<string, GraphMessageSummary>();
+    const visited = new Set<string>();
+    while (path) {
+      if (visited.has(path) || visited.size >= GRAPH_MAX_THREAD_PAGES || messages.size >= GRAPH_MAX_THREAD_MESSAGES) {
+        return { messages: [...messages.values()], partial: true, warning: 'Message-ID lookup reached its pagination safety limit; absence of additional copies is not established.' };
+      }
+      visited.add(path);
+      try {
+        const collection: GraphCollection<unknown> = await this.requestJson(path);
+        if (!Array.isArray(collection.value)) throw new MicrosoftProviderError('graph', 'invalid_response', 'Missing message collection');
+        for (const value of collection.value) {
+          const message = parseMessage(value);
+          if (messages.size >= GRAPH_MAX_THREAD_MESSAGES && !messages.has(message.id)) {
+            return { messages: [...messages.values()], partial: true, warning: 'Message-ID lookup exceeded the message limit.' };
+          }
+          messages.set(message.id, message);
+        }
+        const next: unknown = collection['@odata.nextLink'];
+        if (next !== undefined && (typeof next !== 'string' || !next)) {
+          throw new MicrosoftProviderError('graph', 'invalid_response', 'Invalid next page');
+        }
+        path = next === undefined ? undefined : this.validatedNextLink(next as string);
+      } catch (error) {
+        if (!(error instanceof MicrosoftProviderError) || error.kind === 'auth' || visited.size === 1 && messages.size === 0) throw error;
+        return { messages: [...messages.values()], partial: true, warning: 'Message-ID lookup could not finish paging; absence of additional copies is not established.' };
+      }
+    }
+    return { messages: [...messages.values()], partial: false };
   }
 
   async getThread(anchor: GraphMessageSummary): Promise<GraphThreadResult> {
@@ -307,7 +387,6 @@ export class MicrosoftGraphClient {
     const params = new URLSearchParams({
       '$filter': `conversationId eq '${escapeODataString(anchor.conversationId)}'`,
       '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime',
-      '$orderby': 'receivedDateTime asc',
     });
     let nextPath: string | undefined = `${this.mailboxPath}/messages?${params.toString()}`;
     const messages: GraphMessageSummary[] = [];
@@ -379,7 +458,7 @@ export class MicrosoftGraphClient {
         );
       }
     }
-    return { messages, partial: false };
+    return { messages: chronological(messages), partial: false };
   }
 
   private partialThread(
@@ -388,7 +467,7 @@ export class MicrosoftGraphClient {
     message: string,
   ): GraphThreadResult {
     return {
-      messages,
+      messages: chronological(messages),
       partial: true,
       warning: { code, strategy: 'partial_conversation', message },
     };
@@ -416,13 +495,6 @@ export class MicrosoftGraphClient {
       );
     }
     return url.href;
-  }
-
-  private requiredId(value: Record<string, unknown>, label: string): string {
-    if (typeof value.id !== 'string' || !value.id) {
-      throw new MicrosoftProviderError('graph', 'invalid_response', `Microsoft Graph ${label} is missing id`);
-    }
-    return value.id;
   }
 
   private assertAttachmentSizes(attachments: MicrosoftAttachment[]): void {
@@ -492,6 +564,7 @@ export class MicrosoftGraphClient {
     try {
       response = await this.fetchImpl(uploadUrl, {
         method: 'PUT',
+        redirect: 'error',
         headers: {
           'Content-Length': String(chunk.byteLength),
           'Content-Range': `bytes ${start}-${end}/${total}`,
@@ -514,18 +587,31 @@ export class MicrosoftGraphClient {
     }
   }
 
+  private async createDraft(path: string, init: RequestInit): Promise<string> {
+    try {
+      const draft = await this.requestJson<Record<string, unknown>>(path, init, true);
+      if (typeof draft?.id !== 'string' || !draft.id) {
+        throw new MicrosoftProviderError('graph', 'outcome_unknown', 'Graph returned no identifiable saved draft. Inspect Drafts before retrying.');
+      }
+      return draft.id;
+    } catch (error) {
+      if (error instanceof MicrosoftProviderError && error.kind === 'outcome_unknown') error.operation = 'createDraft';
+      throw error;
+    }
+  }
+
   private async requestJson<T>(
     path: string,
     init: RequestInit = {},
     mutating = false,
   ): Promise<T> {
-    const response = await this.request(path, init, mutating);
+    const response = await this.request(path, init, mutating, false);
     try {
-      return await response.json() as T;
+      return JSON.parse(await readBoundedResponseText(response, 4 * 1024 * 1024)) as T;
     } catch (error) {
       throw new MicrosoftProviderError(
         'graph',
-        'invalid_response',
+        mutating ? 'outcome_unknown' : 'invalid_response',
         'Microsoft Graph returned invalid JSON',
         response.status,
         requestIdFrom(response),
@@ -534,7 +620,7 @@ export class MicrosoftGraphClient {
     }
   }
 
-  private async request(path: string, init: RequestInit = {}, mutating = false): Promise<Response> {
+  private async request(path: string, init: RequestInit = {}, mutating = false, discardBody = true): Promise<Response> {
     let token: string;
     try {
       token = await this.tokenProvider();
@@ -550,6 +636,7 @@ export class MicrosoftGraphClient {
     try {
       response = await this.fetchImpl(url, {
         ...init,
+        redirect: 'error',
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${token}`,
@@ -565,12 +652,14 @@ export class MicrosoftGraphClient {
       const detail = await responseText(response);
       throw new MicrosoftProviderError(
         'graph',
-        response.status === 401 || response.status === 403 ? 'auth' : 'remote',
+        mutating && response.status >= 500 ? 'outcome_unknown'
+          : response.status === 401 || response.status === 403 ? 'auth' : 'remote',
         `Microsoft Graph returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`,
         response.status,
         requestIdFrom(response),
       );
     }
+    if (discardBody) void response.body?.cancel().catch(() => undefined);
     return response;
   }
 }

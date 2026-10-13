@@ -81,6 +81,19 @@ describe('Streamable HTTP host', () => {
     await client.close();
   });
 
+  it.each(['/\\attacker.example/health', '/\\attacker.example/mcp', '/health\\extra'])(
+    'rejects backslash target %s before URL normalization', async target => {
+      host = await startHttpHost({ host: '127.0.0.1', port: 0, bearerToken: 'test-token', createSession: () => new TestMcpSession() });
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const req = request({ host: host!.host, port: host!.port, path: target, method: 'GET' }, res => {
+          res.resume(); res.on('end', () => resolve(res.statusCode));
+        });
+        req.on('error', reject); req.end();
+      });
+      expect(status).toBe(400);
+    },
+  );
+
   it('rejects MCP calls without the bearer token', async () => {
     host = await startHttpHost({
       host: '127.0.0.1',
@@ -92,6 +105,38 @@ describe('Streamable HTTP host', () => {
     const response = await fetch(host.url, { method: 'POST' });
     expect(response.status).toBe(401);
     expect(response.headers.get('www-authenticate')).toBe('Bearer');
+  });
+
+  it('reserves recovery capacity before reading a stalled body and releases it after invalid JSON', async () => {
+    const createSession = vi.fn(() => new TestMcpSession());
+    host = await startHttpHost({ host: '127.0.0.1', port: 0, bearerToken: 'test-token', maxSessions: 1,
+      recoverUnknownSessions: true, createSession });
+    const headers = { authorization: 'Bearer test-token', 'mcp-session-id': 'expired-session',
+      accept: 'application/json, text/event-stream', 'content-type': 'application/json', 'mcp-protocol-version': '2025-11-25' };
+    let finish!: () => void;
+    const first = new Promise<number | undefined>((resolve, reject) => {
+      const req = request(host!.url, { method: 'POST', headers }, res => {
+        res.resume(); res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+      req.write('{');
+      finish = () => req.end('invalid}');
+    });
+    try {
+      await new Promise(resolve => setTimeout(resolve, 50));
+      const competing = await Promise.all([1, 2].map(() => fetch(host!.url, {
+        method: 'POST', headers, body: '{"jsonrpc":"2.0","id":2,"method":"tools/list"}',
+      })));
+      expect(competing.map(response => response.status)).toEqual([503, 503]);
+      await Promise.all(competing.map(response => response.body?.cancel()));
+      expect(createSession).not.toHaveBeenCalled();
+    } finally { finish(); }
+    expect(await first).toBe(400);
+    const next = await fetch(host.url, { method: 'POST', headers,
+      body: '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' });
+    expect(next.status).toBe(200);
+    await next.body?.cancel();
+    expect(createSession).toHaveBeenCalledOnce();
   });
 
   it('supports authenticated MCP initialization and tool listing', async () => {
@@ -361,6 +406,36 @@ describe('Streamable HTTP host', () => {
 
     releaseConnect();
     expect((await first).status).toBe(200);
+  });
+
+  it('reserves replacement capacity while an evicted session is closing', async () => {
+    let release!: () => void;
+    let closing = false;
+    let created = 0;
+    host = await startHttpHost({ host: '127.0.0.1', port: 0, bearerToken: 'test-token', maxSessions: 1,
+      createSession: () => {
+        const session = new TestMcpSession();
+        if (++created === 1) return { connect: (transport: StreamableHTTPServerTransport) => session.connect(transport),
+          shutdown: async () => { closing = true; await new Promise<void>(resolve => { release = resolve; }); await session.shutdown(); } };
+        return session;
+      },
+    });
+    const headers = { authorization: 'Bearer test-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' };
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+      protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'race', version: '1' },
+    } });
+    await (await fetch(host.url, { method: 'POST', headers, body })).body?.cancel();
+    const replacement = fetch(host.url, { method: 'POST', headers, body });
+    try {
+      await vi.waitFor(() => expect(closing).toBe(true));
+      const competing = await fetch(host.url, { method: 'POST', headers, body });
+      expect(competing.status).toBe(503);
+      await competing.body?.cancel();
+      expect(created).toBe(2);
+    } finally { release(); }
+    const response = await replacement;
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
   });
 
   it('rejects invalid session lifecycle options', async () => {

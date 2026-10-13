@@ -79,6 +79,27 @@ function setupAutoReplySocket(
 // ---------------------------------------------------------------------------
 
 describe('SieveClient', () => {
+  it('lists escaped and UTF-8 literal names without losing active flags', async () => {
+    const unicodeName = '\u0424\u0456\u043b\u044c\u0442\u0440';
+    const sock = setupAutoReplySocket('OK\r\n', {});
+    const client = new SieveClient('localhost', 4190, 'u', 'p');
+    await client.connect();
+    const response = Buffer.from(`"quoted\\\"name\\\\" ACTIVE\r\n{${Buffer.byteLength(unicodeName)}}\r\n${unicodeName}\r\n{6}\r\nactive ACTIVE\r\nOK\r\n`);
+    sock.write = () => {
+      setImmediate(() => { for (const byte of response) sock.emit('data', Buffer.from([byte])); });
+      return true;
+    };
+    expect(await client.listScripts()).toEqual([
+      { name: 'quoted"name\\', active: true }, { name: unicodeName, active: false }, { name: 'active', active: true },
+    ]);
+  });
+
+  it('reads a quoted GETSCRIPT response and unescapes it', async () => {
+    setupAutoReplySocket('OK\r\n', { GETSCRIPT: '"require \\"fileinto\\";"\r\nOK\r\n'.replace(/\\\\/g, '\\') });
+    const client = new SieveClient('localhost', 4190, 'u', 'p');
+    await client.connect();
+    expect(await client.getScript('filter')).toBe('require "fileinto";');
+  });
   it('consumes status literals fully and does not mistake AUTH payload for mutation success', async () => {
     const sock = setupAutoReplySocket('OK\r\n', {
       AUTHENTICATE: 'OK {4}\r\nOK\r\n\r\n',
