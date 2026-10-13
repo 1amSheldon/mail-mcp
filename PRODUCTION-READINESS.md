@@ -70,10 +70,42 @@ secrets; Microsoft requests reject redirects and treat send-side 5xx as unknown.
 - EWS attachment sends first save a draft, then send its exact ItemId/ChangeKey.
   The draft ID remains available when SendItem fails. A saved draft can remain
   after a later failure; it is not automatically deleted or resent.
+- EWS honors `saveToSentItems: false` for both direct and attachment sends.
+- Apple Mail compose/draft operations require the chosen From address to belong
+  to the selected native account. An empty alias list fails before message creation.
+- Draft journals now bind to the mailbox host, port and user. Replacing the
+  mailbox while reusing an account ID fails closed. Policy-only changes preserve
+  delivery deduplication. Existing nonempty journals without this binding require
+  the explicit migration described below; they are not silently reset.
 - `--redact` is selective text masking, not universal data-loss prevention.
   Raw RFC 822 bytes and binary attachments are returned byte-for-byte and are
   not sanitized, including when base64-encoded. Do not request raw/binary content
   when the client is not authorized to receive its original contents.
+
+### Existing draft journal migration
+
+The previous journal format recorded only the configured account ID, which
+cannot establish which mailbox originally owned its UIDs. Automatic migration
+would recreate the ambiguity this change fixes.
+
+1. Stop every mail-mcp process using the account. Back up `accounts.json` and its
+   neighboring `draft-state` directory, retaining their access restrictions.
+2. Establish the original mailbox from the previous configuration. If host,
+   port or user changed, use a new configured account ID for the replacement
+   mailbox and retain the original journal with the original mailbox. Do not
+   reuse old draft IDs or locators in the replacement account.
+3. For an unchanged mailbox, inspect pending replacement and delivery-attempt
+   records with the corresponding Drafts/Sent data before binding the journal.
+   An interrupted or uncertain send must remain non-retryable.
+4. A qualified operator can add the top-level `accountIdentity` field only after
+   confirming that mapping. Its value is the lowercase hex SHA-256 of UTF-8
+   `JSON.stringify({ backend: 'imap', host: account.host.toLowerCase(), port: account.port, user: account.user })`
+   in that property order. Preserve every record, alias, Message-ID, pending
+   operation and attempt result. Save atomically while the service is stopped.
+5. Reopen the journal and verify that only this binding was added before restart.
+   Do not delete the journal, erase attempts, or create a new account ID for the
+   same mailbox to bypass delivery deduplication. If ownership cannot be proven,
+   keep the journal blocked until it can be reconciled.
 
 ## Previous merged PR comments
 
@@ -91,12 +123,27 @@ not silently marked resolved.
 ## Automated qualification
 
 The complete `npm run release:check` passed on Windows with Node 24 after the
-hardening changes: build, English-only check, 991 unit tests in 65 files,
-7 integration tests, stdio/HTTP/import/installed-package smoke checks, and
+independent review fixes: build, English-only check, 1006 unit tests in 66 files,
+8 integration tests, stdio/HTTP/import/installed-package smoke checks, and
 `npm audit` with zero reported vulnerabilities. Three environment-dependent
 IMAP integration cases were skipped because no live test mailbox was supplied.
-These counts describe the qualification run before independent PR review;
-the PR records any later checks and revisions.
+The PR also runs the release checks on Linux and Windows with Node 20 and 22.
+Check the PR status for the result associated with its current commit.
+
+Three independent agents reviewed protocol/security, providers, and
+mail/draft/install workflows. Their seven actionable findings were fixed in
+separate commits and re-reviewed: SMTP connection lifecycle, OAuth error
+redaction, EWS query order and Sent-copy preference, CDATA handling, Apple sender
+scope, and persisted draft identity. A real TCP reproduction also exposed that
+Nodemailer's non-pooled `close()` does not close its verification socket; the
+follow-up fix owns and destroys those sockets. No actionable findings remained
+open in these review scopes after re-review.
+
+Committed regressions verify that disconnected SMTP verification cannot send
+credentials and that real SMTP OAuth rejection triggers renewal before a single
+delivery. Independent local TLS fixtures additionally passed implicit TLS,
+STARTTLS, hostname-mismatch rejection in both modes, and disconnect during TLS
+authentication. These checks used disposable local servers and fixture tokens.
 
 The tests establish bounded fetch requests, stream cancellation, cache behavior,
 protocol safety and failure semantics. They do not establish provider latency,
