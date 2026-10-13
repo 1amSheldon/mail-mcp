@@ -71,7 +71,12 @@ use discovered mailbox paths. A partial result is not proof of a complete conver
 Listing/search use bounded descending UID windows and return total: null. Follow nextCursor
 even when items is empty; retain the same filters. New higher UIDs are excluded from the
 continuation, and deleted messages may disappear. Cursors expire after five minutes.
+Successful continuation consumes its input cursor; always retain the newest nextCursor.
+verifySentMessage scans up to ten pages. An indeterminate status means a continuation
+remains: use searchMessages with the same Message-ID, Sent folder and returned nextCursor.
+An incomplete search is not evidence of non-delivery and never authorizes a resend.
 Draft creation returns status saved or append_outcome_unknown with retrySafe: false.
+Definite APPEND rejections or failures before APPEND raise an error instead.
 If tracking or mailbox lookup fails after saving, or APPEND is uncertain, do not recreate
 or resend. Preserve Message-ID and find the existing draft before proceeding.
 
