@@ -81,6 +81,19 @@ describe('Streamable HTTP host', () => {
     await client.close();
   });
 
+  it.each(['/\\attacker.example/health', '/\\attacker.example/mcp', '/health\\extra'])(
+    'rejects backslash target %s before URL normalization', async target => {
+      host = await startHttpHost({ host: '127.0.0.1', port: 0, bearerToken: 'test-token', createSession: () => new TestMcpSession() });
+      const status = await new Promise<number | undefined>((resolve, reject) => {
+        const req = request({ host: host!.host, port: host!.port, path: target, method: 'GET' }, res => {
+          res.resume(); res.on('end', () => resolve(res.statusCode));
+        });
+        req.on('error', reject); req.end();
+      });
+      expect(status).toBe(400);
+    },
+  );
+
   it('rejects MCP calls without the bearer token', async () => {
     host = await startHttpHost({
       host: '127.0.0.1',

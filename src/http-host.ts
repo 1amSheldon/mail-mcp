@@ -186,7 +186,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     try {
       // Accept origin-form only. Never let a network-path target replace the host.
       const target = req.url ?? '/';
-      if (!target.startsWith('/') || target.startsWith('//')) throw new Error('Invalid target');
+      if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\')) throw new Error('Invalid target');
       pathname = new URL(target, `http://${urlHost}`).pathname;
     } catch {
       rpcError(res, 400, 'Invalid request target');
