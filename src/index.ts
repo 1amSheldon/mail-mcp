@@ -1727,7 +1727,8 @@ Commands:
   accounts add        Add a new email account (interactive)
   accounts list       List configured accounts
   accounts remove ID  Remove an account
-  accounts login ID   Authenticate a Zimbra account locally
+  accounts login ID [--trusted-device]   Authenticate Zimbra locally; optionally trust this device
+  accounts disable-auto-login ID        Remove the saved Zimbra main password
 
 Options:
   --read-only                 Start in read-only mode (no send/move/label tools)

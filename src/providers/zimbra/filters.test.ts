@@ -15,6 +15,41 @@ function fixture(responses: Response[], patch: Partial<ZimbraConfiguredAccount> 
 }
 
 describe('Zimbra rule replacement integrity', () => {
+  it('sends current-time tests with the time attribute consumed by the server JAXB handler', async () => {
+    const input = { name: 'Business hours', branch: { tests: [
+      { type: 'currentTime', comparison: 'before', time: '1730' },
+      { type: 'date', comparison: 'after', seconds: 1700000000 },
+    ], actions: [{ type: 'keep' }] } };
+    const compiled = compileRule(filterRuleSchema.parse(input));
+    const { client, request } = fixture([rulesResponse([]), response('ModifyFilterRules', {}), rulesResponse([compiled])]);
+    await client.executeWrite('upsertFilterRule', { expectedRevision: filterRevision([]), rule: input });
+    const tests = request(1).Body.ModifyFilterRulesRequest.filterRules[0].filterRule[0].filterTests[0];
+    expect(tests.currentTimeTest).toEqual([{ index: 0, negative: 0, dateComparison: 'before', time: '1730' }]);
+    expect(tests.dateTest).toEqual([{ index: 1, negative: 0, dateComparison: 'after', d: 1700000000 }]);
+  });
+  it.each([0, 1, 2])('updates a self-targeted rule at position %i without moving its neighbours', async position => {
+    const before = [{ ...rule, name: 'First' }, { ...rule, name: 'Last' }];
+    before.splice(position, 0, rule);
+    const replacement = { ...ruleInput, active: false };
+    const after = before.map(r => r.name === rule.name ? compileRule(filterRuleSchema.parse(replacement)) : r);
+    const { client, request } = fixture([rulesResponse(before), response('ModifyFilterRules', {}), rulesResponse(after)]);
+    expect(await client.executeWrite('upsertFilterRule', { expectedRevision: filterRevision(before), rule: replacement, beforeRuleName: ruleInput.name })).toMatchObject({ status: 'accepted', exactMatch: true });
+    expect(request(1).Body.ModifyFilterRulesRequest.filterRules[0].filterRule).toEqual(after);
+  });
+  it('still moves an updated outgoing rule before a different target', async () => {
+    const first = { ...rule, name: 'First' };
+    const before = [first, rule];
+    const replacement = { ...ruleInput, active: false };
+    const after = [compileRule(filterRuleSchema.parse(replacement)), first];
+    const { client, request } = fixture([rulesResponse(before, true), response('ModifyOutgoingFilterRules', {}), rulesResponse(after, true)]);
+    await client.executeWrite('upsertFilterRule', { direction: 'outgoing', expectedRevision: filterRevision(before), rule: replacement, beforeRuleName: 'First' });
+    expect(request(1).Body.ModifyOutgoingFilterRulesRequest.filterRules[0].filterRule).toEqual(after);
+  });
+  it('rejects a nonexistent self-target before writing a new rule', async () => {
+    const { client, fetch } = fixture([rulesResponse([])]);
+    await expect(client.executeWrite('upsertFilterRule', { expectedRevision: filterRevision([]), rule: ruleInput, beforeRuleName: ruleInput.name })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it('reads revisioned incoming and outgoing lists without executing rules', async () => {
     const { client, request } = fixture([rulesResponse([rule]), rulesResponse([], true)]);
     expect(await client.executeRead('getFilterRules', {})).toMatchObject({ rules: [rule], revision: filterRevision([rule]), direction: 'incoming' });

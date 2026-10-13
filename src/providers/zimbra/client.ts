@@ -3,7 +3,7 @@ import { simpleParser } from 'mailparser';
 import type { OutgoingAttachment, OutgoingMessage } from '../../domain/outgoing-message.js';
 import { htmlToMarkdown } from '../../utils/markdown.js';
 import type { ZimbraConfiguredAccount } from '../account-types.js';
-import { ZimbraError, validateZimbraEndpoint, type ZimbraSession } from './session.js';
+import { ZimbraError, ZimbraAuthChallenge, validateZimbraEndpoint, type ZimbraSession, type ZimbraTrustedDevice, type ZimbraAuthentication } from './session.js';
 import { ZIMBRA_READ_SCHEMAS, ZIMBRA_WRITE_SCHEMAS, type ZimbraReadOperation, type ZimbraWriteOperation } from './operations.js';
 import { NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS } from './native-operations.js';
 import { composeMime, MAX_MIME_BYTES, parseUploadResponse } from './mime.js';
@@ -87,6 +87,7 @@ async function boundedBytes(response: Response, max: number): Promise<Buffer> {
 export interface ZimbraClientOptions {
   fetch?: typeof fetch;
   sessionProvider: () => Promise<ZimbraSession>;
+  sessionInspector?: () => Promise<Obj>;
   timeoutMs?: number;
   journalDirectory?: string;
 }
@@ -137,7 +138,7 @@ export class ZimbraClient {
       const response = await this.fetchImpl(this.endpoint, {
         method: 'POST', redirect: 'error', signal: controller.signal,
         headers: { 'content-type': 'application/soap+json; charset=utf-8', accept: 'application/json', ...(cookie ? { cookie } : {}) },
-        body: JSON.stringify({ Header: { context: { _jsns: 'urn:zimbra', ...(session ? { authToken: { _content: session.authToken } } : {}), ...(changeToken ? { change: { token: changeToken, type: 'mod' } } : {}) } },
+        body: JSON.stringify({ Header: { context: { _jsns: 'urn:zimbra', ...(auth?.userAgent ? { userAgent: auth.userAgent } : {}), ...(session ? { authToken: { _content: session.authToken } } : {}), ...(changeToken ? { change: { token: changeToken, type: 'mod' } } : {}) } },
           Body: { [name + 'Request']: { _jsns: namespace, ...params } } }),
       });
       if (response.status === 401) {
@@ -184,17 +185,44 @@ export class ZimbraClient {
   }
 
   async authenticate(password: string, twoFactorCode?: string): Promise<ZimbraSession> {
+    try { return (await this.authenticateWithDevice(password, twoFactorCode)).session; }
+    catch (error) {
+      if (error instanceof ZimbraAuthChallenge) throw new ZimbraError('TWO_FACTOR_REQUIRED', error.message);
+      throw error;
+    }
+  }
+
+  async authenticateWithDevice(password: string, twoFactorCode?: string, device?: { register: true } | { trustedDevice: ZimbraTrustedDevice }): Promise<ZimbraAuthentication> {
+    const startedAt = Date.now();
+    const existing = device && 'trustedDevice' in device ? device.trustedDevice : undefined;
+    if (existing && existing.expiresAt <= startedAt + 5000) throw new ZimbraError('AUTH_REQUIRED', 'Device trust expired. Run accounts login locally.');
     const result = await this.request('Auth', {
       account: { by: 'name', _content: this.account.user }, password: { _content: password },
       ...(twoFactorCode ? { twoFactorCode: { _content: twoFactorCode } } : {}),
-    }, 'urn:zimbraAccount', false, {});
-    if (truth(content(result.twoFactorAuthRequired))) throw new ZimbraError('TWO_FACTOR_REQUIRED', 'A second authentication factor is required.');
+      ...(device && 'register' in device ? { deviceTrusted: true, generateDeviceId: true } : {}),
+      ...(existing ? { trustedToken: { _content: existing.token }, deviceId: { _content: existing.deviceId } } : {}),
+    }, 'urn:zimbraAccount', false, device ? { userAgent: { name: 'mail-mcp-trusted-login', version: '1' } } : {}).catch(error => {
+      if (error instanceof ZimbraError && error.code === 'TWO_FACTOR_REQUIRED') throw new ZimbraAuthChallenge();
+      throw error;
+    });
+    if (truth(content(result.resetPassword))) throw new ZimbraError('AUTH_REQUIRED', 'Password change is required. Complete it in webmail before logging in.');
+    if (truth(content(result.twoFactorAuthRequired))) throw new ZimbraAuthChallenge(result.trustedDevicesEnabled === undefined ? undefined : truth(content(result.trustedDevicesEnabled)));
     const tokens = list(result.authToken);
     const token = tokens.length === 1 ? content(tokens[0]) : undefined; const lifetime = Number(content(result.lifetime));
     if (typeof token !== 'string' || !token || token.length > 16384 || !Number.isSafeInteger(lifetime) || lifetime <= 5000 || lifetime > 365 * 86400000) {
       throw new ZimbraError('AUTH_FAILED', 'Zimbra did not return a usable session.');
     }
-    return { kind: 'zimbra-session-v1', endpoint: this.endpoint, user: this.account.user, authToken: token, expiresAt: Date.now() + lifetime };
+    const session: ZimbraSession = { kind: 'zimbra-session-v1', endpoint: this.endpoint, user: this.account.user, authToken: token, expiresAt: startedAt + lifetime };
+    if (!device) return { session };
+    const trustedToken = content(list(result.trustedToken)[0]);
+    const deviceId = content(list(result.deviceId)[0]) ?? existing?.deviceId;
+    const trustLifetime = Number(content(result.trustLifetime));
+    if (typeof trustedToken === 'string' && trustedToken.length > 0 && trustedToken.length <= 16384 && typeof deviceId === 'string' && deviceId.length > 0 && deviceId.length <= 256 && Number.isSafeInteger(trustLifetime) && trustLifetime > 5000 && trustLifetime <= 365 * 86400000) {
+      return { session, trustedDevice: { token: trustedToken, deviceId, expiresAt: startedAt + trustLifetime } };
+    }
+    // An existing trust token may not be echoed. Never extend its local lifetime.
+    if (existing && result.trustedToken === undefined && result.trustLifetime === undefined) return { session, trustedDevice: existing };
+    return { session };
   }
 
   async executeRead(operation: ZimbraReadOperation, input: unknown): Promise<unknown> {
@@ -218,8 +246,12 @@ export class ZimbraClient {
       }
       case 'verifySentMessage': return this.verifySent(v as typeof ZIMBRA_READ_SCHEMAS.verifySentMessage._output);
       case 'sessionStatus': {
-        const session = await this.options.sessionProvider();
         const remote = (v as { remote: boolean }).remote;
+        if (this.options.sessionInspector) {
+          if (remote) await this.request('GetInfo', { sections: 'mbox' }, 'urn:zimbraAccount');
+          return { ...await this.options.sessionInspector(), remoteVerified: remote };
+        }
+        const session = await this.options.sessionProvider();
         if (remote) await this.request('GetInfo', { sections: 'mbox' }, 'urn:zimbraAccount');
         return { status: 'session_available', remoteVerified: remote, expiresAt: new Date(session.expiresAt).toISOString(), nextAction: 'Run accounts login ACCOUNT_ID locally when the session expires.' };
       }

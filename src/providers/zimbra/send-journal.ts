@@ -1,9 +1,10 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { mkdir, open } from 'node:fs/promises';
+import { open } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { writeTextFileAtomic } from '../../utils/atomic-write.js';
+import { mkdirDurable, syncDirectory } from '../../utils/directory-sync.js';
 import { ZimbraError } from './session.js';
 
 const recordSchema = z.object({
@@ -18,11 +19,16 @@ const recordSchema = z.object({
 export type SendRecord = z.infer<typeof recordSchema>;
 const hash = (value: string | Buffer) => createHash('sha256').update(value).digest('hex');
 
-/** An exclusive, durable claim is never cleared merely because a process died. */
+/** An exclusive claim is never cleared merely because a process died.
+ * POSIX directory flushes also protect entries against host crashes. */
 export class ZimbraSendJournal {
   private readonly directory: string;
-  constructor(scope: string, directory = join(homedir(), '.config', 'mail-mcp', 'zimbra-send-state')) {
-    this.directory = join(directory, hash(scope));
+  private readonly durabilityAnchor: string;
+  constructor(scope: string, directory?: string) {
+    // The home directory exists independently of journal initialization. A custom
+    // journal root must likewise be provisioned durably by its caller beforehand.
+    this.durabilityAnchor = directory ?? homedir();
+    this.directory = join(directory ?? join(homedir(), '.config', 'mail-mcp', 'zimbra-send-state'), hash(scope));
   }
   private path(draftId: string) { return join(this.directory, hash(draftId) + '.json'); }
   async read(draftId: string): Promise<SendRecord | undefined> {
@@ -44,10 +50,11 @@ export class ZimbraSendJournal {
       mimeHash: hash(raw), messageId, status: 'sending', draftCleanup: 'retained', ...schedule };
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      await mkdir(this.directory, { recursive: true, mode: 0o700 });
+      await mkdirDurable(this.directory, this.durabilityAnchor);
       handle = await open(this.path(draftId), 'wx', 0o600);
       await handle.writeFile(JSON.stringify(record) + '\n', 'utf8');
       await handle.sync();
+      await syncDirectory(this.directory);
       return record;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new ZimbraError('OUTCOME_UNKNOWN', 'A send attempt already exists for this draft. Inspect getSendStatus before any further action.');
@@ -59,6 +66,7 @@ export class ZimbraSendJournal {
       const current = await this.read(record.draftId);
       if (!current || current.attemptId !== record.attemptId) throw new Error('Journal claim changed');
       await writeTextFileAtomic(this.path(record.draftId), JSON.stringify(recordSchema.parse(record)) + '\n');
+      await syncDirectory(this.directory);
     } catch { throw new ZimbraError('OUTCOME_UNKNOWN', 'Unable to update the send journal. Inspect Sent; do not send again.'); }
   }
 }

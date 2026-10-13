@@ -1,5 +1,22 @@
 # Changelog
 
+## 3.3.0 - 2026-10-14
+
+- Send the trusted-device SOAP userAgent element, permit explicit local login to
+  replace unusable prior state, and bound journal directory synchronization to a
+  preexisting durable root instead of requiring access to unrelated ancestors.
+- Fix Zimbra current-time filter attributes and replacing a rule before itself.
+- Flush POSIX send-journal directory entries before dispatch and after replacement;
+  document the Windows OS-crash/power-loss durability boundary.
+- Verify Zimbra credential deletion before removing account configuration, clear
+  legacy saved-password fallbacks on login/disable, and correct capability guidance.
+- Add explicit local Zimbra trusted-device registration/reuse and optional
+  OS-protected password storage for on-demand automatic login after session expiry.
+- Serialize login attempts across local processes, persist failure/crash blocking,
+  keep local status inspection free of authentication, and never replay mail writes.
+- Add a local command to disable automatic login, retain legacy session support,
+  and document trust expiry, server policy, crash recovery and downgrade boundaries.
+
 ## 3.2.0 - 2026-10-13
 
 - Expand Zimbra user-mailbox integration with MIME uploads, reply/reply-all/forward,
