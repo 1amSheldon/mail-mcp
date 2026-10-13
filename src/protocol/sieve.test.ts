@@ -79,6 +79,20 @@ function setupAutoReplySocket(
 // ---------------------------------------------------------------------------
 
 describe('SieveClient', () => {
+  it('consumes status literals fully and does not mistake AUTH payload for mutation success', async () => {
+    const sock = setupAutoReplySocket('OK\r\n', {
+      AUTHENTICATE: 'OK {4}\r\nOK\r\n\r\n',
+      DELETESCRIPT: 'NO "Cannot delete active script"\r\n',
+    });
+    const client = new SieveClient('localhost', 4190, 'u', 'p');
+    await client.connect();
+    await expect(client.deleteScript('active')).rejects.toThrow('Cannot delete');
+    sock.write = () => {
+      setImmediate(() => { for (const byte of Buffer.from('NO {4}\r\nOK\r\n\r\n')) sock.emit('data', Buffer.from([byte])); });
+      return true;
+    };
+    await expect(client.listScripts()).rejects.toThrow('NO');
+  });
   it('verifies TLS identity and accepts an explicit trusted CA', async () => {
     setupAutoReplySocket('OK\r\n', {});
     await new SieveClient('sieve.example.test', 4190, 'u', 'p', { ca: 'test-ca' }).connect();
@@ -102,13 +116,13 @@ describe('SieveClient', () => {
     const sock = setupAutoReplySocket('OK\r\n', {});
     const client = new SieveClient('localhost', 4190, 'u', 'p');
     await client.connect();
-    const content = '# \u0420\u0408\u0420\u0454\u0421\u0402\u0420°\u0421—\u0420\u0405\u0421\u0403\u0421\u040a\u0420\u0454\u0420\u0451\u0420¹ \u0421„\u0421–\u0420»\u0421\u040a\u0421‚\u0421\u0402\r\nNO not a terminal\r\n';
+    const content = '# \u0423\u043a\u0440\u0430\u0457\u043d\u0441\u044c\u043a\u0438\u0439 \u0444\u0456\u043b\u044c\u0442\u0440\r\nNO not a terminal\r\n';
     const response = Buffer.from(`{${Buffer.byteLength(content)}}\r\n${content}\r\nOK\r\n`);
     sock.write = () => {
       setImmediate(() => { for (const byte of response) sock.emit('data', Buffer.from([byte])); });
       return true;
     };
-    expect(await client.getScript('\u0421„\u0421–\u0420»\u0421\u040a\u0421‚\u0421\u0402')).toBe(content);
+    expect(await client.getScript('filter')).toBe(content);
     await expect(client.deleteScript('x\r\nLOGOUT')).rejects.toThrow('Invalid');
   });
 

@@ -25,13 +25,14 @@ export interface SieveScript {
 }
 
 const CONNECTION_TIMEOUT_MS = 10_000;
+interface SieveResponse { raw: Buffer; terminal: string; text: string }
 
 export class SieveClient {
   private socket: tls.TLSSocket | null = null;
   private buffer: Buffer = Buffer.alloc(0);
   private failure?: Error;
   /** Resolvers waiting for the next complete response */
-  private waiters: Array<{ resolve: (buf: Buffer) => void; reject: (error: Error) => void }> = [];
+  private waiters: Array<{ resolve: (response: SieveResponse) => void; reject: (error: Error) => void }> = [];
 
   constructor(
     private readonly host: string,
@@ -49,11 +50,11 @@ export class SieveClient {
     this.failure = undefined;
     this.buffer = Buffer.alloc(0);
     try {
-    await this._tlsConnect();
-    // Read server greeting
-    await this._readResponse();
-    // Authenticate
-    await this._authenticate();
+      await this._tlsConnect();
+      // Read server greeting
+      await this._readResponse();
+      // Authenticate
+      await this._authenticate();
     } catch (error) {
       this._fail(error instanceof Error ? error : new Error(String(error)));
       throw error;
@@ -200,23 +201,12 @@ export class SieveClient {
     if (this.failure) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => this._fail(new Error('ManageSieve response timeout')), this.options.timeoutMs ?? CONNECTION_TIMEOUT_MS);
-      const waiter = (full: Buffer) => {
+      const waiter = (response: SieveResponse) => {
         clearTimeout(timer);
-        // The framing parser has found the terminal line outside any literal.
-        const lastLine = full.toString('utf8').trimEnd().split('\r\n').at(-1)!;
-        const termMatch = lastLine.match(/^(OK|NO|BYE)(?:\s|$)/i);
-        if (!termMatch) {
-          resolve(full);
-          return;
-        }
-        const terminal = termMatch[1].toUpperCase();
-        if (terminal === 'NO' || terminal === 'BYE') {
-          // Extract message from last line
-          const msgMatch = lastLine.match(/^(?:NO|BYE)\s+"?([^"]*)"?/i);
-          const msg = msgMatch?.[1] ?? lastLine;
-          reject(new Error(msg || `ManageSieve error: ${terminal}`));
+        if (response.terminal === 'NO' || response.terminal === 'BYE') {
+          reject(new Error(response.text || `ManageSieve error: ${response.terminal}`));
         } else {
-          resolve(full);
+          resolve(response.raw);
         }
       };
 
@@ -249,45 +239,43 @@ export class SieveClient {
    * May contain literal strings: {N}\r\n followed by N bytes.
    * Returns null if the response is not yet complete.
    */
-  private _tryConsumeResponse(): Buffer | null {
+  private _tryConsumeResponse(): SieveResponse | null {
     let pos = 0;
+    let logicalText = '';
+    let terminal = '';
+    let continuing = false;
     const buf = this.buffer;
-
     while (pos < buf.length) {
       const lineEnd = buf.indexOf('\r\n', pos);
-      if (lineEnd === -1) {
-        // Incomplete line
-        return null;
-      }
-
-      const line = buf.subarray(pos, lineEnd).toString('utf8');
-      const nextPos = lineEnd + 2;
-
-      // Check for literal string: {N} or {N+}
-      const literalMatch = line.match(/^\{(\d+)\+?\}$/);
-      if (literalMatch) {
-        const byteCount = parseInt(literalMatch[1], 10);
-        if (nextPos + byteCount > buf.length) {
-          // Literal not fully received yet
+      if (lineEnd === -1) return null;
+      const segment = buf.subarray(pos, lineEnd).toString('utf8');
+      if (!continuing) terminal = segment.match(/^(OK|NO|BYE)(?:\s|$)/i)?.[1].toUpperCase() ?? '';
+      const next = lineEnd + 2;
+      // Literals can follow a status token or another string, not only occupy
+      // a whole line. Their embedded CRLF and status words are opaque payload.
+      const literal = segment.match(/(?:^| )\{(\d+)\+?\}$/);
+      if (literal) {
+        const length = Number(literal[1]);
+        if (!Number.isSafeInteger(length) || length > 16 * 1024 * 1024) {
+          this._fail(new Error('ManageSieve literal exceeds 16 MiB'));
           return null;
         }
-        // Skip past the literal data
-        pos = nextPos + byteCount;
+        if (next + length > buf.length) return null;
+        logicalText += segment.slice(0, literal.index) + buf.subarray(next, next + length).toString('utf8');
+        pos = next + length;
+        continuing = true;
         continue;
       }
-
-      // Check for terminal lines
-      const termMatch = line.match(/^(OK|NO|BYE)(?:\s|$)/i);
-      if (termMatch) {
-        const consumed = nextPos;
-        const full = buf.slice(0, consumed);
-        this.buffer = buf.slice(consumed);
-        return full;
+      logicalText += segment;
+      if (terminal) {
+        const raw = buf.subarray(0, next);
+        this.buffer = buf.subarray(next);
+        return { raw, terminal, text: logicalText };
       }
-
-      pos = nextPos;
+      pos = next;
+      logicalText = '';
+      continuing = false;
     }
-
     return null;
   }
 
