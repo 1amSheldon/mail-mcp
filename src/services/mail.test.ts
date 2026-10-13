@@ -1265,7 +1265,9 @@ describe('MailService.extractAttachmentText', () => {
     const service = serviceReturning(buildPdf('Invoice 39A total 1234.56'), 'application/pdf');
     const text = await service.extractAttachmentText('1', 'invoice.pdf');
     expect(text).toContain('Invoice 39A total 1234.56');
-  });
+  // The first pdf.js import/worker startup exceeds 5s on fresh Windows CI;
+  // keep the real parser assertion and a finite cold-start budget.
+  }, 30_000);
 
   it('returns text/* attachments as UTF-8', async () => {
     const service = serviceReturning(Buffer.from('plain body'), 'text/plain');
