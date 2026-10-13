@@ -58,6 +58,7 @@ export class OsascriptRunner implements AppleScriptRunner {
       let outputBytes = 0;
       let settled = false;
       let closed = false;
+      let stopping = false;
       let forceKill: NodeJS.Timeout | undefined;
 
       const finish = (callback: () => void): void => {
@@ -69,7 +70,10 @@ export class OsascriptRunner implements AppleScriptRunner {
       };
 
       const stop = (): void => {
+        if (stopping || closed) return;
+        stopping = true;
         child.kill('SIGTERM');
+        if (closed) return;
         forceKill = setTimeout(() => {
           if (!closed) child.kill('SIGKILL');
         }, this.killGraceMs);
@@ -85,7 +89,8 @@ export class OsascriptRunner implements AppleScriptRunner {
       }, timeoutMs);
       timeout.unref?.();
 
-      child.stdout.on('data', (chunk: Buffer | string) => {
+      const capture = (chunks: Buffer[], chunk: Buffer | string): void => {
+        if (settled) return;
         const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
         outputBytes += buffer.length;
         if (outputBytes > maxOutputBytes) {
@@ -96,16 +101,16 @@ export class OsascriptRunner implements AppleScriptRunner {
           )));
           return;
         }
-        stdout.push(buffer);
-      });
-      child.stderr.on('data', (chunk: Buffer | string) => {
-        stderr.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-      });
+        chunks.push(buffer);
+      };
+      child.stdout.on('data', (chunk: Buffer | string) => capture(stdout, chunk));
+      child.stderr.on('data', (chunk: Buffer | string) => capture(stderr, chunk));
       child.once('error', (error) => {
         finish(() => reject(appleMailExecutionError(error.message, error)));
       });
       child.once('close', (code, signal) => {
         closed = true;
+        if (forceKill) clearTimeout(forceKill);
         finish(() => {
           const errorText = Buffer.concat(stderr).toString('utf8');
           if (code !== 0) {
@@ -119,6 +124,7 @@ export class OsascriptRunner implements AppleScriptRunner {
       });
 
       child.stdin.on('error', (error) => {
+        stop();
         finish(() => reject(appleMailExecutionError(error.message, error)));
       });
       child.stdin.end(script, 'utf8');
