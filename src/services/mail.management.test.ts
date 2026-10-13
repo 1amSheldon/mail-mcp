@@ -124,6 +124,40 @@ beforeEach(() => {
 });
 
 describe('MailService cursor and locator contracts', () => {
+  it('uses canonical mailbox paths for pages and threads with usable locators', async () => {
+    imap.getMailboxIdentity.mockResolvedValue({ path: 'INBOX', uidValidity: '123' });
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: null });
+    imap.fetchMessagesByUids.mockResolvedValue([{ id: '7', uid: 7 }]);
+    imap.fetchThreadMessages.mockResolvedValue([{ id: '7', uid: 7 }]);
+    const service = new MailService(baseAccount);
+    const page = await service.listEmailsPage({ folder: 'inbox' });
+    const thread = await service.getThread('<thread>', 'inbox', ['inbox', 'INBOX']);
+    expect(page.items[0].locator).toBe(locator());
+    expect(thread.items[0].locator).toBe(locator());
+    expect(thread.folders).toEqual(['INBOX']);
+    await expect(service.resolveLocator(page.items[0].locator)).resolves.toMatchObject({ mailbox: 'INBOX', uid: 7 });
+    expect(imap.searchUidPage).toHaveBeenCalledWith('INBOX', '123', { all: true }, 10, undefined);
+    expect(imap.fetchMessagesByUids).toHaveBeenCalledWith([7], 'INBOX', false);
+    expect(imap.fetchThreadMessages).toHaveBeenCalledTimes(1);
+    expect(imap.fetchThreadMessages).toHaveBeenCalledWith('<thread>', 'INBOX', expect.any(Object));
+  });
+
+  it('keeps unrelated cursors alive across long traversals and failed hydration', async () => {
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: 7 });
+    imap.fetchMessagesByUids.mockResolvedValue([{ id: '7', uid: 7 }]);
+    const service = new MailService(baseAccount);
+    const unrelated = await service.listEmailsPage({ folder: 'Archive' });
+    let page = await service.listEmailsPage({});
+    for (let i = 0; i < 130; i++) page = await service.listEmailsPage({ cursor: page.nextCursor! });
+    const cursor = page.nextCursor!;
+    imap.fetchMessagesByUids.mockRejectedValueOnce(new Error('temporary failure'));
+    await expect(service.listEmailsPage({ cursor })).rejects.toThrow('temporary failure');
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: null });
+    await expect(service.listEmailsPage({ cursor })).resolves.toMatchObject({ nextCursor: null });
+    await expect(service.listEmailsPage({ cursor })).rejects.toThrow('unknown');
+    await expect(service.listEmailsPage({ folder: 'Archive', cursor: unrelated.nextCursor! })).resolves.toMatchObject({ nextCursor: null });
+  });
+
   it('continues from a UID boundary and returns stable message locators', async () => {
     imap.searchUidPage.mockResolvedValueOnce({ uids: [3, 2], nextBefore: 2 }).mockResolvedValueOnce({ uids: [1], nextBefore: null });
     imap.fetchMessagesByUids.mockImplementation(async (uids: number[]) => uids.map(uid => ({

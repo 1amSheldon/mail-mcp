@@ -20,5 +20,7 @@ export class UidCursorStore {
     return cursor;
   }
 
+  retire(cursor: string): void { this.entries.delete(cursor); }
+
   clear(): void { this.entries.clear(); }
 }

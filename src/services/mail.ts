@@ -1,5 +1,6 @@
 import {
   ImapClient,
+  AppendNotSavedError,
   type CopyMessagesResult,
   type MailboxMetadata,
   type MailboxStatus,
@@ -233,12 +234,15 @@ export class MailService {
     const identity = await this.imapClient.getMailboxIdentity(folder);
     const scope = this.paginationScope(identity.path, identity.uidValidity, queryKey);
     const before = options.cursor ? this.paginationStore.read(options.cursor, scope) : undefined;
-    const page = await this.imapClient.searchUidPage(folder, identity.uidValidity, criteria, limit, before);
-    const messages = await this.imapClient.fetchMessagesByUids(page.uids, folder, options.headerOnly ?? false);
-    const after = await this.imapClient.getMailboxIdentity(folder);
+    const page = await this.imapClient.searchUidPage(identity.path, identity.uidValidity, criteria, limit, before);
+    const messages = await this.imapClient.fetchMessagesByUids(page.uids, identity.path, options.headerOnly ?? false);
+    const after = await this.imapClient.getMailboxIdentity(identity.path);
     if (after.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed during pagination');
+    const items = this.locateMessages(messages, identity.path, identity.uidValidity);
+    // Retire only after a successful read, so a failed fetch can be retried.
+    if (options.cursor) this.paginationStore.retire(options.cursor);
     return {
-      items: this.locateMessages(messages, folder, identity.uidValidity),
+      items,
       nextCursor: page.nextBefore === null ? null : this.paginationStore.issue(scope, page.nextBefore),
       total: null,
       partial: page.nextBefore !== null,
@@ -811,7 +815,8 @@ export class MailService {
     let appended;
     try {
       appended = await this.imapClient.appendMessage(draftsFolder, composed.rawMessage, ['\\Draft']);
-    } catch {
+    } catch (error) {
+      if (error instanceof AppendNotSavedError) throw error;
       return {
         status: 'append_outcome_unknown', retrySafe: false, folder: draftsFolder,
         messageId: composed.messageId,
@@ -1080,6 +1085,7 @@ export class MailService {
       throw new ValidationError('Thread folders must contain between 1 and 10 mailbox paths.');
     }
     const items = new Map<string, LocatedMessageMetadata>();
+    const canonicalFolders = new Set<string>();
     const ids = new Set([threadId]);
     const queried = new Set<string>();
     const budget = { remaining: 100 };
@@ -1088,15 +1094,16 @@ export class MailService {
       let progressed = false;
       for (const mailbox of scope) {
         const identity = await this.imapClient.getMailboxIdentity(mailbox);
+        canonicalFolders.add(identity.path);
         for (const id of [...ids]) {
-          const key = JSON.stringify([mailbox, id]);
+          const key = JSON.stringify([identity.path, id]);
           if (queried.has(key) || budget.remaining <= 0 || items.size >= 500) continue;
           queried.add(key);
           progressed = true;
-          const messages = await this.imapClient.fetchThreadMessages(id, mailbox, { expand: false, budget });
-          const after = await this.imapClient.getMailboxIdentity(mailbox);
+          const messages = await this.imapClient.fetchThreadMessages(id, identity.path, { expand: false, budget });
+          const after = await this.imapClient.getMailboxIdentity(identity.path);
           if (after.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed during thread read.');
-          for (const message of this.locateMessages(messages, mailbox, identity.uidValidity)) {
+          for (const message of this.locateMessages(messages, identity.path, identity.uidValidity)) {
             if (items.size >= 500) break;
             items.set(message.locator, message);
             for (const ref of message.referenceIds ?? []) if (ids.size < 100) ids.add(ref);
@@ -1107,7 +1114,7 @@ export class MailService {
     }
     return {
       items: [...items.values()].sort((a, b) => (a.date?.getTime() ?? 0) - (b.date?.getTime() ?? 0)),
-      folders: scope,
+      folders: [...canonicalFolders],
       partial: true,
       warning: 'Thread reconstruction is bounded to the requested folders, 500 messages and 100 searches. Missing, deleted or unreferenced messages cannot be ruled out. Include the Sent folder explicitly when needed.',
     };
