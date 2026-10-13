@@ -12,6 +12,13 @@ function fixture(responses: Response[], patch: Partial<ZimbraConfiguredAccount> 
 }
 
 describe('Zimbra sharing and mountpoints', () => {
+  it.each(['00000000-0000-0000-0000-000000000000', '99999999-9999-9999-9999-999999999999'])('can revoke native all-user/public principal %s from folders and files', async granteeId => {
+    const { client, request } = fixture([response('FolderAction', {}), response('DocumentAction', {})]);
+    await client.executeWrite('revokeFolderAccess', { folderId: '257', granteeId });
+    await client.executeWrite('revokeDocumentAccess', { documentId: '258', granteeId });
+    expect(request().Body.FolderActionRequest.action).toEqual({ id: '257', op: '!grant', zid: granteeId });
+    expect(request(1).Body.DocumentActionRequest.action).toEqual({ id: '258', op: '!grant', zid: granteeId });
+  });
   it('discovers an owner mailbox instead of relying only on published share metadata', async () => {
     const { client, request } = fixture([response('GetShareInfo', { share: [] })]);
     await client.executeRead('getShareInfo', { owner: 'owner@example.test', includeOwn: false, granteeType: 'grp' });

@@ -49,7 +49,8 @@ describe('Zimbra preference writes and recipient policy', () => {
   it('normalizes explicit OOO times to UTC without changing omitted external-reply settings', async () => {
     const { client, request } = fixture([response('ModifyPrefs', {})]);
     await client.executeWrite('setOutOfOffice', { enabled: true, message: 'Away', startsAt: '2026-10-14T09:00:00+03:00', endsAt: '2026-10-15T18:00:00+03:00' });
-    expect(request().Body.ModifyPrefsRequest._attrs).toEqual({ zimbraPrefOutOfOfficeReplyEnabled: 'TRUE', zimbraPrefOutOfOfficeReply: 'Away', zimbraPrefOutOfOfficeFromDate: '20261014T060000Z', zimbraPrefOutOfOfficeUntilDate: '20261015T150000Z' });
+    // LDAP generalized time uses YYYYMMDDHHMMSSZ, unlike iCalendar's T separator.
+    expect(request().Body.ModifyPrefsRequest._attrs).toEqual({ zimbraPrefOutOfOfficeReplyEnabled: 'TRUE', zimbraPrefOutOfOfficeReply: 'Away', zimbraPrefOutOfOfficeFromDate: '20261014060000Z', zimbraPrefOutOfOfficeUntilDate: '20261015150000Z' });
   });
   it('allows harmless preference edits but rejects auto replies and forbidden forwarding under recipient restrictions', async () => {
     const { client, fetch } = fixture([response('ModifyPrefs', {}), response('ModifyPrefs', {})], { allowedRecipients: ['allowed@example.test'] });

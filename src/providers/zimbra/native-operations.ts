@@ -70,7 +70,7 @@ export const NATIVE_READ_OPERATIONS = {
 export const NATIVE_WRITE_OPERATIONS = {
   grantFolderAccess: operation(z.object({ folderId: itemId, grantee, permissions: z.string().min(1).max(8).regex(/^[rwidaxpf]+$/).refine(v => new Set(v).size === v.length), expiresAt: z.union([z.iso.datetime({ offset: true }), z.literal('never')]).optional() }).strict(),
     v => folderAction(v.folderId, 'grant', { grant: { ...grantTarget(v.grantee), perm: v.permissions, ...(v.expiresAt ? { expiry: v.expiresAt === 'never' ? 0 : Date.parse(v.expiresAt) } : {}) } })),
-  revokeFolderAccess: operation(z.object({ folderId: itemId, granteeId: z.union([z.string().uuid(), z.email()]) }).strict(), v => folderAction(v.folderId, '!grant', { zid: v.granteeId })),
+  revokeFolderAccess: operation(z.object({ folderId: itemId, granteeId: z.union([z.string().uuid(), z.literal('99999999-9999-9999-9999-999999999999'), z.email()]) }).strict(), v => folderAction(v.folderId, '!grant', { zid: v.granteeId })),
   createMountpoint: operation(z.object({ name, parentFolderId: itemId, owner: z.email(), remoteFolderId: z.string().regex(/^[1-9][0-9]{0,15}$/), view: z.enum(['message', 'contact', 'appointment', 'task', 'document']).optional(), color: color.optional(), reminders: z.boolean().default(false) }).strict(),
     v => ({ name: 'CreateMountpoint', params: { link: { name: v.name, l: v.parentFolderId, owner: v.owner, rid: v.remoteFolderId, reminder: v.reminders ? 1 : 0, ...(v.view ? { view: v.view } : {}), ...(v.color === undefined ? {} : { color: v.color }) } } })),
   setSharedReminders: operation(z.object({ mountpointId: localItemId, enabled: z.boolean() }).strict(), v => ({ name: 'EnableSharedReminder', params: { link: { id: v.mountpointId, reminder: v.enabled ? 1 : 0 } } })),
@@ -87,8 +87,8 @@ export const NATIVE_WRITE_OPERATIONS = {
     v => ({ name: 'ModifyPrefs', namespace: 'urn:zimbraAccount', params: { _attrs: {
       zimbraPrefOutOfOfficeReplyEnabled: v.enabled ? 'TRUE' : 'FALSE',
       ...(v.message !== undefined ? { zimbraPrefOutOfOfficeReply: v.message } : {}),
-      ...(v.startsAt ? { zimbraPrefOutOfOfficeFromDate: new Date(v.startsAt).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '') } : {}),
-      ...(v.endsAt ? { zimbraPrefOutOfOfficeUntilDate: new Date(v.endsAt).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '') } : {}),
+      ...(v.startsAt ? { zimbraPrefOutOfOfficeFromDate: new Date(v.startsAt).toISOString().replace(/[-:T]/g, '').replace(/\.\d{3}/, '') } : {}),
+      ...(v.endsAt ? { zimbraPrefOutOfOfficeUntilDate: new Date(v.endsAt).toISOString().replace(/[-:T]/g, '').replace(/\.\d{3}/, '') } : {}),
     } } })),
   createContactGroup: operation(z.object({ name, folderId: itemId.optional(), members }).strict(), v => ({ name: 'CreateContact', params: { verbose: 1, cn: { ...(v.folderId ? { l: v.folderId } : {}), a: attributes({ type: 'group', nickname: v.name, fileAs: '8:' + v.name }), m: v.members.map(member) } } })),
   updateContactGroup: operation(z.object({ contactId: itemId, name: name.optional(), addMembers: members.optional(), removeMembers: members.optional(), clearMembers: z.boolean().default(false) }).strict()

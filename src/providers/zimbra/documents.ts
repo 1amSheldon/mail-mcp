@@ -38,7 +38,7 @@ export const DOCUMENT_WRITE_SCHEMAS = {
   setDocumentLock: z.object({ ...id, locked: z.boolean() }).strict(),
   setDocumentWatch: z.object({ ...id, enabled: z.boolean() }).strict(),
   grantDocumentAccess: z.object({ ...id, grantee: z.discriminatedUnion('type', [z.object({ type: z.literal('usr'), id: z.string().uuid() }).strict(), z.object({ type: z.enum(['all', 'pub']) }).strict()]), permissions: z.string().min(1).max(8).regex(/^[rwidaxpf]+$/).refine(v => new Set(v).size === v.length), expiresAt: z.union([z.iso.datetime({ offset: true }), z.literal('never')]).optional() }).strict(),
-  revokeDocumentAccess: z.object({ ...id, granteeId: z.string().uuid() }).strict(),
+  revokeDocumentAccess: z.object({ ...id, granteeId: z.union([z.string().uuid(), z.literal('99999999-9999-9999-9999-999999999999')]) }).strict(),
 };
 type ReadOperation = keyof typeof DOCUMENT_READ_SCHEMAS;
 type WriteOperation = keyof typeof DOCUMENT_WRITE_SCHEMAS;
