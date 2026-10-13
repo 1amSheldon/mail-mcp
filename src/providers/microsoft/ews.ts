@@ -298,6 +298,7 @@ export class EwsClient {
     try {
       response = await this.fetchImpl(this.endpoint, {
         method: 'POST',
+        redirect: 'error',
         headers: {
           Accept: 'text/xml',
           Authorization: `Bearer ${token}`,
@@ -314,7 +315,8 @@ export class EwsClient {
       const detail = await responseText(response);
       throw new MicrosoftProviderError(
         'ews',
-        response.status === 401 || response.status === 403 ? 'auth' : 'remote',
+        mutating && response.status >= 500 ? 'outcome_unknown'
+          : response.status === 401 || response.status === 403 ? 'auth' : 'remote',
         `EWS returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`,
         response.status,
         requestIdFrom(response),

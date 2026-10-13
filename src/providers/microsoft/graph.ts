@@ -572,6 +572,7 @@ export class MicrosoftGraphClient {
     try {
       response = await this.fetchImpl(uploadUrl, {
         method: 'PUT',
+        redirect: 'error',
         headers: {
           'Content-Length': String(chunk.byteLength),
           'Content-Range': `bytes ${start}-${end}/${total}`,
@@ -630,6 +631,7 @@ export class MicrosoftGraphClient {
     try {
       response = await this.fetchImpl(url, {
         ...init,
+        redirect: 'error',
         headers: {
           Accept: 'application/json',
           Authorization: `Bearer ${token}`,
@@ -645,7 +647,8 @@ export class MicrosoftGraphClient {
       const detail = await responseText(response);
       throw new MicrosoftProviderError(
         'graph',
-        response.status === 401 || response.status === 403 ? 'auth' : 'remote',
+        mutating && response.status >= 500 ? 'outcome_unknown'
+          : response.status === 401 || response.status === 403 ? 'auth' : 'remote',
         `Microsoft Graph returned HTTP ${response.status}${detail ? `: ${detail}` : ''}`,
         response.status,
         requestIdFrom(response),

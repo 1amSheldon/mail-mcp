@@ -22,6 +22,13 @@ function requestBody(fetchMock: ReturnType<typeof vi.fn<MicrosoftFetch>>): strin
 }
 
 describe('EwsClient', () => {
+  it('does not follow redirects and treats server send failures as ambiguous', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('', { status: 503 }));
+    const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });
+    await expect(client.sendMessage({ subject: 'S', body: 'B', to: ['to@example.com'] })).rejects.toMatchObject({ kind: 'outcome_unknown' });
+    expect(fetchMock.mock.calls[0][1]?.redirect).toBe('error');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
   it('reports an oversized send response as unknown and does not retry', async () => {
     const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('ignored', {
       headers: { 'content-length': String(5 * 1024 * 1024) },
