@@ -16,6 +16,7 @@ export type MicrosoftProviderErrorKind =
 
 export class MicrosoftProviderError extends Error {
   draftId?: string;
+  operation?: 'createDraft';
   constructor(
     public readonly provider: 'graph' | 'ews',
     public readonly kind: MicrosoftProviderErrorKind,

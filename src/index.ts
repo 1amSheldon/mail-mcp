@@ -228,7 +228,10 @@ function providerErrorMessage(error: unknown): string {
       return JSON.stringify({ provider: error.provider, status: 'outcome_unknown', retrySafe: false,
         ...(error.requestId ? { requestId: error.requestId } : {}),
         ...(error.draftId ? { draftId: error.draftId } : {}),
-        nextAction: 'Do not resend automatically. Inspect Sent items and provider delivery logs before deciding whether to retry.' });
+        ...(error.operation === 'createDraft' ? { operation: 'createDraft', deliveryAttempted: false } : {}),
+        nextAction: error.operation === 'createDraft'
+          ? 'Do not create another draft automatically. Delivery was not attempted. Inspect Drafts for the saved copy before deciding whether to retry.'
+          : 'Do not resend automatically. Inspect Sent items and provider delivery logs before deciding whether to retry.' });
     }
     const metadata = [
       error.status !== undefined ? `HTTP ${error.status}` : undefined,

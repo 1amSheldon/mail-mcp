@@ -188,6 +188,21 @@ describe('EwsClient', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  it.each(['network', 'server-error', 'invalid-xml', 'oversized', 'missing-id'])('keeps SaveOnly uncertainty after %s without attempting delivery', async failure => {
+    const fetchMock = vi.fn<MicrosoftFetch>();
+    if (failure === 'network') fetchMock.mockRejectedValue(new Error('lost after upload'));
+    else fetchMock.mockResolvedValue(new Response(failure === 'invalid-xml' ? '<broken' : SOAP_OK, {
+      status: failure === 'server-error' ? 503 : 200,
+      ...(failure === 'oversized' ? { headers: { 'content-length': String(5 * 1024 * 1024) } } : {}),
+    }));
+    const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });
+    await expect(client.sendMessage({ subject: 'S', body: 'B', to: ['to@example.com'],
+      attachments: [{ name: 'a.txt', content: 'YQ==' }],
+    })).rejects.toMatchObject({ kind: 'outcome_unknown', operation: 'createDraft' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+    expect(String(fetchMock.mock.calls[0][1]?.body)).toContain('MessageDisposition="SaveOnly"');
+  });
+
   it('rejects bodyType values outside the EWS enum before serializing XML', async () => {
     const fetchMock = vi.fn<MicrosoftFetch>();
     const client = new EwsClient({

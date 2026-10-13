@@ -260,11 +260,24 @@ export class EwsClient {
       + recipients('BccRecipients', message.bcc)
       + recipients('ReplyTo', message.replyTo)
       + '</t:Message></m:Items></m:CreateItem>';
-    let { response, body } = await this.soapResponse('CreateItem', operation, !hasAttachments);
+    let created: { response: Response; body: string };
+    let draft: EwsMessageSummary | undefined;
+    try {
+      // SaveOnly also mutates the mailbox; a lost response can leave a saved draft.
+      created = await this.soapResponse('CreateItem', operation, true);
+      if (hasAttachments) {
+        draft = parseMessages(created.body)[0];
+        if (!draft) throw new MicrosoftProviderError('ews', 'outcome_unknown', 'EWS returned no identifiable saved draft. No SendItem request was issued; inspect Drafts before retrying.');
+      }
+    } catch (error) {
+      if (hasAttachments && error instanceof MicrosoftProviderError && error.kind === 'outcome_unknown') {
+        error.operation = 'createDraft';
+      }
+      throw error;
+    }
+    let { response } = created;
     let draftId: string | undefined;
-    if (hasAttachments) {
-      const draft = parseMessages(body)[0];
-      if (!draft) throw new MicrosoftProviderError('ews', 'invalid_response', 'EWS created no identifiable draft; no SendItem request was issued. Inspect Drafts before retrying.');
+    if (draft) {
       draftId = draft.itemId;
       const send = `<m:SendItem SaveItemToFolder="${saveToSentItems}"><m:ItemIds>`
         + `<t:ItemId Id="${escapeXml(draftId)}"${draft.changeKey ? ` ChangeKey="${escapeXml(draft.changeKey)}"` : ''} />`
