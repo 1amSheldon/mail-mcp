@@ -66,7 +66,7 @@ import {
 } from './providers/runtime.js';
 import type { MailtrapAction } from './providers/mailtrap/types.js';
 import { AppleMailError } from './providers/apple-mail/errors.js';
-import { MailtrapHttpError } from './providers/mailtrap/client.js';
+import { MailtrapHttpError, MailtrapSendOutcomeUnknownError } from './providers/mailtrap/client.js';
 import { MicrosoftProviderError } from './providers/microsoft/common.js';
 import type { OutgoingAttachment } from './domain/outgoing-message.js';
 import { validateOAuth2TokenEndpoint } from './security/oauth2.js';
@@ -230,6 +230,10 @@ function providerErrorMessage(error: unknown): string {
     return `[${error.provider}:${error.kind}] Provider request failed${metadata ? ` (${metadata})` : ''}.`;
   }
   if (error instanceof MailtrapHttpError) {
+    if (error instanceof MailtrapSendOutcomeUnknownError) {
+      return JSON.stringify({ provider: 'mailtrap', status: error.kind, retrySafe: false,
+        ...(error.status ? { httpStatus: error.status } : {}), nextAction: error.nextAction });
+    }
     return `[mailtrap${error.status ? `:${error.status}` : ''}] ${error.message}`;
   }
   return error instanceof Error ? error.message : String(error);
