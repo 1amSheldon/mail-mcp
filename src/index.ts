@@ -1004,26 +1004,44 @@ export class MailMCPServer {
         }
         const service = await this.getService(args.accountId as string);
         const sentFolder = await service.resolveSentFolder(args.sentFolder as string | undefined);
-        const page = await service.searchEmailsPage(
+        let page = await service.searchEmailsPage(
           { messageId },
           {
             folder: sentFolder,
             limit: Math.min((args.count as number | undefined) ?? 10, 100),
           },
         );
+        // A bounded UID search can return an empty window with more mail to
+        // inspect. Only report absence after the continuation is exhausted.
+        let pagesScanned = 1;
+        const maxPages = 10;
+        while (page.items.length === 0 && page.nextCursor && pagesScanned < maxPages) {
+          page = await service.searchEmailsPage({ messageId }, {
+            folder: sentFolder,
+            limit: Math.min((args.count as number | undefined) ?? 10, 100),
+            cursor: page.nextCursor,
+          });
+          pagesScanned++;
+        }
         const matches = page.items;
         return {
           content: [{
             type: 'text',
             text: JSON.stringify({
-              status: matches.length > 0 ? 'found_in_sent' : 'not_found_in_sent',
+              status: matches.length > 0 ? 'found_in_sent'
+                : page.nextCursor ? 'indeterminate' : 'not_found_in_sent',
               messageId,
               sentFolder,
               count: matches.length,
               matches,
+              pagesScanned,
+              partial: Boolean(page.nextCursor),
+              nextCursor: page.nextCursor,
               caution: matches.length > 0
                 ? 'The IMAP Sent copy exists. Do not resend.'
-                : 'Absence from Sent does not prove SMTP non-delivery. Do not retry automatically.',
+                : page.nextCursor
+                  ? 'The Sent search is incomplete. Continue searchMessages with this Message-ID, Sent folder and nextCursor. Do not resend or retry automatically.'
+                  : 'Absence from Sent does not prove SMTP non-delivery. Do not retry automatically.',
             }, null, 2),
           }],
         };

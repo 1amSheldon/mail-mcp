@@ -469,6 +469,62 @@ describe('DELIVERY-VERIFY: verify_sent_message tool', () => {
     expect(payload.status).toBe('not_found_in_sent');
     expect(payload.caution).toContain('does not prove');
   });
+
+  it('follows empty UID windows before finding the Sent copy', async () => {
+    const server = new MailMCPServer(false);
+    const searchEmailsPage = vi.fn()
+      .mockResolvedValueOnce({ items: [], nextCursor: 'older-window' })
+      .mockResolvedValueOnce({ items: [{ uid: 77 }], nextCursor: null });
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      resolveSentFolder: vi.fn().mockResolvedValue('Sent'), searchEmailsPage,
+    });
+    const result = await server.dispatchTool('verify_sent_message', false, {
+      accountId: 'test', messageId: '<delivery@example.com>', count: 5,
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      status: 'found_in_sent', pagesScanned: 2, count: 1, partial: false,
+    });
+    expect(searchEmailsPage).toHaveBeenNthCalledWith(2,
+      { messageId: '<delivery@example.com>' },
+      { folder: 'Sent', limit: 5, cursor: 'older-window' });
+  });
+
+  it('reports absence only after exhausting continuation windows', async () => {
+    const server = new MailMCPServer(false);
+    const searchEmailsPage = vi.fn()
+      .mockResolvedValueOnce({ items: [], nextCursor: 'older-window' })
+      .mockResolvedValueOnce({ items: [], nextCursor: null });
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      resolveSentFolder: vi.fn().mockResolvedValue('Sent'), searchEmailsPage,
+    });
+    const result = await server.dispatchTool('verify_sent_message', false, {
+      accountId: 'test', messageId: '<missing@example.com>',
+    });
+    expect(JSON.parse(result.content[0].text)).toMatchObject({
+      status: 'not_found_in_sent', pagesScanned: 2, partial: false, nextCursor: null,
+    });
+  });
+
+  it('bounds the search and returns indeterminate with a recoverable cursor', async () => {
+    const server = new MailMCPServer(false);
+    let page = 0;
+    const searchEmailsPage = vi.fn().mockImplementation(async () => ({
+      items: [], nextCursor: `window-${++page}`,
+    }));
+    vi.spyOn(server as any, 'getService').mockResolvedValue({
+      resolveSentFolder: vi.fn().mockResolvedValue('Sent'), searchEmailsPage,
+    });
+    const result = await server.dispatchTool('verify_sent_message', false, {
+      accountId: 'test', messageId: '<uncertain@example.com>',
+    });
+    const payload = JSON.parse(result.content[0].text);
+    expect(payload).toMatchObject({
+      status: 'indeterminate', pagesScanned: 10, partial: true, nextCursor: 'window-10',
+    });
+    expect(searchEmailsPage).toHaveBeenCalledTimes(10);
+    expect(searchEmailsPage.mock.calls[9][1].cursor).toBe('window-9');
+    expect(payload.caution).toContain('Do not resend');
+  });
 });
 
 describe('IMAP-04: list folders operation', () => {
