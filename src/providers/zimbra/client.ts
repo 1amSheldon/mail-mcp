@@ -7,6 +7,8 @@ import { ZimbraError, validateZimbraEndpoint, type ZimbraSession } from './sessi
 import { ZIMBRA_READ_SCHEMAS, ZIMBRA_WRITE_SCHEMAS, type ZimbraReadOperation, type ZimbraWriteOperation } from './operations.js';
 import { NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS } from './native-operations.js';
 import { composeMime, MAX_MIME_BYTES, parseUploadResponse } from './mime.js';
+import { ZimbraSendJournal, sendStatus } from './send-journal.js';
+import { validateEmailAddresses } from '../../utils/validation.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -78,10 +80,12 @@ export interface ZimbraClientOptions {
   fetch?: typeof fetch;
   sessionProvider: () => Promise<ZimbraSession>;
   timeoutMs?: number;
+  journalDirectory?: string;
 }
 
 /** User SOAP API only. Never retries a write or exports authentication material. */
 export class ZimbraClient {
+  private readonly sendJournal: ZimbraSendJournal;
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
   private readonly cursors = new Map<string, { key: string; offset: number; expires: number }>();
@@ -89,6 +93,7 @@ export class ZimbraClient {
   private closed = false;
   constructor(private readonly account: ZimbraConfiguredAccount, private readonly options: ZimbraClientOptions) {
     this.endpoint = validateZimbraEndpoint(account.endpoint);
+    this.sendJournal = new ZimbraSendJournal(JSON.stringify([account.id, this.endpoint, account.user]), options.journalDirectory);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
   disconnect(): void { this.closed = true; this.cursors.clear(); for (const c of this.pending) c.abort(); }
@@ -179,6 +184,11 @@ export class ZimbraClient {
       return this.request(native.name, native.params, native.namespace);
     }
     switch (operation) {
+      case 'getSendStatus': {
+        const record = await this.sendJournal.read((v as { draftId: string }).draftId);
+        return record ? sendStatus(record) : { status: 'not_recorded', warning: 'No local record is not evidence that the message was never sent elsewhere.' };
+      }
+      case 'verifySentMessage': return this.verifySent(v as typeof ZIMBRA_READ_SCHEMAS.verifySentMessage._output);
       case 'sessionStatus': {
         const session = await this.options.sessionProvider();
         return { status: 'session_available', remoteVerified: false, expiresAt: new Date(session.expiresAt).toISOString(), nextAction: 'Run accounts login ACCOUNT_ID locally when the session expires.' };
@@ -276,15 +286,7 @@ export class ZimbraClient {
         return { status: 'saved', draftId: saved.id, retrySafe: false, result, nextAction: 'Read the saved draft and preserve its provider ID. Do not create another copy.' };
       }
       case 'sendDraft': {
-        // sfd sends the latest server draft. Recipient restrictions cannot be
-        // checked atomically against concurrent webmail edits, so fail closed.
-        if (this.account.allowedRecipients !== undefined) throw new ZimbraError('INVALID_INPUT', 'Native sendDraft is disabled for accounts with recipient restrictions: webmail edits cannot be checked atomically.');
-        const draftId = (v as { draftId: string }).draftId;
-        const draft = await this.assertDraft(draftId);
-        const recipients = list(draft.e).map(object).filter(e => ['t', 'c', 'b'].includes(String(e.t))).map(e => String(e.a));
-        if (!recipients.length) throw new ZimbraError('INVALID_INPUT', 'Draft recipients are empty.');
-        const result = await this.request('SendMsg', { suid: randomUUID(), fetchSavedMsg: 1, m: { did: draftId, sfd: 1 } }, 'urn:zimbraMail', true);
-        return { status: 'accepted', retrySafe: false, result, nextAction: 'Do not resend. Inspect the saved Sent message; this does not prove recipient delivery.' };
+        return this.sendDraft(v as typeof ZIMBRA_WRITE_SCHEMAS.sendDraft._output);
       }
       case 'createTag': return this.request('CreateTag', { tag: v }, 'urn:zimbraMail', true);
       case 'deleteTag': return this.request('TagAction', { action: { id: (v as { tagId: string }).tagId, op: 'delete' } }, 'urn:zimbraMail', true);
@@ -303,6 +305,78 @@ export class ZimbraClient {
     const draft = object(list(response.m)[0]);
     if (String(draft.id) !== id || !String(draft.f ?? '').includes('d')) throw new ZimbraError('INVALID_INPUT', 'The selected message is not a draft.');
     return draft;
+  }
+
+  private async verifySent(v: typeof ZIMBRA_READ_SCHEMAS.verifySentMessage._output): Promise<unknown> {
+    const result = await this.request('Search', { query: { _content: `in:sent msgid:"${v.messageId.replace(/\\/g, '\\\\')}"` }, types: 'message', limit: v.limit, offset: 0, fetch: 'all', read: 0 });
+    const matches: string[] = [];
+    let incomplete = truth(result.more);
+    const candidates = list(result.m);
+    if (candidates.length > v.limit) throw new ZimbraError('PROVIDER_ERROR', 'Invalid verification search response.');
+    for (const candidate of candidates) {
+      const item = object(candidate);
+      if (typeof item.id !== 'string') { incomplete = true; continue; }
+      let message = item;
+      if (typeof content(item.mid) !== 'string') {
+        const read = await this.executeRead('readMessage', { messageId: item.id }) as Obj;
+        message = object(list(read.m)[0]);
+      }
+      if (content(message.mid) === v.messageId) matches.push(item.id);
+    }
+    return { status: matches.length ? 'found' : incomplete ? 'indeterminate' : 'not_found', messageId: v.messageId,
+      sentMessageIds: matches, partial: incomplete, warning: 'A Sent copy is not proof of recipient delivery; absence is not proof of non-delivery. Do not resend automatically.' };
+  }
+
+  private async sendDraft(v: typeof ZIMBRA_WRITE_SCHEMAS.sendDraft._output): Promise<unknown> {
+    const previous = await this.sendJournal.read(v.draftId);
+    if (previous) return { ...sendStatus(previous), replayed: true };
+    if (this.account.allowedRecipients?.length === 0) throw new ZimbraError('INVALID_INPUT', 'The configured recipient allowlist is empty.');
+    const draft = await this.assertDraft(v.draftId);
+    const revision = String(draft.ms ?? '');
+    if (!/^[0-9]+$/.test(revision) || (v.expectedRevision !== undefined && revision !== v.expectedRevision)) throw new ZimbraError('CONFLICT', 'The reviewed draft revision is unavailable or changed. Read it again.');
+    if (draft.autoSendTime && Number(draft.autoSendTime) > 0) throw new ZimbraError('CONFLICT', 'This draft has native scheduled delivery. Cancel that schedule before manual sending.');
+    const raw = await this.attachment({ messageId: v.draftId, maxBytes: MAX_MIME_BYTES }) as Buffer;
+    const parsed = await simpleParser(raw, { skipHtmlToText: true, skipTextToHtml: true, skipImageLinks: true });
+    for (const key of ['to', 'cc', 'bcc', 'from']) {
+      if (parsed.headerLines.filter(h => h.key.toLowerCase() === key).length > 1) throw new ZimbraError('INVALID_INPUT', 'Duplicate address headers make the draft ambiguous.');
+    }
+    if (parsed.headerLines.some(h => /^resent-/i.test(h.key))) throw new ZimbraError('INVALID_INPUT', 'Resent headers require an explicit resend workflow.');
+    const recipients = [parsed.to, parsed.cc, parsed.bcc].flatMap(field => (Array.isArray(field) ? field : field ? [field] : []).flatMap(a => a.value.map(v => v.address ?? '')));
+    if (!recipients.length || recipients.some(v => !v)) throw new ZimbraError('INVALID_INPUT', 'Draft recipients are missing or invalid.');
+    try { validateEmailAddresses(...recipients); }
+    catch { throw new ZimbraError('INVALID_INPUT', 'Draft contains invalid recipients.'); }
+    if (this.account.allowedRecipients !== undefined) {
+      const allowed = new Set(this.account.allowedRecipients.map(v => v.toLowerCase()));
+      if (recipients.some(v => !allowed.has(v.toLowerCase()))) throw new ZimbraError('ACCESS_DENIED', 'Draft contains recipients outside the account allowlist.');
+    }
+    const current = await this.assertDraft(v.draftId);
+    if (String(current.ms) !== revision) throw new ZimbraError('CONFLICT', 'The draft changed while its MIME was downloaded. Read it again.');
+    const aid = await this.upload(raw, 'message.eml', 'message/rfc822');
+    const record = await this.sendJournal.begin(v.draftId, raw, parsed.messageId);
+    let result: Obj;
+    try {
+      result = await this.request('SendMsg', { suid: record.attemptId, fetchSavedMsg: 1, m: { aid,
+        ...(draft.origid ? { origid: draft.origid, rt: draft.rt } : {}), ...(draft.idnt ? { idnt: draft.idnt } : {}),
+      } }, 'urn:zimbraMail', true);
+    } catch (error) {
+      record.status = 'outcome_unknown';
+      await this.sendJournal.save(record).catch(() => undefined);
+      throw error;
+    }
+    record.status = 'accepted';
+    const sent = list(result.m)[0];
+    if (sent && typeof sent === 'object' && 'id' in sent && typeof sent.id === 'string') record.sentMessageId = sent.id;
+    try { await this.sendJournal.save(record); }
+    catch { return { ...sendStatus(record), journalWarning: 'Acceptance could not be persisted; do not resend.', result }; }
+    // Never give did to SendMsg: its unconditional cleanup could delete a
+    // concurrent webmail edit. Trash only the still-unchanged source afterwards.
+    try {
+      await this.request('MsgAction', { action: { id: v.draftId, op: 'trash' } }, 'urn:zimbraMail', true, undefined, revision);
+      record.draftCleanup = 'moved_to_trash';
+    } catch { record.draftCleanup = 'retained_changed_or_unverified'; }
+    try { await this.sendJournal.save(record); }
+    catch { return { ...sendStatus(record), journalWarning: 'Cleanup state could not be persisted; acceptance was recorded.', result }; }
+    return { ...sendStatus(record), result };
   }
 
   private async patchDraft(v: Extract<typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output, { changes: unknown }>, linkage?: { originalMessageId: string; replyType: 'r' | 'w'; inReplyTo?: string; attachOriginal: boolean }): Promise<unknown> {

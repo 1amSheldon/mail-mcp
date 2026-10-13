@@ -242,7 +242,7 @@ export function isZimbraAccount(account: ConfiguredAccount): account is ZimbraCo
 export function getAccountCapabilities(
   account: ConfiguredAccount,
 ): AccountCapabilityDescriptor {
-  if (isZimbraAccount(account) && account.allowedRecipients !== undefined) {
+  if (isZimbraAccount(account) && account.allowedRecipients?.length === 0) {
     return { ...ACCOUNT_BACKEND_CAPABILITIES.zimbra, sendMail: false, sendDraft: false };
   }
   if (isAppleMailAccount(account)) {

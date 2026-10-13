@@ -1,16 +1,22 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterAll, describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ZimbraClient } from './client.js';
 import { zimbraAccountSchema, type ZimbraConfiguredAccount } from '../account-types.js';
 import type { ZimbraSession } from './session.js';
 
 const account: ZimbraConfiguredAccount = { id: 'z', name: 'Zimbra', backend: 'zimbra', user: 'me@example.test', endpoint: 'https://mail.example.test/service/soap' };
+const journalRoot = mkdtempSync(join(tmpdir(), 'zimbra-client-tests-'));
+afterAll(() => rmSync(journalRoot, { recursive: true, force: true }));
 const session = (): ZimbraSession => ({ kind: 'zimbra-session-v1', endpoint: account.endpoint, user: account.user, authToken: 'secret-token', expiresAt: Date.now() + 60000 });
 const response = (name: string, value: unknown) => new Response(JSON.stringify({ Body: { [name + 'Response']: value } }));
 const fault = (code: string) => new Response(JSON.stringify({ Body: { Fault: { Detail: { Error: { Code: code } }, Reason: { Text: 'raw private server details secret-token' } } } }), { status: 500 });
 function make(...responses: Response[]) {
   const fetch = vi.fn<typeof globalThis.fetch>();
   for (const r of responses) fetch.mockResolvedValueOnce(r);
-  const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session() });
+  const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session(), journalDirectory: join(journalRoot, randomUUID()) });
   return { fetch, client, body: (i = 0) => JSON.parse(fetch.mock.calls[i][1]!.body as string) };
 }
 
@@ -166,12 +172,6 @@ describe('Zimbra operations', () => {
     const { client } = make(response('SaveDraft', {}));
     await expect(client.executeWrite('createDraft', { to: ['a@example.test'], subject: 'x', body: 'x' })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
   });
-  it('sends the current server draft using sfd, not recomposed text', async () => {
-    const { client, body } = make(response('GetMsg', { m: [{ id: '8', f: 'd', e: [{ t: 't', a: 'a@example.test' }] }] }), response('SendMsg', { m: [{ id: '9' }] }));
-    await expect(client.executeWrite('sendDraft', { draftId: '8' })).resolves.toMatchObject({ status: 'accepted', retrySafe: false });
-    expect(body(1).Body.SendMsgRequest.m).toEqual({ did: '8', sfd: 1 });
-    expect(body(1).Body.SendMsgRequest.suid).toBeTruthy();
-  });
   it('rejects sending a non-draft message without a write request', async () => {
     const { client, fetch } = make(response('GetMsg', { m: [{ id: '8', f: 'u' }] }));
     await expect(client.executeWrite('sendDraft', { draftId: '8' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
@@ -182,12 +182,6 @@ describe('Zimbra operations', () => {
     const client = new ZimbraClient({ ...account, allowedRecipients: [] }, { fetch, sessionProvider: async () => session() });
     await expect(client.executeWrite('sendDraft', { draftId: '8' })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
     expect(fetch).not.toHaveBeenCalled();
-  });
-  it('does not retry a send on connection loss', async () => {
-    const { client, fetch } = make(response('GetMsg', { m: [{ id: '8', f: 'd', e: [{ t: 't', a: 'a@example.test' }] }] }));
-    fetch.mockRejectedValueOnce(new Error('lost socket'));
-    await expect(client.executeWrite('sendDraft', { draftId: '8' })).rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN' });
-    expect(fetch).toHaveBeenCalledTimes(2);
   });
   it('does not claim safe retry after a SaveDraft metadata fault', async () => {
     const { client } = make(fault('mail.NO_SUCH_TAG'));

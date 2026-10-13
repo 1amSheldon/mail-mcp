@@ -29,6 +29,8 @@ Preserve the returned ID exactly, including any shared-mailbox prefix.
 | Operation | Input | Result/boundary |
 | --- | --- | --- |
 | `zimbra.sessionStatus` | `{}` | Local session state only |
+| `zimbra.getSendStatus` | `draftId` | Durable local attempt state; no network request |
+| `zimbra.verifySentMessage` | RFC `messageId`, `limit?` (1-100, default 20) | Exact Message-ID verification in Sent; found/not_found/indeterminate |
 | `zimbra.searchMessages` | `query`, `limit?`, `cursor?` | Native query, compact items and continuation |
 | `zimbra.readMessage` | `messageId` | Body, recipients, headers/attachment metadata; does not mark read |
 | `zimbra.getRawMessage` | `messageId`, `maxBytes?` | Original RFC 822 bytes; default 10 MiB, maximum 50 MiB |
@@ -58,7 +60,7 @@ and return original bytes even with text redaction enabled.
 | --- | --- |
 | `zimbra.createDraft` | `to` array, `subject`, `body`; optional cc/bcc arrays, isHtml, originalMessageId, replyType, attachOriginal, quoteOriginal, attachments |
 | `zimbra.updateDraft` | `draftId`, `changes`, `expectedRevision?`; legacy complete-content form also accepted |
-| `zimbra.sendDraft` | `draftId` |
+| `zimbra.sendDraft` | `draftId`, `expectedRevision?` (the reviewed ms) |
 | `zimbra.createTag` | `name`, `color?` integer 0-9 |
 | `zimbra.deleteTag` | `tagId` |
 | `zimbra.addTag`, `zimbra.removeTag` | `messageIds` array, `tagName` |
@@ -115,10 +117,29 @@ not redaction-safe exports.
 {"accountId":"ZIMBRA_ACCOUNT_ID","operation":"zimbra.createDraft","input":{"to":["recipient@example.com"],"subject":"Re: Delivery date","body":"Approved reply text","originalMessageId":"123","replyType":"r","quoteOriginal":true}}
 ```
 
-The example ID must be replaced with a read message's actual ID. sendDraft sends
-the current server revision; inspect it and obtain send authorization. If the account
-has allowedRecipients configured, native send is disabled: concurrent webmail edits
-cannot be checked atomically. Do not bypass this by changing account policy.
+The example ID must be replaced with a read message's actual ID. sendDraft downloads
+and validates the current raw MIME, checks its revision again, then sends that exact
+snapshot through upload/SendMsg. Later webmail edits cannot change its recipients.
+Inspect the draft and obtain send authorization first; expectedRevision binds the
+send to a previously reviewed ms. To/CC/BCC all obey allowedRecipients. An empty
+explicit allowlist disables sending; omitted allowlist imposes no local restriction.
+Server-side routing, forwarding and delivery policies still apply.
+
+Send attempts are durably claimed under `~/.config/mail-mcp/zimbra-send-state` before
+SendMsg. Keep this directory when moving an installation. Repeating sendDraft for
+the same draft returns its recorded state and does not send again, even after a
+restart. A crashed or uncertain attempt stays outcome_unknown. A corrupt journal
+blocks sending rather than guessing. getSendStatus is local evidence only;
+not_recorded does not rule out a send from another installation or webmail.
+
+After acceptance, the source draft is moved to Trash only under its unchanged
+revision. Cleanup failure retains acceptance and must never trigger another send.
+Inspect draftCleanup and the current server state. verifySentMessage checks a Sent
+copy by RFC Message-ID, not subject; found does not prove recipient delivery and
+not_found does not prove non-delivery. No automatic retry/reset of an uncertain
+attempt is exposed. Review Sent and server delivery evidence before deciding on
+any separately authorized new send. Native scheduled drafts must have their
+schedule canceled before manual sending.
 
 For outcome_unknown, inspect Drafts/Sent or affected objects before deciding on
 recovery; never automatically repeat a write. Native scheduling and calendars

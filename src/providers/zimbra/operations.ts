@@ -27,6 +27,8 @@ export const draftChangesSchema = z.object({
 export const ZIMBRA_READ_SCHEMAS = {
   ...schemas(NATIVE_READ_OPERATIONS),
   sessionStatus: z.object({}).strict(),
+  getSendStatus: z.object({ draftId: id }).strict(),
+  verifySentMessage: z.object({ messageId: z.string().max(998).regex(/^<[^<>\s"]+>$/), limit: z.number().int().min(1).max(100).default(20) }).strict(),
   searchMessages: z.object(page).strict(),
   readMessage: z.object({ messageId: id }).strict(),
   getRawMessage: z.object({ messageId: id, maxBytes: z.number().int().min(1).max(MAX_MIME_BYTES).default(10 * 1024 * 1024) }).strict(),
@@ -44,7 +46,7 @@ export const ZIMBRA_WRITE_SCHEMAS = {
     z.object({ draftId: id, changes: draftChangesSchema, expectedRevision: z.string().regex(/^[0-9]+$/).optional() }).strict(),
     z.object({ ...draft, draftId: id }).strict(),
   ]),
-  sendDraft: z.object({ draftId: id }).strict(),
+  sendDraft: z.object({ draftId: id, expectedRevision: z.string().regex(/^[0-9]+$/).optional() }).strict(),
   createTag: z.object({ name: tagName, color: z.number().int().min(0).max(9).optional() }).strict(),
   deleteTag: z.object({ tagId: id }).strict(),
   addTag: z.object({ messageIds: z.array(id).min(1).max(100), tagName }).strict(),
