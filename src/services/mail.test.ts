@@ -32,6 +32,7 @@ const mockFetchMessagesByUids = vi.fn().mockResolvedValue([]);
 
 vi.mock('../protocol/imap.js', () => {
   return {
+    AppendNotSavedError: class extends Error {},
     ImapClient: vi.fn(function () {
       return {
         connect: mockImapConnect,
@@ -1114,7 +1115,8 @@ describe('MailService createDraft with signature', () => {
     const account = { ...baseAccount, signature: 'Regards' };
     const service = new MailService(account, false);
     await service.connect();
-    await service.createDraft('to@example.com', 'Draft', 'Body text');
+    await expect(service.createDraft('to@example.com', 'Draft', 'Body text'))
+      .resolves.toMatchObject({ status: 'saved', retrySafe: false, messageId: '<draft@example.com>' });
     expect(mockImapAppendMessage).toHaveBeenCalledOnce();
     const rawMessage: string = mockImapAppendMessage.mock.calls[0][1];
     // body ends with \r\n after joining, then effectiveBody appended — check signature present
@@ -1154,6 +1156,13 @@ describe('MailService createDraft with signature', () => {
     });
     expect(result.draftId).toBeUndefined();
     expect(result.warning).toContain('Do not create another copy');
+  });
+
+  it('returns uncertain APPEND status through the legacy draft wrapper', async () => {
+    mockImapAppendMessage.mockRejectedValueOnce(new Error('connection lost after APPEND'));
+    const service = new MailService(baseAccount, false);
+    await expect(service.createDraft('to@example.com', 'Draft', 'Body'))
+      .resolves.toMatchObject({ status: 'append_outcome_unknown', retrySafe: false, messageId: '<draft@example.com>' });
   });
 });
 

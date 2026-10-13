@@ -862,8 +862,8 @@ export class MailService {
     };
   }
 
-  async createDraft(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<void> {
-    await this.createDraftMessage({
+  async createDraft(to: string, subject: string, body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true): Promise<DraftCreationResult> {
+    return this.createDraftMessage({
       to,
       subject,
       ...(isHtml ? { html: body } : { text: body }),
