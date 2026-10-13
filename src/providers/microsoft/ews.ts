@@ -200,12 +200,12 @@ export class EwsClient {
       + '<t:AdditionalProperties><t:FieldURI FieldURI="item:Subject" />'
       + '<t:FieldURI FieldURI="message:InternetMessageId" /></t:AdditionalProperties></m:ItemShape>'
       + `<m:IndexedPageItemView MaxEntriesReturned="${maxResults}" Offset="${offset}" BasePoint="Beginning" />`
-      + query
       + '<m:ParentFolderIds>'
       + (options.folderId
         ? `<t:FolderId Id="${escapeXml(options.folderId)}" />`
         : `<t:DistinguishedFolderId Id="${escapeXml(options.distinguishedFolderId ?? 'inbox')}" />`)
       + '</m:ParentFolderIds>'
+      + query
       + '</m:FindItem>';
     const xml = await this.soap('FindItem', operation, false);
     const root = elements(parseEwsXml(xml), 'RootFolder', EWS_MESSAGES_NS)[0];

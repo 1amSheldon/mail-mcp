@@ -87,6 +87,8 @@ describe('EwsClient', () => {
     expect(body).toContain('subject:&quot;x&lt;/m:QueryString&gt;&lt;m:DeleteItem&gt;&quot; &amp; &apos;');
     expect(body).toContain('Id="inbox&quot;/&gt;&lt;t:FolderId Id=&quot;attacker"');
     expect(body).not.toContain('</m:QueryString><m:DeleteItem>');
+    // FindItemType in Messages.xsd requires QueryString after ParentFolderIds.
+    expect(body.indexOf('</m:ParentFolderIds>')).toBeLessThan(body.indexOf('<m:QueryString>'));
     expect(messages).toEqual({ messages: [{
       itemId: 'item-1',
       changeKey: 'change-1',
