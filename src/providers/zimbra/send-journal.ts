@@ -23,8 +23,12 @@ const hash = (value: string | Buffer) => createHash('sha256').update(value).dige
  * POSIX directory flushes also protect entries against host crashes. */
 export class ZimbraSendJournal {
   private readonly directory: string;
-  constructor(scope: string, directory = join(homedir(), '.config', 'mail-mcp', 'zimbra-send-state')) {
-    this.directory = join(directory, hash(scope));
+  private readonly durabilityAnchor: string;
+  constructor(scope: string, directory?: string) {
+    // The home directory exists independently of journal initialization. A custom
+    // journal root must likewise be provisioned durably by its caller beforehand.
+    this.durabilityAnchor = directory ?? homedir();
+    this.directory = join(directory ?? join(homedir(), '.config', 'mail-mcp', 'zimbra-send-state'), hash(scope));
   }
   private path(draftId: string) { return join(this.directory, hash(draftId) + '.json'); }
   async read(draftId: string): Promise<SendRecord | undefined> {
@@ -46,7 +50,7 @@ export class ZimbraSendJournal {
       mimeHash: hash(raw), messageId, status: 'sending', draftCleanup: 'retained', ...schedule };
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
-      await mkdirDurable(this.directory);
+      await mkdirDurable(this.directory, this.durabilityAnchor);
       handle = await open(this.path(draftId), 'wx', 0o600);
       await handle.writeFile(JSON.stringify(record) + '\n', 'utf8');
       await handle.sync();

@@ -2,7 +2,7 @@ import { getConfiguredAccounts } from '../config.js';
 import { isZimbraAccount, type ZimbraConfiguredAccount } from '../providers/account-types.js';
 import { ZimbraClient } from '../providers/zimbra/client.js';
 import { ZimbraError, ZimbraAuthChallenge, saveZimbraSession, type ZimbraSession, type ZimbraAuthentication } from '../providers/zimbra/session.js';
-import { ZimbraLoginStore } from '../providers/zimbra/login-state.js';
+import { ZimbraLoginStore, ZimbraStoredStateError, type ZimbraLoginState } from '../providers/zimbra/login-state.js';
 import { createAccountPrompt, type QuestionPrompt } from './prompt.js';
 
 export async function loginZimbraAccount(account: ZimbraConfiguredAccount, prompt: QuestionPrompt,
@@ -15,7 +15,13 @@ export async function loginZimbraAccount(account: ZimbraConfiguredAccount, promp
     const password = await prompt.secret('Zimbra main account password (not the IMAP app password): ');
     if (!password) throw new ZimbraError('INVALID_INPUT', 'Password is required.');
     if (options.trustedDevice) {
-      const previous = await store.read();
+      let previous: ZimbraLoginState | undefined;
+      try { previous = await store.read(); }
+      catch (error) {
+        // A local password/OTP login can repair invalid state, but storage or
+        // backend-policy failures must still stop before authentication.
+        if (!(error instanceof ZimbraStoredStateError)) throw error;
+      }
       const trusted = previous?.trustedDevice && previous.trustedDevice.expiresAt > Date.now() + 5000 ? previous.trustedDevice : undefined;
       let result: ZimbraAuthentication;
       try { result = await client.authenticateWithDevice(password, undefined, trusted ? { trustedDevice: trusted } : { register: true }); }

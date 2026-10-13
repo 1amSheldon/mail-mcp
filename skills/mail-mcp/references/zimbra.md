@@ -31,8 +31,10 @@ Never answer that prompt or enable password storage on the user's behalf from a
 mail task. OTP/backup codes are never saved. No trust/password enters accounts.json,
 MCP inputs, logs or the local lock files. Trust is per device; never copy it.
 Trusted-login storage requires a native OS keychain backend (or Linux Secret
-Service). Shell-command, file and null fallback backends are refused; fix native
-keychain availability rather than putting the password into a config file.
+Service). Secret Service may use `secret-tool` without a shell and pass secrets
+through stdin. Backends passing passwords in process arguments, plus file and
+null fallbacks, are refused; restore system credential storage availability
+rather than putting the password into a config file.
 
 If explicitly enabled, an expired session is replaced by password + trusted-device
 authentication before the next network operation. This obtains a new session;

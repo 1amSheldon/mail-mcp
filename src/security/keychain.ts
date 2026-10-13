@@ -18,11 +18,13 @@ export async function saveCredentials(accountId: string, secret: string): Promis
   await setPassword(config.serviceName, accountId, secret);
 }
 
-/** Trusted login can contain the main password. Refuse shell/file fallbacks. */
+/** Trusted login requires system storage without secrets in process arguments.
+ * Secret Service uses secret-tool via spawn (no shell), passing secrets on stdin.
+ */
 export async function protectedCredentialBackend() {
   const backend = await getKeyring();
   if (!['native-windows', 'native-macos', 'native-linux', 'secret-service'].includes(backend.id)) {
-    throw new Error('Trusted login requires a protected native credential backend; shell, file and null backends are not supported.');
+    throw new Error('Trusted login requires protected system credential storage; password-in-argv, file and null backends are refused.');
   }
   return backend;
 }
@@ -32,7 +34,7 @@ export async function saveProtectedCredentials(accountId: string, secret: string
     const backend = await protectedCredentialBackend();
     await backend.setPassword(config.serviceName, accountId, secret);
     await clearLegacyCredential(backend, accountId);
-  } catch { throw new Error('Cannot save credentials in a protected native credential backend and clear the legacy entry.'); }
+  } catch { throw new Error('Cannot save credentials in protected system credential storage and clear the legacy entry.'); }
 }
 
 type CredentialBackend = Awaited<ReturnType<typeof getKeyring>>;

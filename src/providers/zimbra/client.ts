@@ -138,7 +138,7 @@ export class ZimbraClient {
       const response = await this.fetchImpl(this.endpoint, {
         method: 'POST', redirect: 'error', signal: controller.signal,
         headers: { 'content-type': 'application/soap+json; charset=utf-8', accept: 'application/json', ...(cookie ? { cookie } : {}) },
-        body: JSON.stringify({ Header: { context: { _jsns: 'urn:zimbra', ...(auth?.ua ? { ua: auth.ua } : {}), ...(session ? { authToken: { _content: session.authToken } } : {}), ...(changeToken ? { change: { token: changeToken, type: 'mod' } } : {}) } },
+        body: JSON.stringify({ Header: { context: { _jsns: 'urn:zimbra', ...(auth?.userAgent ? { userAgent: auth.userAgent } : {}), ...(session ? { authToken: { _content: session.authToken } } : {}), ...(changeToken ? { change: { token: changeToken, type: 'mod' } } : {}) } },
           Body: { [name + 'Request']: { _jsns: namespace, ...params } } }),
       });
       if (response.status === 401) {
@@ -201,7 +201,7 @@ export class ZimbraClient {
       ...(twoFactorCode ? { twoFactorCode: { _content: twoFactorCode } } : {}),
       ...(device && 'register' in device ? { deviceTrusted: true, generateDeviceId: true } : {}),
       ...(existing ? { trustedToken: { _content: existing.token }, deviceId: { _content: existing.deviceId } } : {}),
-    }, 'urn:zimbraAccount', false, device ? { ua: { name: 'mail-mcp-trusted-login', version: '1' } } : {}).catch(error => {
+    }, 'urn:zimbraAccount', false, device ? { userAgent: { name: 'mail-mcp-trusted-login', version: '1' } } : {}).catch(error => {
       if (error instanceof ZimbraError && error.code === 'TWO_FACTOR_REQUIRED') throw new ZimbraAuthChallenge();
       throw error;
     });

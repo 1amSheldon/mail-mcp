@@ -2,13 +2,44 @@ import { describe, expect, it, vi } from 'vitest';
 import { loginZimbraAccount } from './zimbra-login.js';
 import type { ZimbraClient } from '../providers/zimbra/client.js';
 import { ZimbraError, ZimbraAuthChallenge } from '../providers/zimbra/session.js';
-import type { ZimbraLoginStore } from '../providers/zimbra/login-state.js';
+import { ZimbraLoginStore } from '../providers/zimbra/login-state.js';
 import type { ZimbraConfiguredAccount } from '../providers/account-types.js';
 
 const account: ZimbraConfiguredAccount = { id: 'z', name: 'Z', backend: 'zimbra', user: 'me@example.test', endpoint: 'https://mail.example.test/service/soap' };
 const session = { kind: 'zimbra-session-v1' as const, authToken: 'session', endpoint: account.endpoint, user: account.user, expiresAt: Date.now() + 60000 };
 
 describe('Local Zimbra login', () => {
+  it.each([
+    ['malformed JSON', '{broken'],
+    ['invalid schema', JSON.stringify({ kind: 'zimbra-login-v2' })],
+    ['another endpoint', JSON.stringify({ ...session, endpoint: 'https://other.example.test/service/soap' })],
+    ['another user', JSON.stringify({ ...session, user: 'other@example.test' })],
+  ])('repairs %s using fresh local authentication without reusing stored trust', async (_name, raw) => {
+    const save = vi.fn().mockResolvedValue(undefined);
+    const store = new ZimbraLoginStore(account, { load: vi.fn().mockResolvedValue(raw), save });
+    vi.spyOn(store, 'lock').mockImplementation(async action => action());
+    const trust = { token: 'fresh-trust', deviceId: 'fresh-device', expiresAt: Date.now() + 86400000 };
+    const authenticateWithDevice = vi.fn().mockRejectedValueOnce(new ZimbraAuthChallenge(true))
+      .mockResolvedValueOnce({ session, trustedDevice: trust });
+    const prompt = { secret: vi.fn().mockResolvedValueOnce('fresh-password').mockResolvedValueOnce('123456'), question: vi.fn().mockResolvedValue('n'), close: vi.fn() };
+    await loginZimbraAccount(account, prompt, { trustedDevice: true, store, client: { authenticateWithDevice, disconnect: vi.fn() } as unknown as ZimbraClient });
+    expect(authenticateWithDevice.mock.calls).toEqual([
+      ['fresh-password', undefined, { register: true }],
+      ['fresh-password', '123456', { register: true }],
+    ]);
+    expect(JSON.parse(save.mock.calls[0][1])).toEqual({ kind: 'zimbra-login-v2', session, trustedDevice: trust });
+    expect(JSON.stringify(save.mock.calls)).not.toMatch(/fresh-password|123456/);
+  });
+  it.each([new Error('keychain unavailable'), new ZimbraError('AUTH_REQUIRED', 'Protected backend unavailable')])('does not hide operational storage failures during local recovery (%s)', async error => {
+    const save = vi.fn();
+    const store = new ZimbraLoginStore(account, { load: vi.fn().mockRejectedValue(error), save });
+    vi.spyOn(store, 'lock').mockImplementation(async action => action());
+    const authenticateWithDevice = vi.fn(); const disconnect = vi.fn();
+    const prompt = { secret: vi.fn().mockResolvedValue('fresh-password'), question: vi.fn(), close: vi.fn() };
+    await expect(loginZimbraAccount(account, prompt, { trustedDevice: true, store, client: { authenticateWithDevice, disconnect } as unknown as ZimbraClient })).rejects.toBe(error);
+    expect(authenticateWithDevice).not.toHaveBeenCalled(); expect(save).not.toHaveBeenCalled();
+    expect(disconnect).toHaveBeenCalledOnce();
+  });
   it.each(['n', 'y'])('stores the main password only after explicit trusted-device consent (%s)', async consent => {
     const trust = { token: 'trust', deviceId: 'device', expiresAt: Date.now() + 86400000 };
     const authenticateWithDevice = vi.fn().mockRejectedValueOnce(new ZimbraAuthChallenge(true)).mockResolvedValueOnce({ session, trustedDevice: trust });

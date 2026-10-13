@@ -35,8 +35,10 @@ The first command asks the server to trust this device after local authenticatio
 If the server returns usable trust, a separate default-no prompt offers to store
 the MAIN password in the OS credential store for automatic reauthentication.
 Without that consent, only session and device trust are saved. Codes are never
-stored. Native OS keychain/Secret Service is required for this mode; command-line,
-file and null storage fallbacks are refused. The second command removes the saved password; revoke server trust in
+stored. Native OS keychain or Secret Service is required for this mode. Secret
+Service may use `secret-tool` without a shell, passing secrets through stdin.
+Backends passing passwords in process arguments, plus file and null fallbacks,
+are refused. The second command removes the saved password; revoke server trust in
 webmail separately. No administrator is needed when the server already permits
 trusted devices. Disabled or unsupported trust is not bypassed.
 
@@ -106,7 +108,10 @@ and a Sent copy are not recipient-delivery confirmation.
 
 On POSIX, new journal directories, exclusive claims and atomic status replacements
 also flush their directory entries before completion; a failed flush stops dispatch
-or reports an uncertain update. Windows flushes file contents, but Node does not
+or reports an uncertain update. Initialization flushes through the existing home
+directory, without requiring read access to ancestors above it. An embedded client
+using a custom `journalDirectory` must provision that directory durably beforehand;
+it becomes the synchronization boundary. Windows flushes file contents, but Node does not
 support directory fsync there. Protection against concurrent calls and process
 termination remains; persistence across an OS crash or power loss is not guaranteed
 on Windows. Inspect Sent after such an event before initiating another send.

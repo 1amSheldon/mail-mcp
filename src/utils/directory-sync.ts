@@ -1,5 +1,5 @@
-import { mkdir, open } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { mkdir, open, stat } from 'node:fs/promises';
+import { dirname, resolve, relative, isAbsolute } from 'node:path';
 
 /** POSIX directory entries need their own flush. Node cannot fsync Windows
  * directories (EPERM); file flushes there provide process-restart protection,
@@ -12,14 +12,20 @@ export async function syncDirectory(path: string, platform = process.platform): 
 }
 
 /** Existing directories can come from another unfinished/failed initializer.
- * Flush their entire ancestor chain rather than treating existence as durability.
+ * Flush through a caller-owned, preexisting durable anchor. Ancestors above that
+ * anchor are outside this journal and may legitimately be traverse-only.
  */
-export async function mkdirDurable(path: string): Promise<void> {
+export async function mkdirDurable(path: string, anchor: string): Promise<void> {
+  const stop = resolve(anchor);
+  const within = relative(stop, resolve(path));
+  if (isAbsolute(within) || within === '..' || within.startsWith('..\\') || within.startsWith('../')) throw new Error('Journal path is outside its durability anchor');
+  if (!(await stat(stop)).isDirectory()) throw new Error('Journal durability anchor must be an existing directory');
   await mkdir(path, { recursive: true, mode: 0o700 });
   if (process.platform === 'win32') return;
   let current = resolve(path);
   for (;;) {
     await syncDirectory(current);
+    if (current === stop) return;
     const parent = dirname(current);
     if (parent === current) return;
     current = parent;

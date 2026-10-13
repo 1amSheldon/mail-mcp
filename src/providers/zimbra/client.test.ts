@@ -1,6 +1,5 @@
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import { mkdtempSync, rmSync } from 'node:fs';
-import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZimbraClient } from './client.js';
@@ -16,7 +15,7 @@ const fault = (code: string) => new Response(JSON.stringify({ Body: { Fault: { D
 function make(...responses: Response[]) {
   const fetch = vi.fn<typeof globalThis.fetch>();
   for (const r of responses) fetch.mockResolvedValueOnce(r);
-  const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session(), journalDirectory: join(journalRoot, randomUUID()) });
+  const client = new ZimbraClient(account, { fetch, sessionProvider: async () => session(), journalDirectory: mkdtempSync(join(journalRoot, 'case-')) });
   return { fetch, client, body: (i = 0) => JSON.parse(fetch.mock.calls[i][1]!.body as string) };
 }
 
@@ -25,7 +24,8 @@ describe('Zimbra SOAP transport and authentication', () => {
     const { client, body } = make(response('Auth', { authToken: { _content: 'session' }, lifetime: 60000, trustedToken: { _content: 'trust' }, deviceId: { _content: 'device' }, trustLifetime: 86400000 }));
     const before = Date.now(); const result = await client.authenticateWithDevice('pass', '123456', { register: true });
     expect(body().Body.AuthRequest).toMatchObject({ deviceTrusted: true, generateDeviceId: true, twoFactorCode: { _content: '123456' } });
-    expect(body().Header.context.ua).toEqual({ name: 'mail-mcp-trusted-login', version: '1' });
+    expect(body().Header.context.userAgent).toEqual({ name: 'mail-mcp-trusted-login', version: '1' });
+    expect(body().Header.context).not.toHaveProperty('ua');
     expect(result.trustedDevice).toMatchObject({ token: 'trust', deviceId: 'device' });
     expect(result.trustedDevice!.expiresAt).toBeGreaterThanOrEqual(before + 86400000);
   });
@@ -33,6 +33,8 @@ describe('Zimbra SOAP transport and authentication', () => {
     const trustedDevice = { token: 'trust', deviceId: 'device', expiresAt: Date.now() + 86400000 };
     const { client, body } = make(response('Auth', { authToken: { _content: 'session' }, lifetime: 60000 }));
     const result = await client.authenticateWithDevice('pass', undefined, { trustedDevice });
+    expect(body().Header.context.userAgent).toEqual({ name: 'mail-mcp-trusted-login', version: '1' });
+    expect(body().Header.context).not.toHaveProperty('ua');
     expect(body().Body.AuthRequest).toEqual({ _jsns: 'urn:zimbraAccount', account: { by: 'name', _content: account.user }, password: { _content: 'pass' }, trustedToken: { _content: 'trust' }, deviceId: { _content: 'device' } });
     expect(result.trustedDevice).toEqual(trustedDevice);
   });

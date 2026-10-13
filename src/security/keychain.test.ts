@@ -15,7 +15,7 @@ import { setPassword, getPassword, deletePassword, getKeyring } from 'cross-keyc
 describe('keychain service', () => {
   it.each(['windows', 'macos', 'file', 'null'])('refuses main-password storage through %s fallback', async id => {
     const save = vi.fn(); vi.mocked(getKeyring).mockResolvedValue({ id, setPassword: save, getPassword: vi.fn().mockResolvedValue(null) } as any);
-    await expect(saveProtectedCredentials('z', 'private-main-password')).rejects.toThrow('protected native credential backend');
+    await expect(saveProtectedCredentials('z', 'private-main-password')).rejects.toThrow('protected system credential storage');
     expect(save).not.toHaveBeenCalled(); expect(setPassword).not.toHaveBeenCalled();
   });
   it.each(['native-windows', 'native-macos', 'native-linux', 'secret-service'])('uses the inspected protected backend %s directly', async id => {

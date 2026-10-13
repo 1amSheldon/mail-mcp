@@ -23,7 +23,7 @@ const defaultStore: Store = {
     try { kind = raw ? JSON.parse(raw).kind : undefined; } catch { /* read() reports malformed state */ }
     if (kind === 'zimbra-login-v2') {
       try { await protectedCredentialBackend(); }
-      catch { throw new ZimbraError('AUTH_REQUIRED', 'Trusted login requires a protected native credential backend; shell/file fallback is refused.'); }
+      catch { throw new ZimbraError('AUTH_REQUIRED', 'Protected system credential storage is required; password-in-argv, file and null backends are refused.'); }
     }
     return raw;
   },
@@ -31,6 +31,11 @@ const defaultStore: Store = {
 };
 const lockDirectory = join(homedir(), '.config', 'mail-mcp', 'zimbra-login-locks');
 const required = () => new ZimbraError('AUTH_REQUIRED', 'Zimbra login is unavailable or needs attention. Run accounts login ACCOUNT_ID locally.');
+
+/** Only explicit local authentication may replace malformed or misbound state. */
+export class ZimbraStoredStateError extends ZimbraError {
+  constructor() { super('AUTH_REQUIRED', 'Stored Zimbra login is invalid or belongs to another configuration. Run accounts login ACCOUNT_ID locally.'); }
+}
 
 /** The lock contains no credentials. Never steal a lock from another process.
  * A crash leaves a visible lock requiring local inspection, not repeated logins.
@@ -65,14 +70,14 @@ export class ZimbraLoginStore {
       const value = JSON.parse(raw);
       const legacy = zimbraSessionSchema.safeParse(value);
       state = legacy.success ? { kind: 'zimbra-login-v2', session: legacy.data } : stateSchema.parse(value);
-    } catch { throw required(); }
-    if (state.session.endpoint !== validateZimbraEndpoint(this.account.endpoint) || state.session.user !== this.account.user) throw required();
+    } catch { throw new ZimbraStoredStateError(); }
+    if (state.session.endpoint !== validateZimbraEndpoint(this.account.endpoint) || state.session.user !== this.account.user) throw new ZimbraStoredStateError();
     return state;
   }
   private async save(state: ZimbraLoginState): Promise<void> {
     // Store the whole session/trust/password state as one OS credential entry.
     try { await this.store.save(this.account.id, JSON.stringify(stateSchema.parse(state))); }
-    catch { throw new ZimbraError('PROVIDER_ERROR', 'Cannot save Zimbra login in a protected credential store. Check native keychain availability; shell/file fallback is refused.'); }
+    catch { throw new ZimbraError('PROVIDER_ERROR', 'Cannot save Zimbra login. Protected system credential storage is required; password-in-argv, file and null backends are refused.'); }
   }
   async replace(result: ZimbraAuthentication, password?: string): Promise<void> {
     await this.save({ kind: 'zimbra-login-v2', ...result, ...(password ? { automaticLogin: { password, blocked: false } } : {}) });

@@ -2,6 +2,9 @@
 
 ## 3.3.0 - 2026-10-14
 
+- Send the trusted-device SOAP userAgent element, permit explicit local login to
+  replace unusable prior state, and bound journal directory synchronization to a
+  preexisting durable root instead of requiring access to unrelated ancestors.
 - Fix Zimbra current-time filter attributes and replacing a rule before itself.
 - Flush POSIX send-journal directory entries before dispatch and after replacement;
   document the Windows OS-crash/power-loss durability boundary.
