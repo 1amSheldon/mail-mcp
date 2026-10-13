@@ -41,7 +41,8 @@ describe('EwsClient', () => {
   it('reads full body and metadata with namespaces, CDATA and numeric entities', async () => {
     const xml = SOAP_MESSAGES.replace(/<t:Message>[\s\S]*?<\/t:Message>/, `<Message xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
       <ItemId Id='item-1' ChangeKey='change-1'/><Subject>One &#38; Two</Subject>
-      <Body BodyType='HTML'><![CDATA[ <p>Full & intact</p> ]]></Body>
+      <!-- A literal <!DOCTYPE html> here is also harmless text. -->
+      <Body BodyType='HTML'><![CDATA[<!DOCTYPE html><p>Full & intact</p> ]]></Body>
       <From><Mailbox><Name>Sender</Name><EmailAddress>from@example.com</EmailAddress></Mailbox></From>
       <ToRecipients><Mailbox><EmailAddress>to@example.com</EmailAddress></Mailbox></ToRecipients>
       <Attachments><FileAttachment><AttachmentId Id='a1'/><Name>a.txt</Name><Size>5</Size></FileAttachment></Attachments>
@@ -49,7 +50,7 @@ describe('EwsClient', () => {
     const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx',
       fetch: vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(xml)), tokenProvider: async () => 'token' });
     await expect(client.getMessage('item-1')).resolves.toMatchObject({
-      itemId: 'item-1', subject: 'One & Two', body: { contentType: 'HTML', content: ' <p>Full & intact</p> ' },
+      itemId: 'item-1', subject: 'One & Two', body: { contentType: 'HTML', content: '<!DOCTYPE html><p>Full & intact</p> ' },
       from: { address: 'from@example.com', name: 'Sender' }, toRecipients: [{ address: 'to@example.com' }],
       attachments: [{ id: 'a1', name: 'a.txt', size: 5 }],
     });

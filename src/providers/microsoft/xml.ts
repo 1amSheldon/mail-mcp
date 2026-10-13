@@ -7,7 +7,9 @@ export const EWS_MESSAGES_NS = 'http://schemas.microsoft.com/exchange/services/2
 export function parseEwsXml(source: string): Document {
   try {
     // SOAP forbids DTDs. Never resolve entities or silently repair malformed XML.
-    if (/<!DOCTYPE/i.test(source)) throw new Error('DOCTYPE is forbidden');
+    // HTML body text may legitimately contain <!DOCTYPE html> inside CDATA.
+    const markup = source.replace(/<!--[\s\S]*?-->|<!\[CDATA\[[\s\S]*?\]\]>/g, '');
+    if (/<!DOCTYPE/i.test(markup)) throw new Error('DOCTYPE is forbidden');
     return new DOMParser({ onError: () => { throw new Error('Malformed XML'); } })
       .parseFromString(source, 'application/xml');
   } catch (cause) {
