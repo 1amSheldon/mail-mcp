@@ -296,6 +296,7 @@ SMTP acceptance and the Sent-folder copy are independent. Send, reply, and forwa
 | `smtp_partially_accepted_sent_not_confirmed` | Partial SMTP acceptance without a confirmed Sent copy |
 | `smtp_rejected` | SMTP rejected every recipient |
 | `smtp_connection_failed` | The connection failed before a confirmed delivery attempt |
+| `smtp_preflight_failed` | Local validation or MIME composition failed; no SMTP message was attempted |
 | `smtp_outcome_unknown` | Delivery may have happened; do not retry automatically |
 
 Use `retrySafe`, `messageId`, and the `verifySentMessage` query operation. Absence from Sent is not proof that SMTP delivery failed.

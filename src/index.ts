@@ -125,6 +125,7 @@ export function parseAllowedTools(raw: string | undefined): Set<string> | undefi
 function formatDeliveryResult(result: { status?: unknown }) {
   const isError = result.status === 'smtp_rejected' ||
     result.status === 'smtp_connection_failed' ||
+    result.status === 'smtp_preflight_failed' ||
     result.status === 'smtp_outcome_unknown';
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],

@@ -84,6 +84,7 @@ const draftSendResultSchema = z.object({
     'smtp_partially_accepted_sent_not_confirmed',
     'smtp_rejected',
     'smtp_connection_failed',
+    'smtp_preflight_failed',
     'smtp_outcome_unknown',
     'sent_provider_managed',
     'partially_sent_provider_managed',
@@ -576,7 +577,7 @@ export class DraftWorkflow {
         }
       }
       // Only connection failure is known to precede a delivery attempt.
-      if (result.status === 'smtp_connection_failed') delete r.attempt;
+      if (result.status === 'smtp_connection_failed' || result.status === 'smtp_preflight_failed') delete r.attempt;
       await save(); return output;
     });
   }

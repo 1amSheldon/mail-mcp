@@ -11,6 +11,7 @@ import {
   SmtpClient,
   SmtpRecipientRejectedError,
   SmtpSendError,
+  SmtpPreflightError,
 } from '../protocol/smtp.js';
 import { htmlToMarkdown } from '../utils/markdown.js';
 import type { EmailAccount } from '../config.js';
@@ -60,6 +61,7 @@ export type DeliveryStatus =
   | 'smtp_partially_accepted_sent_not_confirmed'
   | 'smtp_rejected'
   | 'smtp_connection_failed'
+  | 'smtp_preflight_failed'
   | 'smtp_outcome_unknown'
   | 'sent_provider_managed'
   | 'partially_sent_provider_managed'
@@ -385,6 +387,14 @@ export class MailService {
       info = raw ? await this.smtpClient.sendRawMessage(raw) : await this.smtpClient.sendMessage(message);
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
+      if (error instanceof SmtpPreflightError) {
+        return {
+          status: 'smtp_preflight_failed', smtpAccepted: false, accepted: [], rejected: [],
+          sentFolderSaved: false, retrySafe: true,
+          nextAction: 'No SMTP message was attempted. Correct the message before a new user-requested send.',
+          error: reason,
+        };
+      }
       if (error instanceof SmtpRecipientRejectedError) {
         return {
           status: 'smtp_rejected',

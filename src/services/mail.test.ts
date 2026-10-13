@@ -100,6 +100,7 @@ vi.mock('../protocol/smtp.js', () => {
     }),
     SmtpRecipientRejectedError: MockSmtpRecipientRejectedError,
     SmtpSendError: MockSmtpSendError,
+    SmtpPreflightError: class extends Error {},
   };
 });
 

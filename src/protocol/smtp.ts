@@ -118,6 +118,13 @@ export class SmtpRecipientRejectedError extends Error {
   }
 }
 
+export class SmtpPreflightError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'Unable to compose outgoing message', { cause });
+    this.name = 'SmtpPreflightError';
+  }
+}
+
 export class SmtpClient {
   private transporter: Transporter | null = null;
   private connectPromise: Promise<void> | null = null;
@@ -242,9 +249,14 @@ export class SmtpClient {
       throw new Error('SMTP client not connected');
     }
 
-    const { rawMessage, messageId, envelope } = await this.composeMessage(message);
-
-    return this.sendRawMessage({ rawMessage, messageId, envelope });
+    let composed: SmtpComposedMessage;
+    try {
+      composed = await this.composeMessage(message);
+    } catch (error) {
+      // No SMTP transaction has started; callers can correct this without delivery ambiguity.
+      throw new SmtpPreflightError(error);
+    }
+    return this.sendRawMessage(composed);
   }
 
   async sendRawMessage({ rawMessage, messageId, envelope }: SmtpComposedMessage): Promise<SmtpSendResult> {
