@@ -71,6 +71,7 @@ export class AppendNotSavedError extends Error {
 }
 
 const MAX_MAILBOX_STATUS_CONCURRENCY = 8;
+export const MAX_SNIPPET_BYTES = 4096;
 const MAX_IMAP_UID = 4_294_967_295n;
 
 function assertValidUid(uid: string): void {
@@ -370,10 +371,22 @@ export class ImapClient {
     const lock = await this.client.getMailboxLock(folder);
     try {
       const fetchOptions: any = { envelope: true, flags: true, internalDate: true, threadId: true };
-      if (!headerOnly) fetchOptions.bodyParts = ['TEXT'];
+      if (!headerOnly) {
+        // A preview must never download the full MIME body or its attachments.
+        fetchOptions.bodyParts = [{ key: 'TEXT', start: 0, maxLength: MAX_SNIPPET_BYTES }];
+        fetchOptions.headers = ['Content-Type', 'Content-Transfer-Encoding'];
+      }
       const byUid = new Map<number, MessageMetadata>();
       for await (const msg of this.client.fetch(uids.join(','), fetchOptions, { uid: true })) {
         const textBuffer = headerOnly ? undefined : (msg as any).bodyParts?.get('TEXT');
+        let snippet = '';
+        if (textBuffer) {
+          const preview = await simpleParser(Buffer.concat([
+            msg.headers ?? Buffer.from('Content-Type: text/plain; charset=utf-8\r\n'),
+            Buffer.from('\r\n'), textBuffer.subarray(0, MAX_SNIPPET_BYTES),
+          ]), { skipHtmlToText: false, skipTextToHtml: true });
+          snippet = (preview.text ?? '').replace(/\s+/g, ' ').slice(0, 200).trim();
+        }
         byUid.set(msg.uid, {
           id: msg.uid.toString(),
           uid: msg.uid,
@@ -382,9 +395,7 @@ export class ImapClient {
           date: msg.envelope?.date || (msg.internalDate instanceof Date
             ? msg.internalDate
             : msg.internalDate ? new Date(msg.internalDate) : undefined),
-          snippet: textBuffer
-            ? textBuffer.toString('utf-8').replace(/\s+/g, ' ').slice(0, 200).trim()
-            : '',
+          snippet,
           threadId: (msg as any).threadId?.toString(),
         });
       }
