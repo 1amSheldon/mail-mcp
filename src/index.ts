@@ -1881,7 +1881,12 @@ Options:
 }
 
 // Importing the module must not start a stdio server.
-const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+let isDirectRun = false;
+try {
+  isDirectRun = Boolean(process.argv[1]) && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+} catch {
+  // Imported from stdin/eval or an embedder with a non-file argv[1].
+}
 if (isDirectRun) {
   main().catch((err) => {
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);

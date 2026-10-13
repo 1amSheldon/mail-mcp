@@ -60,7 +60,7 @@
     "probe:mail-read": "node scripts/probe-mail-read.mjs",
     "probe:draft-workflow": "node scripts/probe-draft-workflow.mjs",
     "backup:windows-service": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-windows-service.ps1",
-    "smoke:import": "node -e \"import('./dist/index.js')\"",
+    "smoke:import": "node scripts/smoke-import.mjs",
     "release:check": "npm run build && npm run check:english && npm test && npm run test:integration && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm run smoke:installed && npm audit",
     "prepack": "npm run build",
     "prepublishOnly": "npm run release:check",
