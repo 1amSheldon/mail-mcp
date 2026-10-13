@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ImapClient } from './imap.js';
+import { ImapClient, AppendNotSavedError } from './imap.js';
 import type { EmailAccount } from '../config.js';
 
 vi.mock('../security/keychain.js', () => ({
@@ -185,7 +185,7 @@ describe('ImapClient', () => {
         .resolves.toEqual({ uid: 321 });
     });
 
-    it('treats an empty APPEND response as unconfirmed', async () => {
+    it('treats an empty APPEND response as a failed precondition', async () => {
       const { ImapFlow } = await import('imapflow');
       const MockImapFlow = ImapFlow as any;
       MockImapFlow.mockImplementationOnce(function () {
@@ -199,7 +199,40 @@ describe('ImapClient', () => {
       });
       const client = new ImapClient(account);
       await client.connect();
-      await expect(client.appendMessage('Sent', 'raw')).rejects.toThrow('no confirmation');
+      await expect(client.appendMessage('Sent', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+    });
+
+    it('classifies disconnected clients and lock failures as definitely not saved', async () => {
+      const client = new ImapClient(account);
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+      const append = vi.fn();
+      (client as any).client = { append, getMailboxLock: vi.fn().mockRejectedValue(new Error('missing folder')) };
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+      expect(append).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { responseStatus: 'NO', executedCommand: 'A1 APPEND Drafts {100}' },
+      { responseStatus: 'BAD', executedCommand: 'A2 APPEND Drafts {100}' },
+      { serverResponseCode: 'APPENDLIMIT' },
+      { rejectedFrom: 'noSocket', command: 'APPEND' },
+    ])('classifies explicit APPEND rejection/preflight as not saved: %j', async metadata => {
+      const client = new ImapClient(account);
+      const release = vi.fn();
+      (client as any).client = { getMailboxLock: async () => ({ release }), append: vi.fn().mockRejectedValue(Object.assign(new Error('failed'), metadata)) };
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+      expect(release).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      {},
+      { responseStatus: 'NO' },
+      { responseStatus: 'NO', executedCommand: 'A3 UID SEARCH 123' },
+    ])('keeps transport and post-APPEND lookup failures uncertain: %j', async metadata => {
+      const client = new ImapClient(account);
+      const error = Object.assign(new Error('outcome unknown'), metadata);
+      (client as any).client = { getMailboxLock: async () => ({ release() {} }), append: vi.fn().mockRejectedValue(error) };
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBe(error);
     });
   });
 

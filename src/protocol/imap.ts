@@ -62,6 +62,14 @@ export interface AppendMessageResult {
   uidValidity?: string;
 }
 
+/** Positive evidence that APPEND did not store the message; safe to correct and retry. */
+export class AppendNotSavedError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = 'AppendNotSavedError';
+  }
+}
+
 const MAX_MAILBOX_STATUS_CONCURRENCY = 8;
 const MAX_IMAP_UID = 4_294_967_295n;
 
@@ -247,14 +255,30 @@ export class ImapClient {
 
   async appendMessage(folder: string, rawMessage: string | Buffer, flags: string[] = []): Promise<AppendMessageResult> {
     if (!this.client) {
-      throw new Error('Not connected');
+      throw new AppendNotSavedError('Draft was not saved: IMAP is not connected.');
     }
 
-    const lock = await this.client.getMailboxLock(folder);
+    const lock = await this.client.getMailboxLock(folder).catch(cause => {
+      throw new AppendNotSavedError('Draft was not saved: the destination mailbox could not be opened.', cause);
+    });
     try {
-      const response = await this.client.append(folder, rawMessage, flags);
+      const response = await this.client.append(folder, rawMessage, flags).catch((cause: unknown) => {
+        const error = cause as { responseStatus?: string; executedCommand?: string; serverResponseCode?: string; rejectedFrom?: string; command?: string } | null;
+        // Require the rejected command to be APPEND: ImapFlow can fail a UID
+        // SEARCH after a successful APPEND, which remains an uncertain outcome.
+        const appendRejected = ['NO', 'BAD'].includes(error?.responseStatus ?? '')
+          && /^\S+\s+APPEND(?:\s|$)/i.test(error?.executedCommand ?? '');
+        const preflight = (!error?.executedCommand && error?.serverResponseCode === 'APPENDLIMIT')
+          || (error?.rejectedFrom === 'noSocket' && error?.command === 'APPEND');
+        if (appendRejected || preflight) {
+          throw new AppendNotSavedError('Draft was not saved: IMAP rejected APPEND before storing the message.', cause);
+        }
+        throw cause;
+      });
       if (!response) {
-        throw new Error(`IMAP APPEND to ${folder} returned no confirmation`);
+        // ImapFlow returns false only when its command/state preconditions fail;
+        // transport failures reject, and a confirmed append always returns a map.
+        throw new AppendNotSavedError('Draft was not saved: IMAP APPEND was not attempted.');
       }
       return { uid: response.uid, ...(response.uidValidity !== undefined ? { uidValidity: response.uidValidity.toString() } : {}) };
     } finally {

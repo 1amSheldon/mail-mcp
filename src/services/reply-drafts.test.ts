@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { simpleParser } from 'mailparser';
 import { MailService } from './mail.js';
 import { SmtpClient } from '../protocol/smtp.js';
+import { AppendNotSavedError } from '../protocol/imap.js';
 import { encodeMessageLocator } from '../domain/message-locator.js';
 import type { EmailAccount } from '../config.js';
 
@@ -37,6 +38,13 @@ async function fixture(overrides: Partial<EmailAccount> = {}) {
 }
 
 describe('threaded reply drafts with real MIME composition', () => {
+  it('reports a definite APPEND failure as an error instead of an uncertain saved draft', async () => {
+    const f = await fixture();
+    const error = new AppendNotSavedError('Draft was not saved: mailbox unavailable.');
+    f.append.mockRejectedValueOnce(error);
+    await expect(f.service.createReplyDraft(f.locator, 'Reply')).rejects.toBe(error);
+    expect(f.send).not.toHaveBeenCalled();
+  });
   it.each(['draft', 'reply', 'replyAll', 'forward', 'read'] as const)('rejects a mailbox reset between locator validation and %s body fetch', async operation => {
     const f = await fixture();
     vi.mocked(f.service.imap.getMailboxIdentity)
