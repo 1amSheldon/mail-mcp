@@ -67,6 +67,15 @@ export const sharedFields = {
 export const appointmentFields = { ...sharedFields, start: calendarTime, endExclusive: calendarTime, status: z.enum(['TENT', 'CONF', 'CANC']).default('CONF'), freeBusy: z.enum(['F', 'B', 'T', 'O']).default('B') };
 export const taskFields = { ...sharedFields, start: calendarTime.optional(), due: calendarTime.optional(), status: z.enum(['NEED', 'INPR', 'COMP', 'WAITING', 'DEFERRED', 'CANC']).default('NEED'), percentComplete: z.number().int().min(0).max(100).default(0), completedAt: instant.optional() };
 const commonCreate = { folderId: itemId, notifyAttendees: z.boolean().default(false) };
+const commonChanges = {
+  subject: line.optional(), location: line.optional(), description: text.optional(), htmlDescription: text.optional(),
+  privacy: sharedFields.privacy.removeDefault().optional(), priority: sharedFields.priority.removeDefault().optional(),
+  categories: sharedFields.categories, url: z.union([z.url().max(2048), z.literal('')]).optional(),
+  attendees: attendees.optional(), alarms: alarms.optional(), recurrence: recurrence.nullable().optional(),
+};
+export const appointmentChanges = z.object({ ...commonChanges, start: calendarTime.optional(), endExclusive: calendarTime.optional(), status: appointmentFields.status.removeDefault().optional(), freeBusy: appointmentFields.freeBusy.removeDefault().optional() }).strict().refine(v => Object.keys(v).length > 0);
+export const taskChanges = z.object({ ...commonChanges, start: calendarTime.nullable().optional(), due: calendarTime.nullable().optional(), status: taskFields.status.removeDefault().optional(), percentComplete: taskFields.percentComplete.removeDefault().optional(), completedAt: instant.nullable().optional() }).strict().refine(v => Object.keys(v).length > 0);
+export const calendarEdit = { invitationId, component: z.number().int().min(0).max(1000).default(0), expectedModSequence: z.string().regex(/^[1-9][0-9]*$/), expectedRevision: z.string().regex(/^[1-9][0-9]*$/) };
 const validDates = (v: { start?: CalendarTime; recurrence?: z.output<typeof recurrence> }) => !v.recurrence || Boolean(v.start)
   && [...v.recurrence.includeDates, ...v.recurrence.excludeDates].every(d => sameTimeBasis(v.start!, d))
   && [...v.recurrence.rules, ...v.recurrence.excludeRules].every(r => !r.until || (v.start!.type === 'date') === !r.until.includes('T'));
@@ -80,6 +89,13 @@ export const CALENDAR_READ_SCHEMAS = {
   getICalendar: z.object({ invitationId }).strict(),
 };
 export const CALENDAR_WRITE_SCHEMAS = {
+  updateAppointment: z.object({ ...calendarEdit, changes: appointmentChanges, notifyAttendees: z.boolean().default(false), allowExceptionReset: z.boolean().default(false) }).strict(),
+  updateTask: z.object({ ...calendarEdit, changes: taskChanges, notifyAttendees: z.boolean().default(false), allowExceptionReset: z.boolean().default(false) }).strict(),
+  createAppointmentException: z.object({ ...calendarEdit, instance: calendarTime, changes: appointmentChanges, notifyAttendees: z.boolean().default(false) }).strict(),
+  createTaskException: z.object({ ...calendarEdit, instance: calendarTime, changes: taskChanges, notifyAttendees: z.boolean().default(false) }).strict(),
+  cancelAppointment: z.object({ ...calendarEdit, instance: calendarTime.optional(), range: z.enum(['THISANDFUTURE', 'THISANDPRIOR']).optional(), message: text.default('') }).strict().refine(v => !v.range || Boolean(v.instance)),
+  cancelTask: z.object({ ...calendarEdit, instance: calendarTime.optional(), range: z.enum(['THISANDFUTURE', 'THISANDPRIOR']).optional(), message: text.default('') }).strict().refine(v => !v.range || Boolean(v.instance)),
+  replyToInvitation: z.object({ ...calendarEdit, kind: z.enum(['appointment', 'task']).default('appointment'), response: z.enum(['ACCEPT', 'TENTATIVE', 'DECLINE']), notifyOrganizer: z.boolean().default(true), instance: calendarTime.optional(), message: text.default(''), identityId: z.string().uuid().optional() }).strict(),
   createAppointment: z.object({ ...commonCreate, ...appointmentFields }).strict().refine(v => compareTimes(v.start, v.endExclusive) < 0, 'Use matching date/time bases and a later exclusive end.').refine(validDates),
   createTask: z.object({ ...commonCreate, ...taskFields }).strict().refine(v => !v.start || !v.due || compareTimes(v.start, v.due) <= 0).refine(validDates)
     .refine(v => v.status !== 'COMP' || v.percentComplete === 100).refine(v => v.status === 'COMP' || v.completedAt === undefined),

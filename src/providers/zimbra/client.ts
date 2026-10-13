@@ -105,7 +105,8 @@ export class ZimbraClient {
     this.sendJournal = new ZimbraSendJournal(JSON.stringify([account.id, this.endpoint, account.user]), options.journalDirectory);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.filters = new ZimbraFilters((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.allowedRecipients);
-    this.calendar = new ZimbraCalendar((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.user, account.allowedRecipients);
+    this.calendar = new ZimbraCalendar((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.user, account.allowedRecipients,
+      async id => await this.attachment({ messageId: id, maxBytes: MAX_MIME_BYTES }) as Buffer);
     this.documents = new ZimbraDocuments((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write),
       (bytes, name, type) => this.upload(bytes, name, type),
       (id, version, maxBytes) => this.attachment({ messageId: id, version, document: true, maxBytes }), account.allowedAttachmentRoots);
@@ -149,7 +150,7 @@ export class ZimbraClient {
         const detail = fault.Detail && typeof fault.Detail === 'object' ? fault.Detail as Obj : {};
         const error = detail.Error && typeof detail.Error === 'object' ? detail.Error as Obj : {};
         const code = String(content(error.Code) ?? '');
-        if (code === 'mail.MODIFY_CONFLICT') throw new ZimbraError('CONFLICT', 'The server item changed. Read the current version before applying the edit again.');
+        if (code === 'mail.MODIFY_CONFLICT' || code === 'mail.INVITE_OUT_OF_DATE') throw new ZimbraError('CONFLICT', 'The server item changed. Read the current version before applying the edit again.');
         if (['service.AUTH_REQUIRED', 'service.AUTH_EXPIRED', 'account.AUTH_EXPIRED'].includes(code)) {
           throw new ZimbraError('AUTH_REQUIRED', 'Zimbra session was rejected. Run accounts login ACCOUNT_ID locally.');
         }

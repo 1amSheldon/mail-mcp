@@ -18,6 +18,13 @@ their server owner-qualified IDs and permissions.
 | `zimbra.createTask` | `folderId`, `subject`, optional task/shared fields below | Creates a task, including undated tasks. |
 | `zimbra.dismissCalendarAlarm` | `kind` (appointment/task), `itemId`, `dismissedAt` | Dismisses the alarm at an explicit instant; inspect returned next alarm. |
 | `zimbra.snoozeCalendarAlarm` | `kind` (appointment/task), `itemId`, `until` | Snoozes to an explicit instant. |
+| `zimbra.updateAppointment` | Edit guard, `changes`, `notifyAttendees?` (false), `allowExceptionReset?` (false) | Patches supplied fields; preserves other native metadata and MIME attachments. |
+| `zimbra.updateTask` | Edit guard, `changes`, `notifyAttendees?` (false), `allowExceptionReset?` (false) | Patches task content/progress with server conflict versions. |
+| `zimbra.createAppointmentException` | Edit guard, `instance`, `changes`, `notifyAttendees?` (false) | Creates an exception for an original occurrence from the default recurring invitation. |
+| `zimbra.createTaskException` | Edit guard, `instance`, `changes`, `notifyAttendees?` (false) | Equivalent native task exception operation. |
+| `zimbra.cancelAppointment` | Edit guard, `instance?`, `range?`, `message?` | Cancels the series or selected instance/range, notifying affected attendees. |
+| `zimbra.cancelTask` | Edit guard, `instance?`, `range?`, `message?` | Native task cancellation, with the same notification caveats. |
+| `zimbra.replyToInvitation` | Edit guard, `kind?` (appointment default/task), `response`, `notifyOrganizer?` (true), `instance?`, `message?`, `identityId?` | ACCEPT/TENTATIVE/DECLINE; explicitly addresses the inspected organizer or records a local-only response. |
 
 Range timestamps and alarm action timestamps are ISO dates with a time and UTC
 offset, at whole-second precision. Read windows must be positive and at most
@@ -29,6 +36,73 @@ An `invitationId` is `calendarItemId-invitationMailId`, optionally preceded by
 a compound `invId` returned by a mutation. GetICal's implementation exports
 component zero only. A standalone invitation mail can be deleted independently
 of the calendar item, so do not use its raw mail ID for durable calendar reads.
+
+## Editing, exceptions and responses
+
+Every edit guard consists of `invitationId`, `component?` (default 0),
+`expectedModSequence` and `expectedRevision` (positive decimal strings).
+Use the calendar item's returned `ms` and `rev`, plus the selected invitation's
+`compNum`. The client re-reads and compares them before editing. Modify and
+create-exception requests also send native `ms`/`rev`; INVITE_OUT_OF_DATE is a
+conflict, not a reason to repeat the old write.
+
+`changes` is a nonempty partial object. Shared editable fields: subject,
+location, description, htmlDescription, privacy, priority, categories, url,
+attendees, alarms and recurrence. Appointment fields also include start,
+endExclusive, status and freeBusy. Task fields also include start, due, status,
+percentComplete and completedAt. Field formats follow creation. No create-time
+defaults are inserted into omitted top-level patch fields. Supplied attendees,
+categories and alarms replace those lists; use `[]` to clear. Use recurrence
+`null` to remove it, task start/due/completedAt `null` to clear those fields,
+and empty strings to clear text/url. Description formats are independent:
+changing description alone retains existing htmlDescription and vice versa.
+Explicitly update both if both versions of the text should change.
+
+The client preserves attendee participation status for retained email addresses,
+custom native properties, descriptions and existing attachments. For MIME-backed
+invitations it reads original MIME, not sanitized HTML from SOAP, and references
+original attachment parts under the compound invitation ID. It refuses edits
+when MIME/part metadata disagree, when multiple calendar MIME parts cannot be
+disambiguated, or when signed/encrypted content cannot be rebuilt safely. For
+metadata-only HTML invitations, supply htmlDescription explicitly because the
+server may sanitize the returned HTML. No update is submitted in those cases.
+
+An exception's `instance` is the **original occurrence start**, even if moving
+it to another time. Use the series time basis/timezone. If changes.start is
+omitted it defaults to that instance; omitted end/due retains the series
+wall-clock duration. Existing exceptions must be modified using their own
+invitation IDs, not created again. Exception creation cannot replace recurrence.
+
+Changing a recurring series' start/end/due/recurrence can reset exceptions,
+depending on server preferences. When exceptions exist, first inspect them and
+set `allowExceptionReset: true` only if this consequence is intended. Removing
+attendees or resetting exceptions may send cancellation emails even when the
+main update has no recipients. Such edits require `notifyAttendees: true`.
+Recipient policy includes removed participants and participants of exceptions;
+it also checks preserved email alarms. Only an organizer can send event updates.
+
+Cancellation always permits the native cancellation notices; it has no silent
+mode. `range` is THISANDFUTURE or THISANDPRIOR and requires `instance`. Without
+instance, select the default invitation to cancel the entire series. An exception
+invitation cannot accidentally serve as a whole-series selection. Attendees
+should decline through replyToInvitation, not cancel another organizer's event.
+
+**Cancellation concurrency limitation:** the native CancelCalendarItem handler
+does not atomically check ms/rev and may derive additional notification recipients
+from exceptions after preflight. Cancellation is therefore disabled on accounts
+with allowedRecipients, including an empty list. The preflight guard on unrestricted
+accounts does not guarantee an atomic cancellation snapshot. Inspect and avoid
+concurrent edits; do not retry an uncertain result automatically.
+
+Replies use the inspected organizer as the explicit message recipient.
+`notifyOrganizer: false` records only the local participation change. Zimbra
+may suppress replies if the original RSVP setting is false, and returns statuses
+such as OK, OLD, ALREADY-REPLIED or FAIL. Inspect them and read the calendar item;
+SOAP success alone does not prove acceptance or email delivery. This operation
+uses an existing calendar invitation, not an unprocessed standalone inbox invite.
+
+For task completion, set status COMP and percentComplete 100 together; optionally
+set completedAt. Reopening a completed task must explicitly clear completedAt.
 
 ## Dates and creation fields
 

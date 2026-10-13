@@ -364,6 +364,7 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
         'mountpointId', 'remoteFolderId', 'owner', 'permissions', 'granteeId', 'expiresAt',
         'documentId', 'expectedVersion', 'restoreVersion', 'locked', 'enabled',
         'appointmentId', 'taskId', 'itemId', 'kind', 'start', 'endExclusive', 'due', 'notifyAttendees', 'status', 'percentComplete',
+        'invitationId', 'component', 'expectedModSequence', 'expectedRevision', 'instance', 'range', 'allowExceptionReset', 'response', 'notifyOrganizer',
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
@@ -379,6 +380,9 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       if (operation === 'sendShareNotification') details.push('send a sharing email to the listed recipients');
       if (operation === 'deleteDocument') details.push('delete the document and its retained revisions');
       if (operation === 'restoreDocumentRevision') details.push('create a new current revision from historical content and description');
+      if (operation === 'cancelAppointment' || operation === 'cancelTask') details.push('cancel selected calendar scope and permit native attendee cancellation emails');
+      if (operation === 'replyToInvitation') details.push(input.notifyOrganizer === false ? 'record local participation only' : 'reply to the calendar organizer');
+      if (['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException'].includes(operation)) details.push(input.notifyAttendees === true ? 'update calendar content and notify affected attendees' : 'patch calendar content without invitation emails; edits requiring cancellation notices are refused');
       if (operation === 'createAppointment' || operation === 'createTask') {
         details.push(input.notifyAttendees === true ? 'send invitations to supplied attendees' : 'save without invitation emails');
         if (Array.isArray(input.attendees)) details.push(`attendeeEmails=${JSON.stringify(input.attendees.map(a => (a as Record<string, unknown>).email))}`);

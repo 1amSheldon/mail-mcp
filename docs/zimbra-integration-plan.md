@@ -59,12 +59,16 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   reminders. Internal grants require directory IDs to prevent guest fallback.
 - c61d915: Briefcase uploads, attachment/text sources, metadata,
   downloads, revision windows/diffs/restoration, document actions and file ACLs.
-- Current increment: calendar/task reads, bounded occurrence/free-busy/working
+- 0736120: calendar/task reads, bounded occurrence/free-busy/working
   hours queries, invitation iCalendar, creation with native recurrence and
-  alarms. Calendar edits, exceptions, replies, cancellation, search/import/export
-  and scheduled mail remain pending.
+  alarms.
+- Current increment: version-guarded calendar/task partial edits, MIME and
+  attachment retention, recurrence exceptions, cancellation and replies. Native
+  cancellation's non-atomic derived recipients are explicit and blocked for
+  recipient-restricted accounts. Search/import/export, forwarded/counter invites,
+  unprocessed inbox invitations and scheduled mail remain pending.
 
-Qualification so far: TypeScript passes; all 1,225 unit tests pass on Node 24,
+Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate
 writes remain untested.
 The complete acceptance matrix above is still pending; do not treat these

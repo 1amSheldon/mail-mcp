@@ -1,5 +1,6 @@
 import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS, nativeAlarms, nativeRecurrence, nativeTime } from './calendar-schema.js';
 import { ZimbraError } from './session.js';
+import { CALENDAR_EDIT_OPERATIONS, ZimbraCalendarEdits, type CalendarEditOperation } from './calendar-edit.js';
 
 type Obj = Record<string, unknown>;
 type Request = (name: string, params: Obj, write?: boolean) => Promise<Obj>;
@@ -7,7 +8,10 @@ type ReadOperation = keyof typeof CALENDAR_READ_SCHEMAS;
 type WriteOperation = keyof typeof CALENDAR_WRITE_SCHEMAS;
 
 export class ZimbraCalendar {
-  constructor(private readonly request: Request, private readonly user: string, private readonly allowedRecipients?: readonly string[]) {}
+  private readonly edits: ZimbraCalendarEdits;
+  constructor(private readonly request: Request, private readonly user: string, private readonly allowedRecipients: readonly string[] | undefined, raw: (id: string) => Promise<Buffer>) {
+    this.edits = new ZimbraCalendarEdits(request, raw, user, allowedRecipients);
+  }
   private checkRecipients(recipients: string[]): void {
     if (this.allowedRecipients === undefined) return;
     const allowed = new Set(this.allowedRecipients.map(a => a.toLowerCase()));
@@ -41,13 +45,14 @@ export class ZimbraCalendar {
     }
   }
   async write(operation: WriteOperation, input: unknown): Promise<unknown> {
+    if ((CALENDAR_EDIT_OPERATIONS as readonly string[]).includes(operation)) return this.edits.execute(operation as CalendarEditOperation, input);
     if (operation === 'dismissCalendarAlarm' || operation === 'snoozeCalendarAlarm') {
       const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);
       return this.request(operation === 'dismissCalendarAlarm' ? 'DismissCalendarItemAlarm' : 'SnoozeCalendarItemAlarm', {
         [v.kind === 'appointment' ? 'appt' : 'task']: [{ id: v.itemId, ...('until' in v ? { until: Date.parse(v.until) } : { dismissedAt: Date.parse(v.dismissedAt) }) }],
       }, true);
     }
-    const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);
+    const v = (operation === 'createAppointment' ? CALENDAR_WRITE_SCHEMAS.createAppointment : CALENDAR_WRITE_SCHEMAS.createTask).parse(input);
     const appointment = 'endExclusive' in v;
     const recipients = v.notifyAttendees ? v.attendees.map(a => a.email) : [];
     this.checkRecipients([...recipients, ...v.alarms.flatMap(a => a.type === 'email' ? a.to : [])]);
