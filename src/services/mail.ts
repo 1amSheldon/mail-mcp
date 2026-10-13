@@ -553,20 +553,6 @@ export class MailService {
   async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], expectedUidValidity?: string): Promise<SendDeliveryResult> {
     const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
 
-    const originalMessageId = parsed.messageId;
-    const existingReferences = parsed.headers.get('references') as string | undefined;
-
-    // Build RFC 2822 threading headers only when we have a Message-ID
-    const extraHeaders: Record<string, string> = {};
-    if (originalMessageId) {
-      extraHeaders['In-Reply-To'] = originalMessageId;
-      if (existingReferences) {
-        extraHeaders['References'] = `${existingReferences} ${originalMessageId}`;
-      } else {
-        extraHeaders['References'] = originalMessageId;
-      }
-    }
-
     const replyTo = this.replyTargets(parsed);
 
     // Build subject with "Re: " prefix
@@ -584,10 +570,7 @@ export class MailService {
       ...(cc ? { cc } : {}),
       ...(bcc ? { bcc } : {}),
       ...(attachments && attachments.length > 0 ? { attachments } : {}),
-      threading: {
-        ...(extraHeaders['In-Reply-To'] ? { inReplyTo: extraHeaders['In-Reply-To'] } : {}),
-        ...(extraHeaders.References ? { references: extraHeaders.References } : {}),
-      },
+      threading: this.replyThreading(parsed),
       includeSignature: false,
     });
   }

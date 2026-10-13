@@ -1,4 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { simpleParser } from 'mailparser';
 
 const { mockDraftAdopt } = vi.hoisted(() => ({
   mockDraftAdopt: vi.fn().mockResolvedValue('test-draft-id'),
@@ -749,6 +750,17 @@ describe('MailService replyEmail', () => {
     await service.replyEmail('42', 'INBOX', 'My reply');
     const extraHeaders = mockSmtpSend.mock.calls[0][6];
     expect(extraHeaders['References']).toBe('<original-123@example.com>');
+  });
+
+  it('preserves a parsed multi-message References chain without comma coercion', async () => {
+    mockFetchMessageBody.mockResolvedValue(await simpleParser([
+      'From: author@example.com', 'Message-ID: <third@example.com>',
+      'References: <first@example.com> <second@example.com>', '', 'Original',
+    ].join('\r\n')));
+    const service = new MailService(baseAccount, false);
+    await service.replyEmail('42', 'INBOX', 'Reply');
+    expect(mockSmtpSend.mock.calls[0][6].References)
+      .toBe('<first@example.com> <second@example.com> <third@example.com>');
   });
 
   it('appends original Message-ID to existing references chain', async () => {
