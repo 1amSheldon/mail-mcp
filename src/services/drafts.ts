@@ -8,6 +8,7 @@ import { writeTextFileAtomic } from '../utils/atomic-write.js';
 import { decodeMessageLocator } from '../domain/message-locator.js';
 import type { OutgoingAttachment, OutgoingMessage } from '../domain/outgoing-message.js';
 import type { SmtpComposedMessage } from '../protocol/smtp.js';
+import { AppendNotSavedError } from '../protocol/imap.js';
 import type { DraftCreationResult, SendDeliveryResult } from './mail.js';
 import { validateEmailAddresses, validateRecipients } from '../utils/validation.js';
 
@@ -507,7 +508,17 @@ export class DraftWorkflow {
       if (!r.messageIds.includes(replacementMessageId)) r.messageIds.push(replacementMessageId);
       r.pending = { original: r.locator, hash: digest(raw) };
       await save();
-      const next = await this.port.append(replacement);
+      let next;
+      try {
+        next = await this.port.append(replacement);
+      } catch (error) {
+        // Only positive evidence that APPEND did not save permits another replacement.
+        if (error instanceof AppendNotSavedError) {
+          delete r.pending;
+          await save();
+        }
+        throw error;
+      }
       if (!next.locator) throw new Error('Replacement saved but locator unavailable; inspect Drafts');
       r.pending.locator = next.locator;
       await save();

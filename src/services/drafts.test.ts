@@ -38,6 +38,18 @@ async function fixture() {
   return { workflow, port, messages, raw, store, root };
 }
 describe('server draft workflow', () => {
+  it('allows another replacement after a definite APPEND rejection but retains unknown-outcome protection', async () => {
+    const { AppendNotSavedError } = await import('../protocol/imap.js');
+    const f = await fixture();
+    vi.mocked(f.port.append).mockRejectedValueOnce(new AppendNotSavedError('Quota exceeded'));
+    await expect(f.workflow.update(locator(1), { subject: 'Changed' })).rejects.toThrow('Quota exceeded');
+    await expect(f.workflow.update(locator(1), { subject: 'Changed' })).resolves.toMatchObject({ status: 'draft_updated' });
+    const uncertain = await fixture();
+    vi.mocked(uncertain.port.append).mockRejectedValueOnce(new Error('Connection lost after upload'));
+    await expect(uncertain.workflow.update(locator(1), { subject: 'Changed' })).rejects.toThrow('Connection lost');
+    await expect(uncertain.workflow.update(locator(1), { subject: 'Changed' })).rejects.toThrow('pending cleanup');
+    expect(uncertain.port.append).toHaveBeenCalledOnce();
+  });
   it('updates and sends a MIME draft with a comma in its quoted recipient name', async () => {
     const f = await fixture();
     f.messages.set(locator(1), replaceHeaders(f.raw, { To: '"Doe, Jane" <jane@example.com>' }));
