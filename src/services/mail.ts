@@ -585,12 +585,7 @@ export class MailService {
       }
     }
 
-    // Determine reply-to address (original sender)
-    const originalFrom = parsed.replyTo?.value[0]?.address ?? parsed.from?.value[0]?.address;
-    if (!originalFrom) {
-      throw new ValidationError('Cannot reply because the original message has no valid From address.');
-    }
-    const replyTo = originalFrom;
+    const replyTo = this.replyTargets(parsed);
 
     // Build subject with "Re: " prefix
     const originalSubject = parsed.subject || '';
@@ -661,8 +656,7 @@ export class MailService {
     if (options.replyAll) {
       message = this.replyAllMessage(parsed, body, options);
     } else {
-      const to = parsed.replyTo?.value[0]?.address ?? parsed.from?.value[0]?.address;
-      if (!to) throw new ValidationError('Cannot reply because the original message has no valid From address.');
+      const to = this.replyTargets(parsed);
       message = {
         to,
         subject: /^re:/i.test(parsed.subject ?? '') ? parsed.subject! : `Re: ${parsed.subject ?? ''}`,
@@ -676,6 +670,18 @@ export class MailService {
     // Explicit CC replaces inferred CC; an empty string clears it.
     if (options.cc !== undefined) message.cc = options.cc;
     return this.createDraftMessage(message);
+  }
+
+  private replyTargets(parsed: ParsedMail): string {
+    const candidates = parsed.replyTo?.value?.length ? parsed.replyTo.value : parsed.from?.value ?? [];
+    const seen = new Set<string>();
+    const addresses = candidates.flatMap(({ address }) => {
+      if (!address || seen.has(address.toLowerCase())) return [];
+      seen.add(address.toLowerCase());
+      return [address];
+    });
+    if (!addresses.length) throw new ValidationError('Cannot reply because the original message has no valid From address.');
+    return addresses.join(', ');
   }
 
   private replyThreading(parsed: ParsedMail): SmtpOutgoingMessage['threading'] {

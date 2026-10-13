@@ -37,6 +37,15 @@ async function fixture(overrides: Partial<EmailAccount> = {}) {
 }
 
 describe('threaded reply drafts with real MIME composition', () => {
+  it('retains every Reply-To recipient for drafts and immediate replies', async () => {
+    const f = await fixture();
+    f.source.replyTo = { value: [{ address: 'one@example.test', name: '' }, { address: 'two@example.test', name: '' }, { address: 'ONE@example.test', name: '' }], text: '', html: '' };
+    await f.service.createReplyDraft(f.locator, 'Reply');
+    expect((await simpleParser(f.append.mock.calls[0][1])).to).toMatchObject({ value: [{ address: 'one@example.test' }, { address: 'two@example.test' }] });
+    const send = vi.spyOn(f.service, 'sendMessage').mockResolvedValue({} as any);
+    await f.service.replyEmail('1', 'INBOX', 'Reply');
+    expect(send.mock.calls[0][0].to).toBe('one@example.test, two@example.test');
+  });
   it('does not reuse cached bodies across UIDVALIDITY generations', async () => {
     const f = await fixture();
     await f.service.createReplyDraft(f.locator, 'Old reply');

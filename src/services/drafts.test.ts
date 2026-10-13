@@ -38,6 +38,13 @@ async function fixture() {
   return { workflow, port, messages, raw, store, root };
 }
 describe('server draft workflow', () => {
+  it('updates and sends a MIME draft with a comma in its quoted recipient name', async () => {
+    const f = await fixture();
+    f.messages.set(locator(1), replaceHeaders(f.raw, { To: '"Doe, Jane" <jane@example.com>' }));
+    const updated = await f.workflow.update(locator(1), { subject: 'Changed' });
+    await f.workflow.send(updated.draftId);
+    expect(vi.mocked(f.port.send).mock.calls[0][1].envelope.to).toContain('jane@example.com');
+  });
   it('matches Tencent rewritten IDs only with matching content and a bounded date', async () => {
     const f = await fixture(); const now = new Date(); const id = '<test@example.com>';
     const raw = replaceHeaders(f.raw, { 'Message-ID': id, Date: now.toUTCString() });
