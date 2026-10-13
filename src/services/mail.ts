@@ -879,7 +879,7 @@ export class MailService {
       folder: () => this.resolveDraftsFolder(),
       read: async locator => {
         const resolved = await this.resolveLocator(locator);
-        return this.imapClient.fetchRawMessage(resolved.uid.toString(), resolved.mailbox, 50 * 1024 * 1024);
+        return this.imapClient.fetchRawMessage(resolved.uid.toString(), resolved.mailbox, 50 * 1024 * 1024, resolved.uidValidity);
       },
       search: async messageId => {
         const folder = await this.resolveDraftsFolder();
@@ -887,7 +887,7 @@ export class MailService {
         const uids = await this.imapClient.searchMessageUids({ header: { 'Message-ID': messageId } }, folder);
         const exact: string[] = [];
         for (const uid of uids) {
-          const raw = await this.imapClient.fetchRawMessage(String(uid), folder, 50 * 1024 * 1024);
+          const raw = await this.imapClient.fetchRawMessage(String(uid), folder, 50 * 1024 * 1024, identity.uidValidity);
           if ((await simpleParser(raw)).messageId === messageId) exact.push(encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid }));
         }
         return exact;
@@ -896,6 +896,7 @@ export class MailService {
         const folder = await this.resolveDraftsFolder();
         const result = await this.imapClient.appendMessage(folder, raw, ['\\Draft']);
         const identity = await this.imapClient.getMailboxIdentity(folder);
+        if (result.uidValidity && result.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed after draft APPEND.');
         return { status: 'saved', retrySafe: false, nextAction: 'Use the saved draft locator.', folder, uid: result.uid, ...(result.uid !== undefined ? { locator: encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid: result.uid }) } : {}) };
       },
       trash: locator => this.deleteLocatedEmail(locator),
@@ -909,12 +910,13 @@ export class MailService {
           if (delay) await new Promise(resolve => setTimeout(resolve, delay));
           // IMAP HEADER is a substring search. Omitting brackets also finds
           // provider-prefixed IDs without downloading unrelated recent mail.
+          const identity = await this.imapClient.getMailboxIdentity(folder);
           const uids = await this.imapClient.searchMessageUids(
             { header: { 'Message-ID': messageId.replace(/^<|>$/g, '') } }, folder, 20,
           );
           const matches: number[] = [];
           for (const uid of uids) {
-            const candidate = await this.imapClient.fetchRawMessage(String(uid), folder, 50 * 1024 * 1024);
+            const candidate = await this.imapClient.fetchRawMessage(String(uid), folder, 50 * 1024 * 1024, identity.uidValidity);
             if (await matchesSentDraft(candidate, messageId, since, expected)) matches.push(uid);
           }
           if (matches.length === 1) return { folder, uid: matches[0] };
@@ -1125,7 +1127,8 @@ export class MailService {
     const content = await this.imapClient.fetchRawMessage(
       resolved.uid.toString(),
       resolved.mailbox,
-      maxBytes
+      maxBytes,
+      resolved.uidValidity
     );
     return {
       locator,
@@ -1137,7 +1140,7 @@ export class MailService {
   }
 
   async downloadAttachment(uid: string, filename: string, folder: string = 'INBOX', maxBytes: number = 50 * 1024 * 1024, expectedUidValidity?: string): Promise<{ content: Buffer, contentType: string }> {
-    const size = await this.imapClient.fetchAttachmentSize(uid, filename, folder);
+    const size = await this.imapClient.fetchAttachmentSize(uid, filename, folder, expectedUidValidity);
     if (size != null && size > maxBytes) {
       throw new ValidationError(
         `Attachment "${filename}" is ${Math.round(size / 1024 / 1024)} MB, which exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit. Use an email client to download large attachments directly.`
@@ -1258,11 +1261,12 @@ export class MailService {
 
   async copyEmail(locator: string, targetFolder: string): Promise<CopyEmailResult> {
     const source = await this.resolveLocator(locator);
-    const result = await this.imapClient.copyMessage(source.uid.toString(), source.mailbox, targetFolder);
+    const result = await this.imapClient.copyMessage(source.uid.toString(), source.mailbox, targetFolder, source.uidValidity);
     const destinationUid = result.uidMap?.[source.uid.toString()];
     let destinationLocator: string | undefined;
     if (destinationUid !== undefined) {
       const identity = await this.imapClient.getMailboxIdentity(result.destination || targetFolder);
+      if (result.uidValidity && result.uidValidity !== identity.uidValidity) throw new ValidationError('Destination mailbox identity changed after COPY.');
       destinationLocator = encodeMessageLocator({
         accountId: this.account.id,
         mailbox: identity.path,
@@ -1290,60 +1294,61 @@ export class MailService {
     return this.imapClient.getMailboxStatus(targetFolders);
   }
 
-  async moveMessage(uid: string, sourceFolder: string, targetFolder: string): Promise<void> {
-    await this.imapClient.moveMessage(uid, sourceFolder, targetFolder);
+  async moveMessage(uid: string, sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<void> {
+    await this.imapClient.moveMessage(uid, sourceFolder, targetFolder, expectedUidValidity);
     this.invalidateBodyCache(sourceFolder, uid);
   }
 
   async moveLocatedEmail(locator: string, targetFolder: string): Promise<void> {
     const resolved = await this.resolveLocator(locator);
-    await this.moveMessage(resolved.uid.toString(), resolved.mailbox, targetFolder);
+    await this.moveMessage(resolved.uid.toString(), resolved.mailbox, targetFolder, resolved.uidValidity);
   }
 
-  async deleteEmail(uid: string, folder: string = 'INBOX', explicitTrashFolder?: string): Promise<void> {
+  async deleteEmail(uid: string, folder: string = 'INBOX', explicitTrashFolder?: string, expectedUidValidity?: string): Promise<void> {
     const trashFolder = await this.resolveTrashFolder(explicitTrashFolder);
     if (trashFolder.toLocaleLowerCase() === folder.toLocaleLowerCase()) {
       throw new ValidationError('Message is already in Trash. Use permanentlyDeleteEmail for irreversible deletion.');
     }
-    await this.imapClient.moveMessage(uid, folder, trashFolder);
+    await this.imapClient.moveMessage(uid, folder, trashFolder, expectedUidValidity);
     this.invalidateBodyCache(folder, uid);
   }
 
   async deleteLocatedEmail(locator: string, explicitTrashFolder?: string): Promise<void> {
     const resolved = await this.resolveLocator(locator);
-    await this.deleteEmail(resolved.uid.toString(), resolved.mailbox, explicitTrashFolder);
+    await this.deleteEmail(resolved.uid.toString(), resolved.mailbox, explicitTrashFolder, resolved.uidValidity);
   }
 
-  async permanentlyDeleteEmail(uid: string, folder: string = 'Trash'): Promise<void> {
-    await this.imapClient.deleteMessage(uid, folder);
+  async permanentlyDeleteEmail(uid: string, folder: string = 'Trash', expectedUidValidity?: string): Promise<void> {
+    await this.imapClient.deleteMessage(uid, folder, expectedUidValidity);
     this.invalidateBodyCache(folder, uid);
   }
 
   async permanentlyDeleteLocatedEmail(locator: string): Promise<void> {
     const resolved = await this.resolveLocator(locator);
-    await this.permanentlyDeleteEmail(resolved.uid.toString(), resolved.mailbox);
+    await this.permanentlyDeleteEmail(resolved.uid.toString(), resolved.mailbox, resolved.uidValidity);
   }
 
-  async modifyLabels(uid: string, folder: string, addLabels: string[], removeLabels: string[]): Promise<void> {
-    return this.imapClient.modifyLabels(uid, folder, addLabels, removeLabels);
+  async modifyLabels(uid: string, folder: string, addLabels: string[], removeLabels: string[], expectedUidValidity?: string): Promise<void> {
+    return this.imapClient.modifyLabels(uid, folder, addLabels, removeLabels, expectedUidValidity);
   }
 
   async modifyLocatedLabels(locator: string, addLabels: string[], removeLabels: string[]): Promise<void> {
     const resolved = await this.resolveLocator(locator);
-    return this.modifyLabels(resolved.uid.toString(), resolved.mailbox, addLabels, removeLabels);
+    return this.modifyLabels(resolved.uid.toString(), resolved.mailbox, addLabels, removeLabels, resolved.uidValidity);
   }
 
   private async executeBatchGroup(
     entries: readonly { uid: string; locator?: string }[],
     folder: string,
     operation: BatchOperation,
+    expectedUidValidity?: string,
   ): Promise<BatchOperationItemResult[]> {
     if (entries.length === 0) return [];
     const uids = entries.map(entry => entry.uid);
     try {
       switch (operation.type) {
         case 'move':
-          await this.imapClient.batchMoveMessages(uids, folder, operation.targetFolder);
+          await this.imapClient.batchMoveMessages(uids, folder, operation.targetFolder, expectedUidValidity);
           for (const uid of uids) this.invalidateBodyCache(folder, uid);
           break;
         case 'delete': {
@@ -1351,12 +1356,12 @@ export class MailService {
           if (trashFolder.toLocaleLowerCase() === folder.toLocaleLowerCase()) {
             throw new ValidationError('Message is already in Trash. Use permanentlyDeleteEmail for irreversible deletion.');
           }
-          await this.imapClient.batchMoveMessages(uids, folder, trashFolder);
+          await this.imapClient.batchMoveMessages(uids, folder, trashFolder, expectedUidValidity);
           for (const uid of uids) this.invalidateBodyCache(folder, uid);
           break;
         }
         case 'copy':
-          await this.imapClient.batchCopyMessages(uids, folder, operation.targetFolder);
+          await this.imapClient.batchCopyMessages(uids, folder, operation.targetFolder, expectedUidValidity);
           break;
         case 'label':
           await this.imapClient.batchModifyLabels(
@@ -1364,6 +1369,7 @@ export class MailService {
             folder,
             operation.addLabels ?? [],
             operation.removeLabels ?? [],
+            expectedUidValidity,
           );
           break;
         default:
@@ -1427,7 +1433,7 @@ export class MailService {
       throw new Error('Batch operations are limited to 100 messages at once');
     }
 
-    type ResolvedEntry = { index: number; locator: string; uid: string; mailbox: string };
+    type ResolvedEntry = { index: number; locator: string; uid: string; mailbox: string; uidValidity: string };
     const items: Array<BatchOperationItemResult | undefined> = new Array(locators.length);
     const entries: ResolvedEntry[] = [];
     const identities = new Map<string, Promise<{ path: string; uidValidity: string }>>();
@@ -1452,6 +1458,7 @@ export class MailService {
           locator,
           uid: decoded.uid.toString(),
           mailbox: decoded.mailbox,
+          uidValidity: decoded.uidValidity,
         });
       } catch (error) {
         items[index] = {
@@ -1473,6 +1480,7 @@ export class MailService {
         group.map(entry => ({ uid: entry.uid, locator: entry.locator })),
         mailbox,
         operation,
+        group[0].uidValidity,
       );
       group.forEach((entry, groupIndex) => {
         items[entry.index] = groupItems[groupIndex];

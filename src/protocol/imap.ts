@@ -474,30 +474,32 @@ export class ImapClient {
     return folders.find(folder => folder.specialUse?.toLowerCase() === normalized)?.path;
   }
 
-  async moveMessage(uid: string, sourceFolder: string, targetFolder: string): Promise<void> {
+  async moveMessage(uid: string, sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(sourceFolder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageMove(uid, targetFolder, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async copyMessage(uid: string, sourceFolder: string, targetFolder: string): Promise<CopyMessagesResult> {
-    return await this.copyMessages([uid], sourceFolder, targetFolder);
+  async copyMessage(uid: string, sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<CopyMessagesResult> {
+    return await this.copyMessages([uid], sourceFolder, targetFolder, expectedUidValidity);
   }
 
-  async batchCopyMessages(uids: string[], sourceFolder: string, targetFolder: string): Promise<CopyMessagesResult> {
-    return await this.copyMessages(uids, sourceFolder, targetFolder);
+  async batchCopyMessages(uids: string[], sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<CopyMessagesResult> {
+    return await this.copyMessages(uids, sourceFolder, targetFolder, expectedUidValidity);
   }
 
-  async modifyLabels(uid: string, folder: string, addLabels: string[], removeLabels: string[]): Promise<void> {
+  async modifyLabels(uid: string, folder: string, addLabels: string[], removeLabels: string[], expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       if (addLabels.length > 0) {
         await this.client.messageFlagsAdd(uid, addLabels, { uid: true });
       }
@@ -509,44 +511,48 @@ export class ImapClient {
     }
   }
 
-  async batchMoveMessages(uids: string[], sourceFolder: string, targetFolder: string): Promise<void> {
+  async batchMoveMessages(uids: string[], sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     const lock = await this.client.getMailboxLock(sourceFolder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageMove(sequence, targetFolder, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async deleteMessage(uid: string, folder: string): Promise<void> {
+  async deleteMessage(uid: string, folder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageDelete(uid, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async batchDeleteMessages(uids: string[], folder: string): Promise<void> {
+  async batchDeleteMessages(uids: string[], folder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageDelete(sequence, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async batchModifyLabels(uids: string[], folder: string, addLabels: string[], removeLabels: string[]): Promise<void> {
+  async batchModifyLabels(uids: string[], folder: string, addLabels: string[], removeLabels: string[], expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       if (addLabels.length > 0) {
         await this.client.messageFlagsAdd(sequence, addLabels, { uid: true });
       }
@@ -558,11 +564,12 @@ export class ImapClient {
     }
   }
 
-  async fetchAttachmentSize(uid: string, filename: string, folder: string = 'INBOX'): Promise<number | null> {
+  async fetchAttachmentSize(uid: string, filename: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<number | null> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       const msg = await this.client.fetchOne(uid, { bodyStructure: true }, { uid: true });
       if (!msg || !(msg as any).bodyStructure) return null;
       const bodyStructure = (msg as any).bodyStructure;
@@ -587,7 +594,7 @@ export class ImapClient {
     }
   }
 
-  async fetchRawMessage(uid: string, folder: string = 'INBOX', maxBytes: number = 10 * 1024 * 1024): Promise<Buffer> {
+  async fetchRawMessage(uid: string, folder: string = 'INBOX', maxBytes: number = 10 * 1024 * 1024, expectedUidValidity?: string): Promise<Buffer> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
@@ -596,6 +603,7 @@ export class ImapClient {
 
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       const metadata = await this.client.fetchOne(uid, { size: true }, { uid: true });
       if (!metadata) {
         throw new Error(`Message with UID ${uid} not found`);
@@ -658,7 +666,7 @@ export class ImapClient {
     return results;
   }
 
-  private async copyMessages(uids: string[], sourceFolder: string, targetFolder: string): Promise<CopyMessagesResult> {
+  private async copyMessages(uids: string[], sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<CopyMessagesResult> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     this.validateMailboxPath(sourceFolder);
@@ -666,6 +674,7 @@ export class ImapClient {
 
     const lock = await this.client.getMailboxLock(sourceFolder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       const result = await this.client.messageCopy(sequence, targetFolder, { uid: true });
       if (!result) {
         throw new Error(`IMAP COPY to ${targetFolder} returned no confirmation`);
@@ -680,6 +689,13 @@ export class ImapClient {
       };
     } finally {
       lock.release();
+    }
+  }
+
+  private assertUidValidity(expected?: string): void {
+    // Check the selected generation while holding the same lock as the UID operation.
+    if (expected !== undefined && (!this.client?.mailbox || this.client.mailbox.uidValidity?.toString() !== expected)) {
+      throw new Error('Mailbox identity changed before UID operation');
     }
   }
 

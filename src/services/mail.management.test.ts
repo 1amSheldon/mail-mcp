@@ -205,7 +205,7 @@ describe('MailService cursor and locator contracts', () => {
       size: raw.length,
       contentBase64: raw.toString('base64'),
     });
-    expect(imap.fetchRawMessage).toHaveBeenCalledWith('7', 'INBOX', 1024);
+    expect(imap.fetchRawMessage).toHaveBeenCalledWith('7', 'INBOX', 1024, '123');
   });
 });
 
@@ -362,6 +362,7 @@ describe('MailService reply all and batch safety', () => {
       'INBOX',
       ['\\Seen'],
       [],
+      undefined,
     );
   });
 
@@ -381,6 +382,7 @@ describe('MailService reply all and batch safety', () => {
       'INBOX',
       ['\\Flagged'],
       [],
+      '123',
     );
     expect(result).toEqual({
       processed: 2,
