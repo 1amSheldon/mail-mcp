@@ -92,7 +92,7 @@ describe('installCodex', () => {
     expect(updated).toContain('[mcp_servers.context7]');
     expect(updated).not.toContain('@1amsheldon/mail-mcp@1.5.3');
     expect(updated).not.toContain('OLD_VALUE');
-    expect(updated).toContain('@1amsheldon/mail-mcp@latest');
+    expect(updated).toContain('file:');
     expect(updated).toContain('--prefer-online');
     expect(await readFile(result.backupPath!, 'utf8')).toBe(source);
   });

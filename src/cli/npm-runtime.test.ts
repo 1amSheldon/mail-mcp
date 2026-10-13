@@ -24,7 +24,7 @@ describe('mail-mcp npm runtime command', () => {
       '--prefer-online',
       '--prefix',
       getMailMcpNpxPrefix(home),
-      '--package=@1amsheldon/mail-mcp@latest',
+      `--package=${MAIL_MCP_LATEST_SPEC}`,
       'mail-mcp',
       '--confirm',
       '--audit-log',
@@ -32,7 +32,8 @@ describe('mail-mcp npm runtime command', () => {
   });
 
   it('keeps the exported update contract stable', () => {
-    expect(MAIL_MCP_LATEST_SPEC).toBe('@1amsheldon/mail-mcp@latest');
+    expect(MAIL_MCP_LATEST_SPEC).toMatch(/^file:/);
+    expect(MAIL_MCP_LATEST_SPEC).not.toContain('@1amsheldon');
     expect(NPX_RESOLUTION_ARGS).toEqual(['-y', '--prefer-online']);
   });
 

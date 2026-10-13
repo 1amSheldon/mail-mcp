@@ -1666,7 +1666,7 @@ Options:
         try {
           service = await installWindowsHttpService({
             runtimeArgs: installRuntimeArgs,
-            ...(values['install-codex-local'] ? { localEntrypoint: (await import('node:url')).fileURLToPath(import.meta.url) } : {}),
+            localEntrypoint: (await import('node:url')).fileURLToPath(import.meta.url),
             host: SHARED_HTTP_HOST,
             port: SHARED_HTTP_PORT,
             bearerTokenEnvVar: HTTP_BEARER_TOKEN_ENV,

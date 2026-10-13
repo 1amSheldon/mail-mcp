@@ -1,7 +1,3 @@
-const NPM_LATEST_URL =
-  'https://registry.npmjs.org/@1amsheldon%2fmail-mcp/latest';
-const UPDATE_REQUEST_TIMEOUT_MS = 10_000;
-
 export interface AutoUpdateMonitorOptions {
   currentVersion: string;
   intervalMs: number;
@@ -49,25 +45,7 @@ export function isVersionNewer(candidate: string, current: string): boolean {
 }
 
 export async function fetchLatestPackageVersion(): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), UPDATE_REQUEST_TIMEOUT_MS);
-  timeout.unref();
-  try {
-    const response = await fetch(NPM_LATEST_URL, {
-      headers: { accept: 'application/json' },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`npm registry returned HTTP ${response.status}`);
-    }
-    const body = await response.json() as { version?: unknown };
-    if (typeof body.version !== 'string' || !parseVersion(body.version)) {
-      throw new Error('npm registry returned an invalid package version');
-    }
-    return body.version;
-  } finally {
-    clearTimeout(timeout);
-  }
+  throw new Error('This fork uses reviewed local builds. Update the fork checkout and rebuild; upstream npm updates are disabled.');
 }
 
 export function startAutoUpdateMonitor(
@@ -77,7 +55,9 @@ export function startAutoUpdateMonitor(
     throw new Error('Auto-update interval must be at least 60 seconds');
   }
 
-  const fetchLatestVersion = options.fetchLatestVersion ?? fetchLatestPackageVersion;
+  // Local fork installs must never restart onto an upstream npm package.
+  if (!options.fetchLatestVersion) return { stop() {} };
+  const fetchLatestVersion = options.fetchLatestVersion;
   let stopped = false;
   let timer: NodeJS.Timeout | undefined;
 
