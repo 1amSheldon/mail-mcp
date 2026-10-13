@@ -146,7 +146,7 @@ async function refreshAccessToken(accountId: string, tokens: OAuth2Tokens): Prom
   return result.accessToken;
 }
 
-export async function getValidAccessToken(accountId: string): Promise<string> {
+export async function getValidAccessToken(accountId: string, forceRefresh = false): Promise<string> {
   const data = await loadCredentials(accountId);
   if (!data) {
     throw new Error(`No credentials found for account ${accountId}`);
@@ -154,13 +154,13 @@ export async function getValidAccessToken(accountId: string): Promise<string> {
 
   const tokens = parseTokens(data, accountId);
 
-  // Check if access token is valid (with 1 minute buffer)
-  if (tokens.accessToken && tokens.expiryDate && Date.now() + 60000 < tokens.expiryDate) {
-    return tokens.accessToken;
-  }
-
   const existing = refreshes.get(accountId);
   if (existing) return existing;
+
+  // Check if access token is valid (with 1 minute buffer)
+  if (!forceRefresh && tokens.accessToken && tokens.expiryDate && Date.now() + 60000 < tokens.expiryDate) {
+    return tokens.accessToken;
+  }
 
   const refresh = refreshAccessToken(accountId, tokens).finally(() => {
     if (refreshes.get(accountId) === refresh) {

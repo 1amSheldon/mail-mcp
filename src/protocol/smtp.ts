@@ -160,9 +160,19 @@ export class SmtpClient {
     const authConfig: Record<string, unknown> = { user: this.account.user };
 
     if (this.account.authType === 'oauth2') {
-      const accessToken = await getValidAccessToken(this.account.id);
       authConfig.type = 'OAuth2';
-      authConfig.accessToken = accessToken;
+      authConfig.provisionCallback = (
+        _user: string,
+        renew: boolean,
+        callback: (error: Error | null, token?: string, expires?: number) => void,
+      ) => {
+        void getValidAccessToken(this.account.id, renew).then(
+          // Token caching and expiry belong to our credential store. Ask it on
+          // every new SMTP connection, including after workstation sleep.
+          token => callback(null, token, Date.now() - 1),
+          error => callback(error instanceof Error ? error : new Error('OAuth2 token refresh failed')),
+        );
+      };
     } else {
       const password = await loadCredentials(this.account.id);
       if (!password) {

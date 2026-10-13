@@ -8,7 +8,10 @@ const mocks = vi.hoisted(() => ({
   send: vi.fn(),
   verify: vi.fn(),
   close: vi.fn(),
+  getToken: vi.fn(),
 }));
+
+vi.mock('../security/oauth2.js', () => ({ getValidAccessToken: mocks.getToken }));
 
 vi.mock('../security/keychain.js', () => ({
   loadCredentials: vi.fn(() => Promise.resolve('test-password')),
@@ -68,6 +71,23 @@ describe('SmtpClient', () => {
     expect(mocks.verify).toHaveBeenCalledTimes(1);
     release();
     await Promise.all([first, second]);
+  });
+
+  it('consults the credential store on each OAuth connection and honors renewal', async () => {
+    const client = new SmtpClient({ ...account, authType: 'oauth2' });
+    await client.connect();
+    const options = vi.mocked(nodemailer.createTransport).mock.calls.at(-1)![0] as any;
+    expect(options.auth.accessToken).toBeUndefined();
+    const callback = options.auth.provisionCallback;
+    mocks.getToken.mockResolvedValueOnce('first').mockResolvedValueOnce('renewed');
+    const get = (renew: boolean) => new Promise<any[]>((resolve, reject) => {
+      callback(account.user, renew, (error: Error | null, ...values: any[]) => error ? reject(error) : resolve(values));
+    });
+    const [first, expiry] = await get(false);
+    expect(first).toBe('first');
+    expect(expiry).toBeLessThan(Date.now());
+    expect((await get(true))[0]).toBe('renewed');
+    expect(mocks.getToken.mock.calls).toEqual([[account.id, false], [account.id, true]]);
   });
 
   it('requires STARTTLS by default on submission ports', async () => {

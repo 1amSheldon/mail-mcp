@@ -59,6 +59,21 @@ describe('OAuth2 access token refresh', () => {
     expect(keychain.saveCredentials).toHaveBeenCalledOnce();
   });
 
+  it('replaces a rejected token even when its stored expiry is still valid', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ access_token: 'replacement-token', expires_in: 3600 }),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify({
+      ...tokenSet, accessToken: 'revoked-token', expiryDate: Date.now() + 3_600_000,
+    }));
+    await expect(Promise.all([
+      getValidAccessToken('work', true), getValidAccessToken('work', true),
+    ])).resolves.toEqual(['replacement-token', 'replacement-token']);
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
   it('rejects a successful response without an access token', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
