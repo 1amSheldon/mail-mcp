@@ -234,6 +234,9 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       return `Send email to ${args.to as string} with subject '${args.subject as string}'`;
     case 'create_draft':
       return `Save draft to ${args.to as string} with subject '${args.subject as string}'`;
+    case 'create_reply_draft':
+    case 'create_reply_all_draft':
+      return `Save ${toolName === 'create_reply_all_draft' ? 'reply-all' : 'reply'} draft for ${args.locator as string} without sending`;
     case 'update_draft':
       return `Update server draft ${args.draftId ?? args.locator}`;
     case 'send_draft':
@@ -789,6 +792,7 @@ export class MailMCPServer {
             ...(args.bcc ? { bcc: args.bcc as string } : {}),
             includeSignature: args.includeSignature !== false,
             includeOriginalAttachments: args.includeOriginalAttachments === true,
+            ...(args.attachments !== undefined ? { attachments: args.attachments as OutgoingAttachment[] } : {}),
           },
         );
         return trackResult(formatDeliveryResult(result));
@@ -1050,6 +1054,30 @@ export class MailMCPServer {
           ? await service.sendDraft(target)
           : await service.updateDraft(target, changes!);
         return trackResult(formatDeliveryResult(result));
+      }
+
+      if (name === 'create_reply_draft' || name === 'create_reply_all_draft') {
+        if (typeof args.locator !== 'string' || !args.locator.trim()) throw new Error('locator is required');
+        if (typeof args.body !== 'string') throw new Error('body must be a string');
+        for (const field of ['isHtml', 'includeSignature', 'includeOriginalAttachments']) {
+          if (args[field] !== undefined && typeof args[field] !== 'boolean') throw new Error(`${field} must be a boolean`);
+        }
+        for (const field of ['cc', 'bcc']) {
+          if (args[field] !== undefined && typeof args[field] !== 'string') throw new Error(`${field} must be a string`);
+        }
+        if (args.attachments !== undefined && !Array.isArray(args.attachments)) throw new Error('attachments must be an array');
+        validateEmailAddresses('placeholder@example.com', args.cc as string | undefined, args.bcc as string | undefined);
+        const service = await this.getService(args.accountId as string);
+        const draft = await service.createReplyDraft(args.locator, args.body, {
+          replyAll: name === 'create_reply_all_draft',
+          isHtml: args.isHtml === true,
+          includeSignature: args.includeSignature !== false,
+          includeOriginalAttachments: args.includeOriginalAttachments === true,
+          ...(args.cc !== undefined ? { cc: args.cc as string } : {}),
+          ...(args.bcc !== undefined ? { bcc: args.bcc as string } : {}),
+          ...(args.attachments !== undefined ? { attachments: args.attachments as OutgoingAttachment[] } : {}),
+        });
+        return trackResult({ content: [{ type: 'text', text: JSON.stringify(draft, null, 2) }] });
       }
 
       if (name === 'create_draft') {

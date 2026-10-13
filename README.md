@@ -239,6 +239,22 @@ Nested audit fields are sanitized. Provider errors are reduced to safe codes and
 
 For IMAP/SMTP accounts, `createDraft` returns a stable `draftId`. Keep it to edit or send the same draft later:
 
+This fork also exposes `createReplyDraft` and `createReplyAllDraft`. Call either through
+`mail_mutate` with `{ accountId, operation, input: { locator, body } }` after reading the source.
+They save to Drafts without sending and derive `In-Reply-To`, the `References` chain, the subject
+and recipients from that source. A missing source Message-ID is an error. Optional input fields:
+`isHtml`, `cc`, `bcc`, `includeSignature`, `includeOriginalAttachments`, and `attachments`.
+Explicit `cc` replaces inferred CC; `""` clears it. Use `updateDraft` to edit To/CC further.
+Reply-all removes the account, aliases and duplicate recipients. The body is saved as supplied,
+without automatically quoting the original. Inspect the returned draft, keep its `draftId`, and
+call `sendDraft` only when sending is authorized. Existing read-only, allowlist, confirmation,
+recipient and attachment restrictions apply.
+
+`replyAll` also accepts new attachments through the MCP router. Set
+`includeOriginalAttachments: true` to retain the source attachments alongside new ones.
+Attachments use `{ path }` or `{ filename, contentBase64 }`; normal size and path limits apply.
+The `reply` and `replyAll` operations send after confirmation; they do not create drafts.
+
 ```json
 {"accountId":"work","operation":"updateDraft","input":{"draftId":"returned-id","changes":{"subject":"Revised subject","textBody":"Ready for review."}}}
 ```

@@ -44,7 +44,7 @@ Use \`mail_query\` with one of these operations:
 
 Use \`mail_mutate\` with one of these operations:
 
-- Compose: \`sendMessage\`, \`createDraft\`, \`updateDraft\`, \`sendDraft\`, \`reply\`, \`replyAll\`, \`forward\`.
+- Compose: \`sendMessage\`, \`createDraft\`, \`createReplyDraft\`, \`createReplyAllDraft\`, \`updateDraft\`, \`sendDraft\`, \`reply\`, \`replyAll\`, \`forward\`.
 - Messages: \`copyMessage\`, \`moveMessage\`, \`modifyLabels\`, \`batchMessages\`, \`moveToTrash\`, \`permanentlyDelete\`, \`markRead\`, \`markUnread\`, \`star\`, \`unstar\`.
 - Mailboxes and setup: \`createMailbox\`, \`renameMailbox\`, \`deleteMailbox\`, \`registerOAuth2\`.
 - ManageSieve: \`setFilter\`, \`deleteFilter\`.
@@ -74,6 +74,20 @@ and return the current locator. Never guess a missing draft by subject.
 Schedule sendDraft with a stable draftId only after user approval. Cancel the local schedule
 when the user reports scheduling or sending in their webmail. Webmail schedules are not discovered automatically.
 Do not resend accepted or unknown outcomes, including retained drafts awaiting archive verification.
+
+Threaded reply drafts: use createReplyDraft or createReplyAllDraft with input { locator, body }.
+Read the source first. These operations save a server draft without sending. They derive the
+subject, recipients, In-Reply-To and References from the source and require its Message-ID.
+Optional fields: isHtml, cc, bcc, includeSignature, includeOriginalAttachments, attachments.
+CC replaces the inferred CC list when provided; an empty string clears it. Reply-all excludes
+the account and configured aliases and deduplicates recipients. Review recipients after creation;
+use updateDraft for further To/CC edits. The body is used as supplied; quoted history is not added.
+Keep the returned draftId and locator, inspect the saved draft, then sendDraft only when authorized.
+reply and replyAll send immediately after confirmation; never use them to prepare a draft.
+replyAll accepts new attachments and optionally retains original attachments with
+includeOriginalAttachments: true. Each attachment uses { path } or { filename, contentBase64 },
+with optional contentType, contentDisposition and cid. Normal attachment limits still apply.
+Generic createDraft does not infer reply threading; adding Re: to its subject is insufficient.
 
 List messages with \`{ "folder": "INBOX", "limit": 25 }\`. Continue with the returned cursor. Read or mutate a message using its returned \`locator\`; do not rebuild locators. Send with \`{ "to": "user@example.com", "subject": "Subject", "body": "Body" }\`. Attachments, recipient lists, filters, and provider requests use the fields described by the selected account's capabilities and validation errors.`;
 

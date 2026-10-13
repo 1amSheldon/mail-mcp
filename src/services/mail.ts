@@ -86,6 +86,14 @@ export interface MailSendMessage extends SmtpOutgoingMessage {
   includeSignature?: boolean;
 }
 
+export interface ReplyOptions {
+  isHtml?: boolean;
+  bcc?: string;
+  includeSignature?: boolean;
+  includeOriginalAttachments?: boolean;
+  attachments?: OutgoingAttachment[];
+}
+
 export interface LocatedMessageMetadata extends Omit<MessageMetadata, 'id'> {
   id: string;
   locator: string;
@@ -632,16 +640,68 @@ export class MailService {
   async replyAllEmail(
     locator: string,
     body: string,
-    options: {
-      isHtml?: boolean;
-      bcc?: string;
-      includeSignature?: boolean;
-      includeOriginalAttachments?: boolean;
-      attachments?: OutgoingAttachment[];
-    } = {}
+    options: ReplyOptions = {}
   ): Promise<SendDeliveryResult> {
     const resolved = await this.resolveLocator(locator);
     const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox);
+    return this.sendMessage(this.replyAllMessage(parsed, body, options));
+  }
+
+  async createReplyDraft(
+    locator: string,
+    body: string,
+    options: ReplyOptions & { replyAll?: boolean; cc?: string } = {},
+  ): Promise<DraftCreationResult> {
+    const resolved = await this.resolveLocator(locator);
+    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox);
+    if (!parsed.messageId) {
+      throw new ValidationError('Cannot create a threaded reply draft: the original message has no Message-ID.');
+    }
+    let message: MailSendMessage;
+    if (options.replyAll) {
+      message = this.replyAllMessage(parsed, body, options);
+    } else {
+      const to = parsed.replyTo?.value[0]?.address ?? parsed.from?.value[0]?.address;
+      if (!to) throw new ValidationError('Cannot reply because the original message has no valid From address.');
+      message = {
+        to,
+        subject: /^re:/i.test(parsed.subject ?? '') ? parsed.subject! : `Re: ${parsed.subject ?? ''}`,
+        ...(options.isHtml ? { html: body } : { text: body }),
+        ...(options.bcc ? { bcc: options.bcc } : {}),
+        attachments: this.replyAttachments(parsed, options),
+        threading: this.replyThreading(parsed),
+        includeSignature: options.includeSignature ?? true,
+      };
+    }
+    // Explicit CC replaces inferred CC; an empty string clears it.
+    if (options.cc !== undefined) message.cc = options.cc;
+    return this.createDraftMessage(message);
+  }
+
+  private replyThreading(parsed: ParsedMail): SmtpOutgoingMessage['threading'] {
+    if (!parsed.messageId) return {};
+    const existing = parsed.references ?? parsed.headers.get('references');
+    const chain = Array.isArray(existing) ? existing.join(' ') : existing ? String(existing) : '';
+    return {
+      inReplyTo: parsed.messageId,
+      references: `${chain ? chain + ' ' : ''}${parsed.messageId}`,
+    };
+  }
+
+  private replyAttachments(parsed: ParsedMail, options: ReplyOptions): OutgoingAttachment[] {
+    const original: OutgoingAttachment[] = options.includeOriginalAttachments
+      ? (parsed.attachments ?? []).map(attachment => ({
+          contentBase64: attachment.content.toString('base64'),
+          filename: attachment.filename || 'attachment',
+          contentType: attachment.contentType,
+          contentDisposition: attachment.contentDisposition === 'inline' ? 'inline' : 'attachment',
+          ...(attachment.contentId ? { cid: attachment.contentId } : {}),
+        }))
+      : [];
+    return [...original, ...(options.attachments ?? [])];
+  }
+
+  private replyAllMessage(parsed: ParsedMail, body: string, options: ReplyOptions): MailSendMessage {
     const selfAddresses = [this.account.user, ...(this.account.fromAliases ?? [])]
       .map(address => address.trim().toLowerCase());
     const seen = new Set<string>(selfAddresses);
@@ -668,38 +728,21 @@ export class MailService {
       throw new ValidationError('Cannot reply all because the original message has no recipient other than this account.');
     }
 
-    const originalMessageId = parsed.messageId;
-    const existingReferences = parsed.headers.get('references');
-    const references = originalMessageId
-      ? `${existingReferences ? String(existingReferences) + ' ' : ''}${originalMessageId}`
-      : undefined;
-    const subject = parsed.subject?.startsWith('Re: ')
+    const subject = /^re:/i.test(parsed.subject ?? '')
       ? parsed.subject
       : `Re: ${parsed.subject ?? ''}`;
-    const originalAttachments: OutgoingAttachment[] = options.includeOriginalAttachments
-      ? (parsed.attachments ?? []).map(attachment => ({
-          contentBase64: attachment.content.toString('base64'),
-          filename: attachment.filename || 'attachment',
-          contentType: attachment.contentType,
-          contentDisposition: attachment.contentDisposition === 'inline' ? 'inline' : 'attachment',
-          ...(attachment.contentId ? { cid: attachment.contentId } : {}),
-        }))
-      : [];
-    const attachments = [...originalAttachments, ...(options.attachments ?? [])];
+    const attachments = this.replyAttachments(parsed, options);
 
-    return this.sendMessage({
+    return {
       to: toRecipients.join(', '),
-      subject,
+      subject: subject!,
       ...(options.isHtml ? { html: body } : { text: body }),
       ...(ccRecipients.length > 0 ? { cc: ccRecipients.join(', ') } : {}),
       ...(options.bcc ? { bcc: options.bcc } : {}),
       ...(attachments.length > 0 ? { attachments } : {}),
-      threading: {
-        ...(originalMessageId ? { inReplyTo: originalMessageId } : {}),
-        ...(references ? { references } : {}),
-      },
+      threading: this.replyThreading(parsed),
       includeSignature: options.includeSignature ?? true,
-    });
+    };
   }
 
   private addresses(value: ParsedMail['to'] | ParsedMail['cc']): Array<string | undefined> {

@@ -18,6 +18,18 @@ do not download a whole mailbox to filter it locally. Other backends use their o
 
 ## Server draft workflow
 
+For a reply draft, first read the original message, then use `createReplyDraft` or
+`createReplyAllDraft` with `input: { locator, body }`. These save without sending and derive
+the subject, recipients and threading headers from the original Message-ID. Optional fields:
+`isHtml`, `cc`, `bcc`, `includeSignature`, `includeOriginalAttachments`, `attachments`.
+Explicit `cc` replaces inferred CC (`""` clears it). Review the saved recipients; use
+`updateDraft` for further To/CC edits. The body is used as supplied, without automatic quoted history.
+Preserve `draftId` and inspect the saved draft before sending. A missing source Message-ID is
+an error; do not silently replace a threaded reply with a generic `createDraft`.
+`reply` and `replyAll` send after confirmation, so never use them to prepare a draft.
+`replyAll` accepts new `attachments` and optionally retains original attachments with
+`includeOriginalAttachments: true`. Attachments use `{ path }` or `{ filename, contentBase64 }`.
+
 For IMAP/SMTP, createDraft returns draftId plus the usual locator. Preserve draftId for scheduled work.
 Use mail_mutate updateDraft with input { draftId, changes }; changes supports to, cc, bcc, subject,
 textBody, htmlBody and attachments. Unspecified fields remain unchanged. Attachments is a full
