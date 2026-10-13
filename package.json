@@ -68,6 +68,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xmldom/xmldom": "^0.9.12",
     "cross-keychain": "^1.1.0",
     "imapflow": "^1.6.5",
     "mailparser": "^3.9.15",

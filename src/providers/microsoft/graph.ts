@@ -63,6 +63,50 @@ export interface GraphMessageSummary {
   receivedDateTime?: string;
 }
 
+export interface GraphMessage extends GraphMessageSummary {
+  body?: { contentType: string; content: string };
+  from?: { emailAddress: { address: string; name?: string } };
+  toRecipients: Array<{ emailAddress: { address: string; name?: string } }>;
+  ccRecipients: Array<{ emailAddress: { address: string; name?: string } }>;
+  bccRecipients: Array<{ emailAddress: { address: string; name?: string } }>;
+  sentDateTime?: string;
+  hasAttachments?: boolean;
+  attachments: Array<{ id: string; name?: string; contentType?: string; size?: number; isInline?: boolean }>;
+}
+
+function parseDetailedMessage(value: unknown): GraphMessage {
+  const summary = parseMessage(value);
+  const record = value as Record<string, any>;
+  const address = (item: any): GraphMessage['from'] => {
+    if (typeof item?.emailAddress?.address !== 'string') return undefined;
+    return { emailAddress: { address: item.emailAddress.address,
+      ...(typeof item.emailAddress.name === 'string' ? { name: item.emailAddress.name } : {}),
+    } };
+  };
+  const addresses = (items: unknown): GraphMessage['toRecipients'] => Array.isArray(items)
+    ? items.flatMap(item => { const result = address(item); return result ? [result] : []; }) : [];
+  return {
+    ...summary,
+    ...(typeof record.body?.content === 'string' && typeof record.body?.contentType === 'string'
+      ? { body: { content: record.body.content, contentType: record.body.contentType } } : {}),
+    ...(address(record.from) ? { from: address(record.from) } : {}),
+    toRecipients: addresses(record.toRecipients),
+    ccRecipients: addresses(record.ccRecipients),
+    bccRecipients: addresses(record.bccRecipients),
+    ...(typeof record.sentDateTime === 'string' ? { sentDateTime: record.sentDateTime } : {}),
+    ...(typeof record.hasAttachments === 'boolean' ? { hasAttachments: record.hasAttachments } : {}),
+    attachments: Array.isArray(record.attachments) ? record.attachments.flatMap((item: any) => {
+      if (typeof item?.id !== 'string') return [];
+      return [{ id: item.id,
+        ...(typeof item.name === 'string' ? { name: item.name } : {}),
+        ...(typeof item.contentType === 'string' ? { contentType: item.contentType } : {}),
+        ...(typeof item.size === 'number' ? { size: item.size } : {}),
+        ...(typeof item.isInline === 'boolean' ? { isInline: item.isInline } : {}),
+      }];
+    }) : [],
+  };
+}
+
 export interface GraphThreadWarning {
   code:
     | 'conversation_lookup_failed'
@@ -266,13 +310,14 @@ export class MicrosoftGraphClient {
     };
   }
 
-  async getMessage(messageId: string): Promise<GraphMessageSummary> {
+  async getMessage(messageId: string): Promise<GraphMessage> {
     if (!messageId) {
       throw new MicrosoftProviderError('graph', 'validation', 'Graph message id is required');
     }
-    return parseMessage(await this.requestJson(
+    return parseDetailedMessage(await this.requestJson(
       `${this.mailboxPath}/messages/${encodePathSegment(messageId)}?${new URLSearchParams({
-        '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime',
+        '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime,sentDateTime,body,from,toRecipients,ccRecipients,bccRecipients,hasAttachments',
+        '$expand': 'attachments($select=id,name,contentType,size,isInline)',
       })}`,
     ));
   }

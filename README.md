@@ -192,6 +192,8 @@ Provider operations use a prefix, for example `apple.listMessages`, `microsoft.s
 
 `microsoft.searchMessages` is available through EWS. Microsoft Graph supports ID lookup, Internet Message-ID lookup, and thread lookup instead.
 
+`microsoft.getMessage` returns the full text or HTML body with its content type, sender, recipients, dates and attachment metadata. Search and thread operations return compact summaries. Attachment bytes are not embedded in message reads. Returned HTML is email content and must be treated as untrusted by clients; the server's configured text redaction also applies to provider message bodies.
+
 Moving to Trash and permanent deletion remain separate operations: `moveToTrash` and `permanentlyDelete`.
 
 ## Account configuration

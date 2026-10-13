@@ -15,6 +15,8 @@ import type {
   MicrosoftSendResult,
   MicrosoftTokenProvider,
 } from './common.js';
+import { child, elements, parseEwsXml, textChild } from './xml.js';
+import type { Element } from '@xmldom/xmldom';
 
 export interface EwsClientOptions {
   endpoint: string;
@@ -28,6 +30,52 @@ export interface EwsMessageSummary {
   changeKey?: string;
   subject?: string;
   internetMessageId?: string;
+}
+
+export interface EwsMailbox { address: string; name?: string }
+export interface EwsMessage extends EwsMessageSummary {
+  body?: { contentType: string; content: string };
+  from?: EwsMailbox;
+  toRecipients: EwsMailbox[];
+  ccRecipients: EwsMailbox[];
+  bccRecipients: EwsMailbox[];
+  receivedDateTime?: string;
+  sentDateTime?: string;
+  attachments: Array<{ id: string; name?: string; contentType?: string; size?: number; isInline?: boolean }>;
+}
+
+function parseMailbox(node: Element): EwsMailbox[] {
+  return elements(node, 'Mailbox').flatMap(mailbox => {
+    const address = textChild(mailbox, 'EmailAddress');
+    return address ? [{ address, ...(textChild(mailbox, 'Name') ? { name: textChild(mailbox, 'Name') } : {}) }] : [];
+  });
+}
+
+function detailedMessage(node: Element, summary: EwsMessageSummary): EwsMessage {
+  const body = child(node, 'Body');
+  const addresses = (name: string) => { const group = child(node, name); return group ? parseMailbox(group) : []; };
+  const attachmentGroup = child(node, 'Attachments');
+  return {
+    ...summary,
+    ...(body ? { body: { contentType: body.getAttribute('BodyType') || 'Text', content: body.textContent ?? '' } } : {}),
+    ...(addresses('From')[0] ? { from: addresses('From')[0] } : {}),
+    toRecipients: addresses('ToRecipients'), ccRecipients: addresses('CcRecipients'), bccRecipients: addresses('BccRecipients'),
+    ...(textChild(node, 'DateTimeReceived') ? { receivedDateTime: textChild(node, 'DateTimeReceived') } : {}),
+    ...(textChild(node, 'DateTimeSent') ? { sentDateTime: textChild(node, 'DateTimeSent') } : {}),
+    attachments: attachmentGroup ? Array.from(attachmentGroup.childNodes).flatMap(item => {
+      if (item.nodeType !== 1) return [];
+      const attachment = item as Element;
+      const id = child(attachment, 'AttachmentId')?.getAttribute('Id');
+      if (!id) return [];
+      const size = textChild(attachment, 'Size');
+      return [{ id,
+        ...(textChild(attachment, 'Name') !== undefined ? { name: textChild(attachment, 'Name') } : {}),
+        ...(textChild(attachment, 'ContentType') ? { contentType: textChild(attachment, 'ContentType') } : {}),
+        ...(size !== undefined && Number.isFinite(Number(size)) ? { size: Number(size) } : {}),
+        ...(textChild(attachment, 'IsInline') !== undefined ? { isInline: textChild(attachment, 'IsInline') === 'true' } : {}),
+      }];
+    }) : [],
+  };
 }
 
 export interface EwsSearchOptions {
@@ -75,24 +123,22 @@ function responseCode(xml: string): string | undefined {
   return childText(xml, 'ResponseCode');
 }
 
-function parseMessages(xml: string): EwsMessageSummary[] {
+function parseMessages(xml: string, detailed = false): Array<EwsMessageSummary | EwsMessage> {
   const messages: EwsMessageSummary[] = [];
-  const messagePattern = /<[^:>]+:Message(?:\s[^>]*)?>([\s\S]*?)<\/[^:>]+:Message>/gi;
-  for (const match of xml.matchAll(messagePattern)) {
-    const value = match[1];
-    const idMatch = /<[^:>]+:ItemId\s+([^>]*?)\/?\s*>/i.exec(value);
-    if (!idMatch) continue;
-    const id = /\bId="([^"]+)"/i.exec(idMatch[1]);
+  for (const value of elements(parseEwsXml(xml), 'Message')) {
+    const idNode = child(value, 'ItemId');
+    const id = idNode?.getAttribute('Id');
     if (!id) continue;
-    const changeKey = /\bChangeKey="([^"]+)"/i.exec(idMatch[1]);
-    messages.push({
-      itemId: unescapeXml(id[1]),
-      ...(changeKey ? { changeKey: unescapeXml(changeKey[1]) } : {}),
-      ...(childText(value, 'Subject') ? { subject: childText(value, 'Subject') } : {}),
-      ...(childText(value, 'InternetMessageId')
-        ? { internetMessageId: childText(value, 'InternetMessageId') }
+    const changeKey = idNode?.getAttribute('ChangeKey');
+    const summary = {
+      itemId: id,
+      ...(changeKey ? { changeKey } : {}),
+      ...(textChild(value, 'Subject') !== undefined ? { subject: textChild(value, 'Subject') } : {}),
+      ...(textChild(value, 'InternetMessageId')
+        ? { internetMessageId: textChild(value, 'InternetMessageId') }
         : {}),
-    });
+    };
+    messages.push(detailed ? detailedMessage(value, summary) : summary);
   }
   return messages;
 }
@@ -168,7 +214,7 @@ export class EwsClient {
     return parseMessages(await this.soap('FindItem', operation, false));
   }
 
-  async getMessage(itemId: string): Promise<EwsMessageSummary> {
+  async getMessage(itemId: string): Promise<EwsMessage> {
     if (!itemId) {
       throw new MicrosoftProviderError('ews', 'validation', 'EWS item id is required');
     }
@@ -178,11 +224,11 @@ export class EwsClient {
       + '</m:ItemShape>'
       + `<m:ItemIds><t:ItemId Id="${escapeXml(itemId)}" /></m:ItemIds>`
       + '</m:GetItem>';
-    const messages = parseMessages(await this.soap('GetItem', operation, false));
+    const messages = parseMessages(await this.soap('GetItem', operation, false), true);
     if (messages.length === 0) {
       throw new MicrosoftProviderError('ews', 'invalid_response', 'EWS GetItem response did not contain a message');
     }
-    return messages[0];
+    return messages[0] as EwsMessage;
   }
 
   async sendMessage(message: MicrosoftMessageContent): Promise<MicrosoftSendResult> {

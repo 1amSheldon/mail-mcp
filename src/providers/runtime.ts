@@ -54,10 +54,11 @@ import type {
 } from './mailtrap/types.js';
 import type { MicrosoftMessageContent, MicrosoftSendResult } from './microsoft/common.js';
 import { EwsClient } from './microsoft/ews.js';
-import type { EwsMessageSummary, EwsSearchOptions } from './microsoft/ews.js';
+import type { EwsMessage, EwsMessageSummary, EwsSearchOptions } from './microsoft/ews.js';
 import { MicrosoftGraphClient } from './microsoft/graph.js';
 import type {
   GraphMessageSummary,
+  GraphMessage,
   GraphThreadResult,
 } from './microsoft/graph.js';
 import type { PaginationPage, PaginationScope } from '../utils/pagination-store.js';
@@ -171,7 +172,7 @@ export interface MicrosoftReadInputMap {
 }
 
 export interface MicrosoftReadResultMap {
-  getMessage: GraphMessageSummary | EwsMessageSummary;
+  getMessage: GraphMessage | EwsMessage;
   findByInternetMessageId: GraphMessageSummary[];
   getThread: GraphThreadResult;
   searchMessages: EwsMessageSummary[];

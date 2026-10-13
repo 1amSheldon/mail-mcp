@@ -23,6 +23,25 @@ function message(attachments: MicrosoftMessageContent['attachments'] = []): Micr
 }
 
 describe('MicrosoftGraphClient', () => {
+  it('reads body, recipients and attachment metadata without returning attachment bytes', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(JSON.stringify({
+      id: 'one', subject: 'Subject', body: { contentType: 'html', content: '<p>Full body</p>' },
+      from: { emailAddress: { name: 'Sender', address: 'from@example.com' } },
+      toRecipients: [{ emailAddress: { address: 'to@example.com' } }],
+      ccRecipients: [{ emailAddress: { address: 'cc@example.com' } }],
+      hasAttachments: true,
+      attachments: [{ id: 'a1', name: 'a.txt', size: 5, contentBytes: 'c2VjcmV0' }],
+    })));
+    const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+    const result = await client.getMessage('one');
+    expect(result).toMatchObject({ body: { contentType: 'html', content: '<p>Full body</p>' },
+      from: { emailAddress: { name: 'Sender', address: 'from@example.com' } },
+      toRecipients: [{ emailAddress: { address: 'to@example.com' } }],
+      attachments: [{ id: 'a1', name: 'a.txt', size: 5 }],
+    });
+    expect(result.attachments[0]).not.toHaveProperty('contentBytes');
+    expect(requestUrl(fetchMock.mock.calls[0][0]).searchParams.get('$select')).toContain('body');
+  });
   it('sends sub-3 MiB inline attachments in one sendMail request', async () => {
     const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(null, {
       status: 202,
