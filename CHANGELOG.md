@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.2.0 - 2026-10-13
 
 - Expand Zimbra user-mailbox integration with MIME uploads, reply/reply-all/forward,
   partial draft edits, immutable send snapshots, durable attempt recovery and
