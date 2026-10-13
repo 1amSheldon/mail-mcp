@@ -231,62 +231,62 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         }
         pendingInitializations++;
         try {
-        let body: unknown;
-        try {
-          body = await readJsonBody(req);
-        } catch (error) {
-          respondToBodyError(res, error);
-          return;
-        }
-
-        if (!isInitializeRequest(body)) {
-          rpcError(res, 400, 'Missing MCP session or initialize request');
-          return;
-        }
-
-        let evicted: Promise<void> | undefined;
-        if (sessions.size >= maxSessions) {
-          const oldestIdle = Array.from(sessions.values())
-            .filter(session => session.activeRequests === 0)
-            .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
-          if (!oldestIdle) {
-            rpcError(res, 503, 'Too many active MCP sessions');
+          let body: unknown;
+          try {
+            body = await readJsonBody(req);
+          } catch (error) {
+            respondToBodyError(res, error);
             return;
           }
-          evicted = closeSession(oldestIdle);
-        }
 
-        const mcpServer = options.createSession();
-        const sessionId = randomUUID();
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => sessionId,
-        });
-        record = {
-          id: sessionId,
-          transport,
-          server: mcpServer,
-          activeRequests: 1,
-          lastUsedAt: Date.now(),
-        };
-        sessions.set(sessionId, record);
-        transport.onclose = () => {
-          void closeSession(record!);
-        };
+          if (!isInitializeRequest(body)) {
+            rpcError(res, 400, 'Missing MCP session or initialize request');
+            return;
+          }
 
-        try {
-          // Reserve the replacement before awaiting cleanup of the evicted
-          // session; another initializer must not take that same free slot.
-          await evicted;
-          await mcpServer.connect(transport);
-          await transport.handleRequest(req, res, body);
-        } catch (error) {
-          await closeSession(record);
-          throw error;
-        } finally {
-          record.activeRequests--;
-          record.lastUsedAt = Date.now();
-        }
-        return;
+          let evicted: Promise<void> | undefined;
+          if (sessions.size >= maxSessions) {
+            const oldestIdle = Array.from(sessions.values())
+              .filter(session => session.activeRequests === 0)
+              .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+            if (!oldestIdle) {
+              rpcError(res, 503, 'Too many active MCP sessions');
+              return;
+            }
+            evicted = closeSession(oldestIdle);
+          }
+
+          const mcpServer = options.createSession();
+          const sessionId = randomUUID();
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => sessionId,
+          });
+          record = {
+            id: sessionId,
+            transport,
+            server: mcpServer,
+            activeRequests: 1,
+            lastUsedAt: Date.now(),
+          };
+          sessions.set(sessionId, record);
+          transport.onclose = () => {
+            void closeSession(record!);
+          };
+
+          try {
+            // Reserve the replacement before awaiting cleanup of the evicted
+            // session; another initializer must not take that same free slot.
+            await evicted;
+            await mcpServer.connect(transport);
+            await transport.handleRequest(req, res, body);
+          } catch (error) {
+            await closeSession(record);
+            throw error;
+          } finally {
+            record.activeRequests--;
+            record.lastUsedAt = Date.now();
+          }
+          return;
         } finally {
           pendingInitializations--;
         }

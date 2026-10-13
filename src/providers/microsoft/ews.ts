@@ -1,3 +1,4 @@
+import { readBoundedResponseText } from '../../utils/http-body.js';
 import {
   assertMessageContent,
   attachmentBytes,
@@ -354,4 +355,3 @@ export class EwsClient {
     return { response, body };
   }
 }
-import { readBoundedResponseText } from '../../utils/http-body.js';

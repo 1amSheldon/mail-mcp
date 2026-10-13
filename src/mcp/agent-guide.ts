@@ -38,6 +38,9 @@ Use \`mail_query\` with one of these operations:
 - ManageSieve: \`listFilters\`, \`getFilter\`.
 - Apple Mail: \`apple.listAccounts\`, \`apple.listMailboxes\`, \`apple.listMessages\`, \`apple.searchMessages\`, \`apple.readMessage\`, \`apple.getRawSource\`, \`apple.listRules\`.
 - Microsoft: \`microsoft.getMessage\`, \`microsoft.findByInternetMessageId\`, and \`microsoft.getThread\` for Graph; \`microsoft.getMessage\` and \`microsoft.searchMessages\` for EWS.
+- Microsoft lookup/search results contain \`messages\` and \`partial\`. For EWS, continue only with the returned \`nextOffset\` as \`offset\` and unchanged search options. Never infer absence from a partial result.
+- Apple Mail rules affect every account in Mail.app and require locally configured \`allowGlobalRules: true\`. The account selector does not constrain rule matches.
+- Raw RFC 822 and binary attachments are unsanitized originals even with text redaction enabled. Unknown send outcomes prohibit automatic retries; inspect Sent/Outbox/provider logs first.
 - Mailtrap: \`mailtrap.templates\`, \`mailtrap.sandbox\`, \`mailtrap.email_logs\`, \`mailtrap.stats\`, \`mailtrap.inbound\`, \`mailtrap.domains\`, \`mailtrap.suppressions\`, \`mailtrap.webhooks\`, \`mailtrap.contacts\`, \`mailtrap.contact_lists\`, \`mailtrap.contact_fields\`, \`mailtrap.contact_imports\`, \`mailtrap.contact_exports\`, \`mailtrap.campaigns\`, \`mailtrap.accounts\`.
 
 ## Write operations

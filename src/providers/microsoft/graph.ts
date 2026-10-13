@@ -1,3 +1,4 @@
+import { readBoundedResponseText } from '../../utils/http-body.js';
 import {
   assertMessageContent,
   attachmentBytes,
@@ -658,4 +659,3 @@ export class MicrosoftGraphClient {
     return response;
   }
 }
-import { readBoundedResponseText } from '../../utils/http-body.js';

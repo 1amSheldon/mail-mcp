@@ -1,3 +1,4 @@
+import { readBoundedResponseText } from '../../utils/http-body.js';
 export type MicrosoftFetch = (
   input: string | URL | Request,
   init?: RequestInit,
@@ -195,5 +196,4 @@ export function transportError(
     { cause: error },
   );
 }
-import { readBoundedResponseText } from '../../utils/http-body.js';
 

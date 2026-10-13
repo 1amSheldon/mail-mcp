@@ -5,6 +5,8 @@
 
 An email MCP server for Codex, Claude Code, Claude Desktop, and other MCP clients. It connects to IMAP, SMTP, ManageSieve, Apple Mail, Microsoft Graph, Exchange Web Services, and Mailtrap without putting mail credentials in client configuration.
 
+See [production hardening qualification](PRODUCTION-READINESS.md) for the audit closure map, compatibility changes, resource limits and live acceptance checks.
+
 ## Backends
 
 | Backend | What it supports | Runtime requirement |
@@ -248,7 +250,7 @@ mail-mcp --confirm --audit-log --redact
 - `--allow-tools` narrows `mail_mutate` to named operations. Version 1 internal names remain accepted as CLI selectors during upgrades, but they are not advertised as MCP tools.
 - `--confirm` requires a short-lived confirmation ID bound to the exact tool arguments.
 - `--audit-log` writes JSONL diagnostics to `~/.config/mail-mcp/audit.log`.
-- `--redact` masks selected sensitive values before content reaches the client.
+- `--redact` masks selected sensitive text values before content reaches the client. Raw RFC 822 and binary attachment downloads remain byte-for-byte originals and are not sanitized.
 
 Nested audit fields are sanitized. Provider errors are reduced to safe codes and request metadata instead of returning raw response bodies or process stderr.
 
