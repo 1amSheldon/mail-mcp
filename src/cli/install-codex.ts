@@ -1,4 +1,4 @@
-import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { parse } from 'smol-toml';
 import { writeTextFileAtomic } from '../utils/atomic-write.js';
@@ -15,6 +15,7 @@ export interface CodexSkillInstallResult {
   skillPath: string;
   backupPath?: string;
   changed: boolean;
+  skipped?: string;
 }
 
 export interface CodexHttpServerOptions {
@@ -25,11 +26,13 @@ export interface CodexHttpServerOptions {
 export type CodexBundleServer =
   | {
       transport: 'stdio';
+      skipSkill?: boolean;
       npxArgs: readonly string[];
       serverName?: string;
     }
   | {
       transport: 'http';
+      skipSkill?: boolean;
       options: CodexHttpServerOptions;
       serverName?: string;
     };
@@ -229,8 +232,18 @@ export async function installCodexHttp(
   );
 }
 
-export async function installCodexSkill(codexHome: string): Promise<CodexSkillInstallResult> {
+export async function installCodexSkill(codexHome: string, options: { skip?: boolean; replaceExisting?: boolean } = {}): Promise<CodexSkillInstallResult> {
   const skillPath = getCodexSkillPath(codexHome);
+  if (options.skip) return { skillPath, changed: false, skipped: 'Skill installation disabled' };
+  // Check every managed path component, including dangling links. Never follow
+  // a junction into a separately managed skill repository during installation.
+  for (const path of [join(codexHome, 'skills'), dirname(skillPath), skillPath]) {
+    try {
+      if ((await lstat(path)).isSymbolicLink()) return { skillPath, changed: false, skipped: 'Externally managed linked skill' };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
   const bundledSkill = await readFile(
     new URL('../../skills/mail-mcp/SKILL.md', import.meta.url),
     'utf8'
@@ -247,6 +260,9 @@ export async function installCodexSkill(codexHome: string): Promise<CodexSkillIn
 
   if (currentSkill === bundledSkill) {
     return { skillPath, changed: false };
+  }
+  if (currentSkill !== undefined && !options.replaceExisting) {
+    return { skillPath, changed: false, skipped: 'Existing skill preserved; update it through its source repository or explicitly replace it' };
   }
 
   await mkdir(dirname(skillPath), { recursive: true });
@@ -306,12 +322,15 @@ export async function installCodexBundle(
   const snapshots = await Promise.all([
     configPath,
     `${configPath}.mail-mcp.bak`,
-    skillPath,
-    `${skillPath}.mail-mcp.bak`,
   ].map(snapshotTextFile));
 
+  const rollback = () => restoreCodexBundle(snapshots);
+
   try {
-    const skill = await installCodexSkill(codexHome);
+    const skill = await installCodexSkill(codexHome, { skip: server.skipSkill });
+    // Default policy creates only absent skills. Existing/linked/skipped files
+    // are never read for rollback or written by it.
+    if (skill.changed) snapshots.push({ path: skillPath });
     const config = server.transport === 'http'
       ? await installCodexHttp(configPath, server.options, server.serverName)
       : await installCodex(configPath, server.npxArgs, server.serverName);
@@ -319,11 +338,11 @@ export async function installCodexBundle(
     return {
       config,
       skill,
-      rollback: () => restoreCodexBundle(snapshots),
+      rollback,
     };
   } catch (error) {
     try {
-      await restoreCodexBundle(snapshots);
+      await rollback();
     } catch (rollbackError) {
       throw new AggregateError(
         [error as Error, rollbackError as Error],

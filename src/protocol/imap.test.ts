@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { ImapClient } from './imap.js';
+import { ImapClient, AppendNotSavedError } from './imap.js';
 import type { EmailAccount } from '../config.js';
 
 vi.mock('../security/keychain.js', () => ({
@@ -97,7 +97,7 @@ describe('ImapClient', () => {
     expect(messages[0].threadId).toBe('123');
     const latestInstance = (await import('imapflow')).ImapFlow as any;
     const flow = latestInstance.mock.results.at(-1)?.value;
-    expect(flow.search).toHaveBeenCalledWith({ 'x-gm-thrid': '123' }, { uid: true });
+    expect(flow.search).toHaveBeenCalledWith({ header: { 'Message-ID': '123' } }, { uid: true });
   });
 
   it('uses UIDs for every thread search so sequence numbers cannot select the wrong messages', async () => {
@@ -147,12 +147,11 @@ describe('ImapClient', () => {
     await client.connect();
     const messages = await client.fetchThreadMessages('thread-message-id');
 
-    expect(search).toHaveBeenCalledTimes(4);
-    expect(search).toHaveBeenNthCalledWith(1, { 'x-gm-thrid': 'thread-message-id' }, { uid: true });
-    expect(search).toHaveBeenNthCalledWith(2, { header: { References: 'thread-message-id' } }, { uid: true });
-    expect(search).toHaveBeenNthCalledWith(3, { header: { 'In-Reply-To': 'thread-message-id' } }, { uid: true });
-    expect(search).toHaveBeenNthCalledWith(4, { header: { 'Message-ID': 'thread-message-id' } }, { uid: true });
-    expect(fetch).toHaveBeenCalledWith('7001,7002,7003', { envelope: true, flags: true, internalDate: true }, { uid: true });
+    expect(search).toHaveBeenCalledTimes(3);
+    expect(search).toHaveBeenNthCalledWith(1, { header: { References: 'thread-message-id' } }, { uid: true });
+    expect(search).toHaveBeenNthCalledWith(2, { header: { 'In-Reply-To': 'thread-message-id' } }, { uid: true });
+    expect(search).toHaveBeenNthCalledWith(3, { header: { 'Message-ID': 'thread-message-id' } }, { uid: true });
+    expect(fetch).toHaveBeenCalledWith('7001,7002,7003', expect.objectContaining({ envelope: true, threadId: true, headers: ['Message-ID', 'References', 'In-Reply-To'] }), { uid: true });
     expect(messages.map(message => message.uid)).toEqual([7001, 7002, 7003]);
   });
 
@@ -186,7 +185,7 @@ describe('ImapClient', () => {
         .resolves.toEqual({ uid: 321 });
     });
 
-    it('treats an empty APPEND response as unconfirmed', async () => {
+    it('treats an empty APPEND response as a failed precondition', async () => {
       const { ImapFlow } = await import('imapflow');
       const MockImapFlow = ImapFlow as any;
       MockImapFlow.mockImplementationOnce(function () {
@@ -200,7 +199,40 @@ describe('ImapClient', () => {
       });
       const client = new ImapClient(account);
       await client.connect();
-      await expect(client.appendMessage('Sent', 'raw')).rejects.toThrow('no confirmation');
+      await expect(client.appendMessage('Sent', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+    });
+
+    it('classifies disconnected clients and lock failures as definitely not saved', async () => {
+      const client = new ImapClient(account);
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+      const append = vi.fn();
+      (client as any).client = { append, getMailboxLock: vi.fn().mockRejectedValue(new Error('missing folder')) };
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+      expect(append).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      { responseStatus: 'NO', executedCommand: 'A1 APPEND Drafts {100}' },
+      { responseStatus: 'BAD', executedCommand: 'A2 APPEND Drafts {100}' },
+      { serverResponseCode: 'APPENDLIMIT' },
+      { rejectedFrom: 'noSocket', command: 'APPEND' },
+    ])('classifies explicit APPEND rejection/preflight as not saved: %j', async metadata => {
+      const client = new ImapClient(account);
+      const release = vi.fn();
+      (client as any).client = { getMailboxLock: async () => ({ release }), append: vi.fn().mockRejectedValue(Object.assign(new Error('failed'), metadata)) };
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBeInstanceOf(AppendNotSavedError);
+      expect(release).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+      {},
+      { responseStatus: 'NO' },
+      { responseStatus: 'NO', executedCommand: 'A3 UID SEARCH 123' },
+    ])('keeps transport and post-APPEND lookup failures uncertain: %j', async metadata => {
+      const client = new ImapClient(account);
+      const error = Object.assign(new Error('outcome unknown'), metadata);
+      (client as any).client = { getMailboxLock: async () => ({ release() {} }), append: vi.fn().mockRejectedValue(error) };
+      await expect(client.appendMessage('Drafts', 'raw')).rejects.toBe(error);
     });
   });
 

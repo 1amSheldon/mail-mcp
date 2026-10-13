@@ -1,6 +1,6 @@
 {
-  "name": "@1amsheldon/mail-mcp",
-  "version": "3.0.0",
+  "name": "@starychenko/mail-mcp",
+  "version": "3.0.1-fork.1",
   "description": "Email MCP server for Codex and Claude with IMAP, SMTP, Apple Mail, Microsoft, and Mailtrap",
   "keywords": [
     "mcp",
@@ -29,13 +29,13 @@
   "publishConfig": {
     "access": "public"
   },
-  "homepage": "https://github.com/1amSheldon/mail-mcp#readme",
+  "homepage": "https://github.com/starychenko/mail-mcp#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/1amSheldon/mail-mcp.git"
+    "url": "git+https://github.com/starychenko/mail-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/1amSheldon/mail-mcp/issues"
+    "url": "https://github.com/starychenko/mail-mcp/issues"
   },
   "engines": {
     "node": ">=20.19.0"
@@ -60,10 +60,11 @@
     "probe:mail-read": "node scripts/probe-mail-read.mjs",
     "probe:draft-workflow": "node scripts/probe-draft-workflow.mjs",
     "backup:windows-service": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-windows-service.ps1",
-    "smoke:import": "node -e \"import('./dist/index.js')\"",
-    "release:check": "npm run build && npm run check:english && npm test && npm run test:integration && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
+    "smoke:import": "node scripts/smoke-import.mjs",
+    "release:check": "npm run build && npm run check:english && npm test && npm run test:integration && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm run smoke:installed && npm audit",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run release:check"
+    "prepublishOnly": "npm run release:check",
+    "smoke:installed": "node scripts/smoke-installed.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
@@ -90,5 +91,6 @@
   },
   "overrides": {
     "deepmerge-ts": "^8.0.0"
-  }
+  },
+  "private": true
 }

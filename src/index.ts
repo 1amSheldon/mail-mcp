@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -98,6 +99,7 @@ export function parseCliArgs(args: string[]) {
       'install-claude-code': { type: 'boolean', default: false },
       'install-codex': { type: 'boolean', default: false },
       'install-codex-local': { type: 'boolean', default: false },
+      'skip-skill': { type: 'boolean', default: false },
       'install-codex-stdio': { type: 'boolean', default: false },
       'auto-update-seconds': { type: 'string' },
       'version': { type: 'boolean', default: false },
@@ -927,7 +929,8 @@ export class MailMCPServer {
         const service = await this.getService(args.accountId as string);
         const messages = await service.getThread(
           args.threadId as string,
-          (args.folder as string | undefined) ?? 'INBOX'
+          (args.folder as string | undefined) ?? 'INBOX',
+          args.folders as string[] | undefined
         );
         return {
           content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],
@@ -1001,26 +1004,44 @@ export class MailMCPServer {
         }
         const service = await this.getService(args.accountId as string);
         const sentFolder = await service.resolveSentFolder(args.sentFolder as string | undefined);
-        const page = await service.searchEmailsPage(
+        let page = await service.searchEmailsPage(
           { messageId },
           {
             folder: sentFolder,
             limit: Math.min((args.count as number | undefined) ?? 10, 100),
           },
         );
+        // A bounded UID search can return an empty window with more mail to
+        // inspect. Only report absence after the continuation is exhausted.
+        let pagesScanned = 1;
+        const maxPages = 10;
+        while (page.items.length === 0 && page.nextCursor && pagesScanned < maxPages) {
+          page = await service.searchEmailsPage({ messageId }, {
+            folder: sentFolder,
+            limit: Math.min((args.count as number | undefined) ?? 10, 100),
+            cursor: page.nextCursor,
+          });
+          pagesScanned++;
+        }
         const matches = page.items;
         return {
           content: [{
             type: 'text',
             text: JSON.stringify({
-              status: matches.length > 0 ? 'found_in_sent' : 'not_found_in_sent',
+              status: matches.length > 0 ? 'found_in_sent'
+                : page.nextCursor ? 'indeterminate' : 'not_found_in_sent',
               messageId,
               sentFolder,
               count: matches.length,
               matches,
+              pagesScanned,
+              partial: Boolean(page.nextCursor),
+              nextCursor: page.nextCursor,
               caution: matches.length > 0
                 ? 'The IMAP Sent copy exists. Do not resend.'
-                : 'Absence from Sent does not prove SMTP non-delivery. Do not retry automatically.',
+                : page.nextCursor
+                  ? 'The Sent search is incomplete. Continue searchMessages with this Message-ID, Sent folder and nextCursor. Do not resend or retry automatically.'
+                  : 'Absence from Sent does not prove SMTP non-delivery. Do not retry automatically.',
             }, null, 2),
           }],
         };
@@ -1598,12 +1619,13 @@ Options:
   --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
-  --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
-  --install-claude-code       Register an auto-updating user-scoped MCP server in Claude Code
+  --install-claude            Write a local-fork command to Claude Desktop config and exit
+  --install-claude-code       Register this local fork at user scope in Claude Code
   --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
+  --skip-skill                Preserve skills without installing the bundled skill
   --install-codex-local       Install this local build as the Windows service without npm auto-updates
-  --install-codex-stdio       Write an auto-updating per-client stdio command to Codex config
-  --auto-update-seconds N     Managed HTTP service update check interval (minimum: 60)
+  --install-codex-stdio       Write a local-fork stdio command to Codex config
+  --auto-update-seconds N     Compatibility option; upstream updates are disabled in this fork
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);
@@ -1652,6 +1674,7 @@ Options:
       if (process.platform === 'win32') {
         const expectedUrl = `http://${SHARED_HTTP_HOST}:${SHARED_HTTP_PORT}/mcp`;
         const bundle = await installCodexBundle(configPath, codexHome, {
+          skipSkill: values['skip-skill'],
           transport: 'http',
           options: {
             url: expectedUrl,
@@ -1662,7 +1685,7 @@ Options:
         try {
           service = await installWindowsHttpService({
             runtimeArgs: installRuntimeArgs,
-            ...(values['install-codex-local'] ? { localEntrypoint: (await import('node:url')).fileURLToPath(import.meta.url) } : {}),
+            localEntrypoint: (await import('node:url')).fileURLToPath(import.meta.url),
             host: SHARED_HTTP_HOST,
             port: SHARED_HTTP_PORT,
             bearerTokenEnvVar: HTTP_BEARER_TOKEN_ENV,
@@ -1679,7 +1702,7 @@ Options:
         }
         console.log(`Service task: ${service.taskName}`);
         console.log(`Health check: ${service.healthUrl}`);
-        console.log(`Codex skill: ${bundle.skill.skillPath}`);
+        console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
         console.log('Service status: healthy');
         console.log(bundle.config.changed || !service.reusedBearerToken
           ? 'Restart Codex to load the connection settings and bearer token.'
@@ -1689,6 +1712,7 @@ Options:
 
       await prepareMailMcpNpxRuntime();
       const bundle = await installCodexBundle(configPath, codexHome, {
+          skipSkill: values['skip-skill'],
         transport: 'stdio',
         npxArgs,
       });
@@ -1699,7 +1723,7 @@ Options:
         console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
-      console.log(`Codex skill: ${bundle.skill.skillPath}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1715,6 +1739,7 @@ Options:
     const configPath = join(codexHome, 'config.toml');
     try {
       const bundle = await installCodexBundle(configPath, codexHome, {
+          skipSkill: values['skip-skill'],
         transport: 'stdio',
         npxArgs,
       });
@@ -1725,7 +1750,7 @@ Options:
         console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
-      console.log(`Codex skill: ${bundle.skill.skillPath}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1758,7 +1783,7 @@ Options:
 
   if (values['install-claude-code']) {
     try {
-      const result = await installClaudeCode(npxArgs);
+      const result = await installClaudeCode(npxArgs, { skipSkill: values['skip-skill'] });
       console.log('mail-mcp configured in Claude Code user scope.');
       if (result.stdout) console.log(result.stdout);
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
@@ -1874,7 +1899,12 @@ Options:
 }
 
 // Importing the module must not start a stdio server.
-const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
+let isDirectRun = false;
+try {
+  isDirectRun = Boolean(process.argv[1]) && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+} catch {
+  // Imported from stdin/eval or an embedder with a non-file argv[1].
+}
 if (isDirectRun) {
   main().catch((err) => {
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);

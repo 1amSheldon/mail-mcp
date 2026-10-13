@@ -3,6 +3,13 @@ import { ValidationError } from '../errors.js';
 import { validateEmailAddresses, validateRecipients } from './validation.js';
 
 describe('validateEmailAddresses', () => {
+  it('accepts quoted names and address groups while checking every envelope recipient', () => {
+    const field = 'Team: "Doe, Jane" <jane@example.com>, other@example.com;';
+    expect(() => validateEmailAddresses(field)).not.toThrow();
+    expect(() => validateRecipients([field], ['@example.com'], 'test')).not.toThrow();
+    expect(() => validateRecipients([field], ['jane@example.com'], 'test')).toThrow('other@example.com');
+    expect(() => validateEmailAddresses('ok@example.com\r\nBcc: evil@example.com')).toThrow();
+  });
   it('throws ValidationError for a syntactically invalid address', () => {
     expect(() => validateEmailAddresses('notanemail')).toThrowError(ValidationError);
   });

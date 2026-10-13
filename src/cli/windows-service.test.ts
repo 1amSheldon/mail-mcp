@@ -49,7 +49,7 @@ describe('managed Windows HTTP service', () => {
       paths: getWindowsServicePaths('C:\\Users\\test'),
     });
 
-    expect(supervisor).toContain('@1amsheldon/mail-mcp@latest');
+    expect(supervisor).toContain('file:');
     expect(supervisor).toContain('npm-cli.js');
     expect(supervisor).toContain('--ignore-scripts');
     expect(supervisor).not.toContain('npx-cli.js');
@@ -220,7 +220,7 @@ describe('managed Windows HTTP service', () => {
     const launcher = await readFile(result.launcherPath, 'utf8');
     const supervisor = await readFile(result.supervisorPath, 'utf8');
     expect(launcher).toContain('supervisor.cjs');
-    expect(supervisor).toContain('@1amsheldon/mail-mcp@latest');
+    expect(supervisor).toContain('file:');
     expect(launcher).not.toContain('existing-test-token');
     expect(supervisor).not.toContain('existing-test-token');
     expect(calls.some(call => call.environment?.MAIL_MCP_ENV_VALUE === 'existing-test-token')).toBe(true);

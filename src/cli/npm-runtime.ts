@@ -1,8 +1,12 @@
 import { mkdir } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export const MAIL_MCP_LATEST_SPEC = '@1amsheldon/mail-mcp@latest';
+// Fork distribution is deliberately local until a reviewed release channel exists.
+export const FORK_ROOT = fileURLToPath(new URL('../../', import.meta.url));
+export const FORK_ENTRYPOINT = join(FORK_ROOT, 'dist', 'index.js');
+export const MAIL_MCP_LATEST_SPEC = `file:${FORK_ROOT}`;
 export const NPX_RESOLUTION_ARGS = ['-y', '--prefer-online'] as const;
 
 export function getMailMcpNpxPrefix(home: string = homedir()): string {

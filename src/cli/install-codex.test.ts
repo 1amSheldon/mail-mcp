@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
@@ -14,6 +14,34 @@ import {
 import { buildMailMcpNpxArgs } from './npm-runtime.js';
 
 describe('installCodex', () => {
+  it('does not inspect an unreadable skill path when skill installation is skipped', async () => {
+    const home = join(tempDir, 'skip-home');
+    const malformed = join(home, 'skills', 'mail-mcp', 'SKILL.md');
+    await mkdir(malformed, { recursive: true });
+    const bundle = await installCodexBundle(join(home, 'config.toml'), home, {
+      transport: 'stdio', npxArgs: ['mail-mcp'], skipSkill: true,
+    });
+    expect(bundle.skill).toMatchObject({ changed: false, skipped: expect.any(String) });
+    await bundle.rollback();
+  });
+  it('preserves a shared skill junction, including bundle rollback', async () => {
+    const home = join(tempDir, 'linked-home');
+    const target = join(tempDir, 'shared-skill');
+    const link = join(home, 'skills', 'mail-mcp');
+    await mkdir(target, { recursive: true });
+    await mkdir(join(home, 'skills'), { recursive: true });
+    await writeFile(join(target, 'SKILL.md'), 'shared instructions');
+    await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      expect(await installCodexSkill(home)).toMatchObject({ changed: false, skipped: expect.stringContaining('linked') });
+      const bundle = await installCodexBundle(join(home, 'config.toml'), home, { transport: 'stdio', npxArgs: ['mail-mcp'] });
+      await writeFile(join(target, 'SKILL.md'), 'concurrent shared update');
+      await bundle.rollback();
+      expect(await readFile(join(target, 'SKILL.md'), 'utf8')).toBe('concurrent shared update');
+    } finally {
+      await unlink(link);
+    }
+  });
   let tempDir: string;
   let configPath: string;
   const runtimeArgs = ['--confirm', '--audit-log', '--redact'];
@@ -74,7 +102,7 @@ describe('installCodex', () => {
     expect(updated).toContain('[mcp_servers.context7]');
     expect(updated).not.toContain('@1amsheldon/mail-mcp@1.5.3');
     expect(updated).not.toContain('OLD_VALUE');
-    expect(updated).toContain('@1amsheldon/mail-mcp@latest');
+    expect(updated).toContain('file:');
     expect(updated).toContain('--prefer-online');
     expect(await readFile(result.backupPath!, 'utf8')).toBe(source);
   });
@@ -172,7 +200,8 @@ describe('installCodex', () => {
     });
 
     await writeFile(first.skillPath, 'local customization\n', 'utf8');
-    const updated = await installCodexSkill(codexHome);
+    expect((await installCodexSkill(codexHome)).changed).toBe(false);
+    const updated = await installCodexSkill(codexHome, { replaceExisting: true });
     expect(await readFile(updated.backupPath!, 'utf8')).toBe('local customization\n');
     expect(await readFile(updated.skillPath, 'utf8')).toBe(installed);
   });

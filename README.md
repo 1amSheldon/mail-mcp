@@ -1,7 +1,6 @@
 # mail-mcp
 
-[![npm](https://img.shields.io/npm/v/@1amsheldon/mail-mcp)](https://www.npmjs.com/package/@1amsheldon/mail-mcp)
-[![CI](https://github.com/1amSheldon/mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/1amSheldon/mail-mcp/actions/workflows/ci.yml)
+[![CI](https://github.com/starychenko/mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/starychenko/mail-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-111111.svg)](LICENSE)
 
 An email MCP server for Codex, Claude Code, Claude Desktop, and other MCP clients. It connects to IMAP, SMTP, ManageSieve, Apple Mail, Microsoft Graph, Exchange Web Services, and Mailtrap without putting mail credentials in client configuration.
@@ -21,6 +20,16 @@ Gmail, Google Workspace, Mail.ru, iCloud, Fastmail, Yahoo, Zoho, and other stand
 
 ## Install
 
+This is the `starychenko/mail-mcp` fork, version `3.0.1-fork.1`. It is distributed as a reviewed local build, not through the upstream npm package. Keep the checkout at a stable path.
+
+```bash
+git clone https://github.com/starychenko/mail-mcp.git
+cd mail-mcp
+npm ci
+npm run build
+node dist/index.js --version
+```
+
 Requirements:
 
 - Node.js 20.19 or newer
@@ -30,14 +39,14 @@ Requirements:
 Add an account with the interactive backend wizard:
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest accounts add
+node dist/index.js accounts add
 ```
 
 The wizard supports IMAP/SMTP, Apple Mail, Microsoft Graph, EWS, and Mailtrap. List or remove configured accounts with:
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest accounts list
-npx -y --prefer-online @1amsheldon/mail-mcp@latest accounts remove ACCOUNT_ID
+node dist/index.js accounts list
+node dist/index.js accounts remove ACCOUNT_ID
 ```
 
 Account definitions are stored in `~/.config/mail-mcp/accounts.json`. Passwords, OAuth2 credentials, and API tokens are stored in the operating-system credential store under `com.1amsheldon.mail-mcp`.
@@ -45,17 +54,17 @@ Account definitions are stored in `~/.config/mail-mcp/accounts.json`. Passwords,
 ### Codex
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex
+node dist/index.js --install-codex
 ```
 
-The installer updates only `[mcp_servers.mail]`, backs up an existing config, and installs the bundled `mail-mcp` skill in `~/.codex/skills/mail-mcp`.
+The installer updates only `[mcp_servers.mail]`, backs up an existing config, and installs the bundled `mail-mcp` skill only when absent in `~/.codex/skills/mail-mcp`.
 
-On Windows, it installs one authenticated Streamable HTTP service at `http://127.0.0.1:8765/mcp`. Every Codex conversation shares the same process and cached per-account connections, so opening more conversations does not create more mail sessions. A supervised task starts it at sign-in, checks health, and applies later npm releases after a graceful restart.
+On Windows, it installs one authenticated Streamable HTTP service at `http://127.0.0.1:8765/mcp`. Every Codex conversation shares the same process and cached per-account connections, so opening more conversations does not create more mail sessions. A supervised task starts it at sign-in, checks health, and runs this local build. Updates are manual.
 
-On macOS and Linux, the installer writes an auto-updating stdio entry. To select stdio explicitly on any platform:
+On macOS and Linux, the installer writes a stdio entry referencing this local checkout. To select stdio explicitly on any platform:
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex-stdio
+node dist/index.js --install-codex-stdio
 ```
 
 Add `--read-only` to either installer command to expose only read tools. Restart Codex after installation.
@@ -63,15 +72,15 @@ Add `--read-only` to either installer command to expose only read tools. Restart
 ### Claude Desktop
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-claude
+node dist/index.js --install-claude
 ```
 
-The installer preserves other MCP servers, creates `claude_desktop_config.json.mail-mcp.bak` when replacing an existing file, and writes an `npx` command that checks for the latest release when Claude starts the server. Add `--read-only` for read-only access, then restart Claude Desktop.
+The installer preserves other MCP servers, creates `claude_desktop_config.json.mail-mcp.bak` when replacing an existing file, and writes an `npx` command that runs this local fork when Claude starts the server. Add `--read-only` for read-only access, then restart Claude Desktop.
 
 ### Claude Code
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-claude-code
+node dist/index.js --install-claude-code
 ```
 
 The installer delegates configuration to the official [`claude mcp` CLI](https://code.claude.com/docs/en/mcp), registers `mail` at user scope, and installs the bundled workflow in `~/.claude/skills/mail-mcp`. Replacing an existing `mail` registration is transactional: the installer backs up `~/.claude.json` and restores it byte-for-byte if registration or skill installation fails. Native Windows uses the required `cmd /c npx` wrapper; macOS, Linux, and WSL use `npx` directly. Add `--read-only` for read-only access, then restart Claude Code.
@@ -81,15 +90,15 @@ The installer delegates configuration to the official [`claude mcp` CLI](https:/
 Run the server over stdio:
 
 ```text
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
+node dist/index.js --confirm --audit-log --redact
 ```
 
 Example Codex-compatible TOML:
 
 ```toml
 [mcp_servers.mail]
-command = "npx"
-args = ["-y", "--prefer-online", "@1amsheldon/mail-mcp@latest", "--confirm", "--audit-log", "--redact"]
+command = "node"
+args = ["/absolute/path/to/mail-mcp/dist/index.js", "--confirm", "--audit-log", "--redact"]
 enabled = true
 startup_timeout_sec = 30.0
 tool_timeout_sec = 300.0
@@ -111,7 +120,7 @@ The important rules are short:
 6. Prefer a draft when recipients or wording are not final.
 7. Never retry `smtp_outcome_unknown` automatically. Use `verifySentMessage` with the returned Message-ID first.
 
-IMAP cursor snapshots are capped at 10,000 UIDs and hydrate only the requested page. Page size is capped at 100.
+IMAP listing/search scan bounded UID windows and hydrate only the requested page. Page size is capped at 500; total is unknown. Follow nextCursor even when a sparse search returns an empty page.
 
 ### Keyword search
 
@@ -293,7 +302,7 @@ Manual loopback start:
 
 ```powershell
 $env:MAIL_MCP_BEARER_TOKEN = '<random-token>'
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
+node dist/index.js --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
 ```
 
 `GET /health` reports version, start time, and active session count. `POST /mcp` requires the bearer token. Keep the bind address on loopback unless an authenticated reverse proxy protects the server.
@@ -302,26 +311,16 @@ If the managed service restarts after sleep or an automatic update, requests car
 
 ## Updates
 
-Managed Codex and Claude installations run `@1amsheldon/mail-mcp@latest`. Updates replace package code only; account JSON and keychain credentials remain in their existing user directories.
+Fork installers keep the local source path; they never switch to the upstream npm package. The upstream registry update monitor is disabled. To update, review and check out the desired fork commit, run `npm ci` and `npm run build`, then rerun the relevant installer and restart the client/service. Credentials remain in their existing store.
 
-Version 2 changes the MCP tool surface from individual operation names to `mail_query` and `mail_mutate`. Restart the MCP client after upgrading so it refreshes the tool list. Stored accounts and credentials do not need migration.
+Codex preserves existing customized skills and linked/junction-managed skills. Use `--skip-skill` to skip skill installation entirely. Update shared skills in their own source repository. The installer rollback does not write skipped skills.
 
-Version 3 keeps the same three-tool interface and adds server draft editing/sending and keyword filters. Accounts and credentials stay in place; draft delivery records are created on first use. Refresh the client's tool catalog or restart the client to discover the new operations.
-
-The Windows service checks npm every six hours. It stops accepting new requests, gives in-flight requests up to eight seconds to finish, and then restarts on the new package. Stdio clients update when the MCP process next starts.
-
-Windows logon and watchdog tasks use a windowless launcher. Managed services created by older versions migrate their scheduled-task action when the updated service next starts; the previous task definition is saved as `~/.config/mail-mcp/service/task-before-windowless.xml`.
-
-If a Windows installation predates 2.1.3, run `npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex` once from outside a source checkout to replace the old supervisor as well. The new supervisor installs package updates without lifecycle scripts and launches Node directly, avoiding the `npx`/`cmd.exe` process chain that can open Windows Terminal. Accounts and credentials are preserved.
-
-If an older installation pins an exact version, run its installer command again.
-
-Re-running `--install-codex` on an existing Windows HTTP installation preserves its bearer token. When the connection settings are unchanged, existing chats can continue after the service updates without restarting Codex.
+`getThread` now returns `{ items, folders, partial, warning }` with message locators. Listing/search use descending UID windows rather than full-folder snapshots: `total` is `null`, newly arriving higher UIDs are excluded from continuation pages, and deleted messages may disappear. Follow `nextCursor` even after an empty page. Restart clients to refresh these contracts.
 
 ## Connection diagnostics
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --validate-accounts
+node dist/index.js --validate-accounts
 ```
 
 Checks configured IMAP connections and SMTP hosts without sending mail. Prints a result for each connection and a total of passed, failed, and skipped probes. Exits with code `1` if a probe fails or no IMAP accounts are configured; otherwise exits with `0`. This command does not validate Apple Mail, Microsoft API, or Mailtrap accounts.
@@ -343,14 +342,20 @@ The default suite uses protocol and provider mocks. It does not access a real ma
 ### Local Windows build
 
 
-After building and testing, `node dist/index.js --install-codex-local` runs that checkout as the shared Windows service. This disables npm refresh and runtime auto-update for that installation. Rebuild and rerun the installer to update it. Use `--install-codex` to return to the published npm package. Account definitions and credentials are reused.
+After building and testing, `node dist/index.js --install-codex-local` runs that checkout as the shared Windows service. This disables npm refresh and runtime auto-update for that installation. Rebuild and rerun the installer to update it. `--install-codex` also keeps this fork; it does not select upstream. Account definitions and credentials are reused.
 
 `npm run backup:windows-service` backs up the task, service files, and Codex configuration under the local mail-mcp configuration directory. Keep these backups private. `npm run probe:draft-workflow -- --check` checks the draft operation catalog and lists folders without writing mail. It requires `MAIL_MCP_ACCOUNT_ID` and `MAIL_MCP_BEARER_TOKEN`. The separate `--prepare` mode creates and updates a test draft and must be explicitly requested; it never sends.
 
 ## Release
 
-Publishing is handled by `.github/workflows/publish.yml`. Publish a GitHub Release whose tag is `v` followed by the exact version in `package.json`. GitHub Actions verifies the tag and publishes to npm through OIDC trusted publishing; the workflow contains no npm token.
+This fork is marked private in package.json to prevent accidental npm publication. The upstream npm publishing workflow is disabled for this repository. Delivery is a local build from a reviewed commit.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Review hardening contracts
+
+- `getThread` accepts `threadId`, `folder` (default INBOX) or an explicit `folders` array (at most 10, e.g. INBOX and the discovered Sent path). It walks reference ancestors and uses Gmail `threadId` when supported. Results always report `partial: true`: deleted, unreferenced or out-of-scope mail cannot be ruled out.
+- Draft creation returns `status: saved` or `append_outcome_unknown`, `retrySafe: false`, Message-ID and recovery instructions. Do not create another copy after an ambiguous APPEND or a local post-save failure. Find the saved draft by its Message-ID.
+- ManageSieve currently uses implicit TLS and verifies certificates. For a private CA, configure Node's `NODE_EXTRA_CA_CERTS` before launch or supply the client CA option. STARTTLS-only endpoints are not supported by this client; authentication is never sent in plaintext.

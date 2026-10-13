@@ -16,6 +16,18 @@ the returned `nextCursor` as `cursor`; changing filters starts a new search.
 The `keywords` string remains a single literal body phrase. Search is server-side;
 do not download a whole mailbox to filter it locally. Other backends use their own operations.
 
+## Result completeness and recovery
+
+Thread reads return { items, folders, partial, warning }, with a locator on each item.
+Pass an explicit folders array to getThread when relevant messages span INBOX and Sent;
+use discovered mailbox paths. A partial result is not proof of a complete conversation.
+Listing/search use bounded descending UID windows and return total: null. Follow nextCursor
+even when items is empty; retain the same filters. New higher UIDs are excluded from the
+continuation, and deleted messages may disappear. Cursors expire after five minutes.
+Draft creation returns status saved or append_outcome_unknown with retrySafe: false.
+If tracking or mailbox lookup fails after saving, or APPEND is uncertain, do not recreate
+or resend. Preserve Message-ID and find the existing draft before proceeding.
+
 ## Server draft workflow
 
 For a reply draft, first read the original message, then use `createReplyDraft` or

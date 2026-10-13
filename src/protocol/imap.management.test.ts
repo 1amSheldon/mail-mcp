@@ -162,7 +162,7 @@ describe('ImapClient mailbox and capability primitives', () => {
     expect(fetch).toHaveBeenNthCalledWith(
       2,
       '3,2',
-      { envelope: true, flags: true, internalDate: true },
+      { envelope: true, flags: true, internalDate: true, threadId: true },
       { uid: true },
     );
   });

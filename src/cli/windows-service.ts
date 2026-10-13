@@ -153,7 +153,7 @@ export function buildWindowsServiceSupervisor(options: {
 
   const healthHost = host === '::1' ? '[::1]' : host;
   const healthUrl = `http://${healthHost}:${port}/health`;
-  const entrypoint = options.localEntrypoint ?? join(options.paths.runtimePrefix, 'node_modules', '@1amsheldon', 'mail-mcp', 'dist', 'index.js');
+  const entrypoint = options.localEntrypoint ?? join(options.paths.runtimePrefix, 'node_modules', '@starychenko', 'mail-mcp', 'dist', 'index.js');
   const argumentsList = [
     entrypoint,
     '--http',

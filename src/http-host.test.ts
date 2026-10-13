@@ -5,6 +5,7 @@ import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { startHttpHost, type HttpHostController } from './http-host.js';
+import { request } from 'node:http';
 
 class TestMcpSession {
   private readonly server = new Server(
@@ -56,6 +57,28 @@ describe('Streamable HTTP host', () => {
       version: '1.2.3',
       activeSessions: 0,
     });
+  });
+
+  it('rejects malformed unauthenticated targets and continues serving MCP', async () => {
+    host = await startHttpHost({ host: '127.0.0.1', port: 0, bearerToken: 'test-token', createSession: () => new TestMcpSession() });
+    const status = await new Promise<number | undefined>((resolve, reject) => {
+      const req = request({ host: host!.host, port: host!.port, path: '//[/', method: 'GET' }, res => {
+        res.resume();
+        res.on('end', () => resolve(res.statusCode));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    expect(status).toBe(400);
+    expect((await fetch(host.url.replace('/mcp', '/health'))).status).toBe(200);
+    const transport = new StreamableHTTPClientTransport(new URL(host.url), {
+      requestInit: { headers: { authorization: 'Bearer test-token' } },
+    });
+    const client = new Client({ name: 'regression', version: '1' });
+    await client.connect(transport);
+    expect((await client.listTools()).tools[0].name).toBe('ping_mail');
+    await transport.terminateSession();
+    await client.close();
   });
 
   it('rejects MCP calls without the bearer token', async () => {

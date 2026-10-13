@@ -1,5 +1,6 @@
 import {
   ImapClient,
+  AppendNotSavedError,
   type CopyMessagesResult,
   type MailboxMetadata,
   type MailboxStatus,
@@ -24,10 +25,9 @@ import {
 } from '../domain/message-locator.js';
 import type { OutgoingAttachment, OutgoingMessage as SmtpOutgoingMessage } from '../domain/outgoing-message.js';
 import {
-  PaginationSnapshotStore,
-  type PaginationPage,
   type PaginationScope,
 } from '../utils/pagination-store.js';
+import { UidCursorStore } from '../utils/uid-cursors.js';
 import type { ParsedMail } from 'mailparser';
 import { simpleParser } from 'mailparser';
 import { DraftWorkflow, contentFingerprint, matchesSentDraft } from './drafts.js';
@@ -44,7 +44,6 @@ export type { SearchEmailsQuery } from '../domain/mail-search.js';
 const DEFAULT_SENT_FOLDER = 'Sent';
 const DEFAULT_DRAFTS_FOLDER = 'Drafts';
 const DEFAULT_TRASH_FOLDER = 'Trash';
-const MAX_PAGINATION_SNAPSHOT_ITEMS = 10_000;
 const MAX_READ_BODY_CHARS = 200_000;
 const INLINE_DATA_IMAGE_PATTERN = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/_=-]+/gi;
 
@@ -127,6 +126,9 @@ export interface CopyEmailResult extends CopyMessagesResult {
 }
 
 export interface DraftCreationResult {
+  status: 'saved' | 'append_outcome_unknown';
+  retrySafe: false;
+  nextAction: string;
   draftId?: string;
   warning?: string;
   folder: string;
@@ -190,9 +192,7 @@ export class MailService {
   private trashFolderPromise: Promise<string> | null = null;
   private readonly bodyCache = new MessageBodyCache();
   private readonly bodyFetches = new Map<string, Promise<ParsedMail>>();
-  private readonly paginationStore = new PaginationSnapshotStore<number>({
-    maxItemsPerSnapshot: MAX_PAGINATION_SNAPSHOT_ITEMS,
-  });
+  private readonly paginationStore = new UidCursorStore();
 
   constructor(account: EmailAccount, private readonly redact: boolean = false) {
     this.account = account;
@@ -218,64 +218,34 @@ export class MailService {
     this.paginationStore.clear();
   }
 
-  async listEmailsPage(options: ListEmailsPageOptions = {}): Promise<PaginationPage<LocatedMessageMetadata>> {
-    const folder = options.folder ?? 'INBOX';
-    const limit = options.limit ?? 10;
-    const identity = await this.imapClient.getMailboxIdentity(folder);
-    const scope = this.paginationScope(identity.path, identity.uidValidity, JSON.stringify({
-      kind: 'list',
-      headerOnly: options.headerOnly ?? false,
-    }));
-
-    const page = options.cursor
-      ? this.paginationStore.getNextPage(options.cursor, scope, limit)
-      : this.paginationStore.getFirstPage(
-          scope,
-          await this.imapClient.listMessageUids(identity.path, MAX_PAGINATION_SNAPSHOT_ITEMS),
-          limit,
-        );
-    return this.hydrateUidPage(page, identity.path, identity.uidValidity, options.headerOnly ?? false);
+  async listEmailsPage(options: ListEmailsPageOptions = {}) {
+    return this.uidPage({ all: true }, options, JSON.stringify({ kind: 'list', headerOnly: options.headerOnly ?? false }));
   }
 
-  async searchEmailsPage(
-    query: SearchEmailsQuery,
-    options: SearchEmailsPageOptions = {}
-  ): Promise<PaginationPage<LocatedMessageMetadata>> {
-    const folder = options.folder ?? 'INBOX';
-    const limit = options.limit ?? 10;
+  async searchEmailsPage(query: SearchEmailsQuery, options: SearchEmailsPageOptions = {}) {
     const normalizedQuery = normalizeSearchQuery(query);
-    const identity = await this.imapClient.getMailboxIdentity(folder);
-    const scope = this.paginationScope(
-      identity.path,
-      identity.uidValidity,
-      searchPaginationKey(normalizedQuery, options.headerOnly ?? false),
-    );
-
-    const page = options.cursor
-      ? this.paginationStore.getNextPage(options.cursor, scope, limit)
-      : this.paginationStore.getFirstPage(
-          scope,
-          await this.imapClient.searchMessageUids(
-            buildSearchCriteria(normalizedQuery),
-            identity.path,
-            MAX_PAGINATION_SNAPSHOT_ITEMS,
-          ),
-          limit,
-        );
-    return this.hydrateUidPage(page, identity.path, identity.uidValidity, options.headerOnly ?? false);
+    return this.uidPage(buildSearchCriteria(normalizedQuery), options, searchPaginationKey(normalizedQuery, options.headerOnly ?? false));
   }
 
-  private async hydrateUidPage(
-    page: PaginationPage<number>,
-    mailbox: string,
-    uidValidity: string,
-    headerOnly: boolean,
-  ): Promise<PaginationPage<LocatedMessageMetadata>> {
-    const messages = await this.imapClient.fetchMessagesByUids(page.items, mailbox, headerOnly);
+  private async uidPage(criteria: object, options: ListEmailsPageOptions, queryKey: string) {
+    const folder = options.folder ?? 'INBOX';
+    const limit = options.limit ?? 10;
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new ValidationError('Pagination limit must be between 1 and 500');
+    const identity = await this.imapClient.getMailboxIdentity(folder);
+    const scope = this.paginationScope(identity.path, identity.uidValidity, queryKey);
+    const before = options.cursor ? this.paginationStore.read(options.cursor, scope) : undefined;
+    const page = await this.imapClient.searchUidPage(identity.path, identity.uidValidity, criteria, limit, before);
+    const messages = await this.imapClient.fetchMessagesByUids(page.uids, identity.path, options.headerOnly ?? false);
+    const after = await this.imapClient.getMailboxIdentity(identity.path);
+    if (after.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed during pagination');
+    const items = this.locateMessages(messages, identity.path, identity.uidValidity);
+    // Retire only after a successful read, so a failed fetch can be retried.
+    if (options.cursor) this.paginationStore.retire(options.cursor);
     return {
-      items: this.locateMessages(messages, mailbox, uidValidity),
-      nextCursor: page.nextCursor,
-      total: page.total,
+      items,
+      nextCursor: page.nextBefore === null ? null : this.paginationStore.issue(scope, page.nextBefore),
+      total: null,
+      partial: page.nextBefore !== null,
     };
   }
 
@@ -568,8 +538,8 @@ export class MailService {
     });
   }
 
-  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[]): Promise<SendDeliveryResult> {
-    const parsed = await this._cachedFetchBody(uid, folder);
+  async replyEmail(uid: string, folder: string = 'INBOX', body: string, isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], expectedUidValidity?: string): Promise<SendDeliveryResult> {
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
 
     const originalMessageId = parsed.messageId;
     const existingReferences = parsed.headers.get('references') as string | undefined;
@@ -585,12 +555,7 @@ export class MailService {
       }
     }
 
-    // Determine reply-to address (original sender)
-    const originalFrom = parsed.replyTo?.value[0]?.address ?? parsed.from?.value[0]?.address;
-    if (!originalFrom) {
-      throw new ValidationError('Cannot reply because the original message has no valid From address.');
-    }
-    const replyTo = originalFrom;
+    const replyTo = this.replyTargets(parsed);
 
     // Build subject with "Re: " prefix
     const originalSubject = parsed.subject || '';
@@ -634,6 +599,7 @@ export class MailService {
       bcc,
       includeSignature,
       attachments,
+      resolved.uidValidity,
     );
   }
 
@@ -643,7 +609,7 @@ export class MailService {
     options: ReplyOptions = {}
   ): Promise<SendDeliveryResult> {
     const resolved = await this.resolveLocator(locator);
-    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox);
+    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox, resolved.uidValidity);
     return this.sendMessage(this.replyAllMessage(parsed, body, options));
   }
 
@@ -653,7 +619,7 @@ export class MailService {
     options: ReplyOptions & { replyAll?: boolean; cc?: string } = {},
   ): Promise<DraftCreationResult> {
     const resolved = await this.resolveLocator(locator);
-    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox);
+    const parsed = await this._cachedFetchBody(resolved.uid.toString(), resolved.mailbox, resolved.uidValidity);
     if (!parsed.messageId) {
       throw new ValidationError('Cannot create a threaded reply draft: the original message has no Message-ID.');
     }
@@ -661,8 +627,7 @@ export class MailService {
     if (options.replyAll) {
       message = this.replyAllMessage(parsed, body, options);
     } else {
-      const to = parsed.replyTo?.value[0]?.address ?? parsed.from?.value[0]?.address;
-      if (!to) throw new ValidationError('Cannot reply because the original message has no valid From address.');
+      const to = this.replyTargets(parsed);
       message = {
         to,
         subject: /^re:/i.test(parsed.subject ?? '') ? parsed.subject! : `Re: ${parsed.subject ?? ''}`,
@@ -676,6 +641,18 @@ export class MailService {
     // Explicit CC replaces inferred CC; an empty string clears it.
     if (options.cc !== undefined) message.cc = options.cc;
     return this.createDraftMessage(message);
+  }
+
+  private replyTargets(parsed: ParsedMail): string {
+    const candidates = parsed.replyTo?.value?.length ? parsed.replyTo.value : parsed.from?.value ?? [];
+    const seen = new Set<string>();
+    const addresses = candidates.flatMap(({ address }) => {
+      if (!address || seen.has(address.toLowerCase())) return [];
+      seen.add(address.toLowerCase());
+      return [address];
+    });
+    if (!addresses.length) throw new ValidationError('Cannot reply because the original message has no valid From address.');
+    return addresses.join(', ');
   }
 
   private replyThreading(parsed: ParsedMail): SmtpOutgoingMessage['threading'] {
@@ -751,8 +728,8 @@ export class MailService {
     return objects.flatMap(object => object.value.map(address => address.address));
   }
 
-  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], includeOriginalAttachments: boolean = false): Promise<SendDeliveryResult> {
-    const parsed = await this._cachedFetchBody(uid, folder);
+  async forwardEmail(uid: string, folder: string = 'INBOX', to: string, body: string = '', isHtml: boolean = false, cc?: string, bcc?: string, includeSignature: boolean = true, attachments?: OutgoingAttachment[], includeOriginalAttachments: boolean = false, expectedUidValidity?: string): Promise<SendDeliveryResult> {
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
 
     // Build subject with "Fwd: " prefix
     const originalSubject = parsed.subject || '';
@@ -827,6 +804,7 @@ export class MailService {
       includeSignature,
       attachments,
       includeOriginalAttachments,
+      resolved.uidValidity,
     );
   }
 
@@ -834,10 +812,25 @@ export class MailService {
     const effective = this.effectiveOutgoingMessage(message);
     const composed = await this.smtpClient.composeMessage(effective, { stripBcc: false });
     const draftsFolder = await this.resolveDraftsFolder();
-    const appended = await this.imapClient.appendMessage(draftsFolder, composed.rawMessage, ['\\Draft']);
+    let appended;
+    try {
+      appended = await this.imapClient.appendMessage(draftsFolder, composed.rawMessage, ['\\Draft']);
+    } catch (error) {
+      if (error instanceof AppendNotSavedError) throw error;
+      return {
+        status: 'append_outcome_unknown', retrySafe: false, folder: draftsFolder,
+        messageId: composed.messageId,
+        nextAction: 'Do not create another copy. Search the Drafts folder for this Message-ID and inspect the result before retrying.',
+        warning: 'APPEND did not return confirmation; the draft may already be saved.',
+      };
+    }
     let locator: string | undefined;
+    let warning: string | undefined;
+    try {
     if (appended.uid !== undefined) {
-      const identity = await this.imapClient.getMailboxIdentity(draftsFolder);
+      const identity = appended.uidValidity
+        ? { path: draftsFolder, uidValidity: appended.uidValidity }
+        : await this.imapClient.getMailboxIdentity(draftsFolder);
       locator = encodeMessageLocator({
         accountId: this.account.id,
         mailbox: identity.path,
@@ -845,8 +838,10 @@ export class MailService {
         uid: appended.uid,
       });
     }
+    } catch {
+      warning = 'Draft saved, but its mailbox identity could not be resolved. Search by Message-ID before updating or sending. Do not create another copy.';
+    }
     let draftId: string | undefined;
-    let warning: string | undefined;
     if (locator) {
       try {
         draftId = await this.draftWorkflow().adopt(locator, composed.messageId);
@@ -857,6 +852,8 @@ export class MailService {
       }
     }
     return {
+      status: 'saved', retrySafe: false,
+      nextAction: locator ? 'Use this locator or draftId to update or send the saved draft. Do not create another copy.' : 'Search the Drafts folder by Message-ID to locate the saved draft. Do not create another copy.',
       ...(draftId ? { draftId } : {}),
       ...(warning ? { warning } : {}),
       folder: draftsFolder,
@@ -899,7 +896,7 @@ export class MailService {
         const folder = await this.resolveDraftsFolder();
         const result = await this.imapClient.appendMessage(folder, raw, ['\\Draft']);
         const identity = await this.imapClient.getMailboxIdentity(folder);
-        return { folder, uid: result.uid, ...(result.uid !== undefined ? { locator: encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid: result.uid }) } : {}) };
+        return { status: 'saved', retrySafe: false, nextAction: 'Use the saved draft locator.', folder, uid: result.uid, ...(result.uid !== undefined ? { locator: encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid: result.uid }) } : {}) };
       },
       trash: locator => this.deleteLocatedEmail(locator),
       compose: message => this.smtpClient.composeMessage(this.effectiveOutgoingMessage({ ...message, includeSignature: false }), { stripBcc: false }),
@@ -936,15 +933,17 @@ export class MailService {
     return this.draftWorkflow().send(target);
   }
 
-  private async _cachedFetchBody(uid: string, folder: string): Promise<ParsedMail> {
-    const key = `${this.account.id}:${folder}:${uid}`;
+  private async _cachedFetchBody(uid: string, folder: string, expectedUidValidity?: string): Promise<ParsedMail> {
+    const identity = await this.imapClient.getMailboxIdentity(folder);
+    if (expectedUidValidity !== undefined && identity.uidValidity !== expectedUidValidity) throw new ValidationError('Message locator is stale because the mailbox identity changed.');
+    const key = JSON.stringify([this.account.id, folder, identity.uidValidity, uid]);
     const cached = this.bodyCache.get(key);
     if (cached) return cached;
 
     const existingFetch = this.bodyFetches.get(key);
     if (existingFetch) return existingFetch;
 
-    const fetch = this.imapClient.fetchMessageBody(uid, folder)
+    const fetch = this.imapClient.fetchMessageBody(uid, folder, identity.uidValidity)
       .then(parsed => {
         if (this.bodyFetches.get(key) === fetch) {
           this.bodyCache.set(key, parsed);
@@ -961,10 +960,11 @@ export class MailService {
     return fetch;
   }
 
-  invalidateBodyCache(folder: string, uid: string): void {
-    const key = `${this.account.id}:${folder}:${uid}`;
-    this.bodyCache.delete(key);
-    this.bodyFetches.delete(key);
+  invalidateBodyCache(_folder: string, _uid: string): void {
+    // Clear every generation, including in-flight reads, so a completed stale
+    // request cannot repopulate the cache after a mutation.
+    this.bodyCache.clear();
+    this.bodyFetches.clear();
   }
 
   /**
@@ -989,8 +989,8 @@ export class MailService {
     return { https, mailto };
   }
 
-  async readEmail(uid: string, folder: string = 'INBOX'): Promise<string> {
-    const parsed = await this._cachedFetchBody(uid, folder);
+  async readEmail(uid: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<string> {
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
     
     let content = '';
 
@@ -1073,12 +1073,51 @@ export class MailService {
 
   async readLocatedEmail(locator: string): Promise<string> {
     const resolved = await this.resolveLocator(locator);
-    return this.readEmail(resolved.uid.toString(), resolved.mailbox);
+    return this.readEmail(resolved.uid.toString(), resolved.mailbox, resolved.uidValidity);
   }
 
-  async getThread(threadId: string, folder: string = 'INBOX'): Promise<MessageMetadata[]> {
-    const messages = await this.imapClient.fetchThreadMessages(threadId, folder);
-    return messages.map(message => this.redactMessageMetadata(message));
+  async getThread(threadId: string, folder: string = 'INBOX', folders?: string[]) {
+    if (folders !== undefined && (!Array.isArray(folders) || folders.some(path => typeof path !== 'string'))) {
+      throw new ValidationError('Thread folders must be an array of mailbox paths.');
+    }
+    const scope = [...new Set(folders ?? [folder])];
+    if (!scope.length || scope.length > 10 || scope.some(path => !path || /[\r\n\0]/.test(path))) {
+      throw new ValidationError('Thread folders must contain between 1 and 10 mailbox paths.');
+    }
+    const items = new Map<string, LocatedMessageMetadata>();
+    const canonicalFolders = new Set<string>();
+    const ids = new Set([threadId]);
+    const queried = new Set<string>();
+    const budget = { remaining: 100 };
+    // Revisit earlier folders for ancestors discovered in a later folder.
+    for (let round = 0; round < 10; round++) {
+      let progressed = false;
+      for (const mailbox of scope) {
+        const identity = await this.imapClient.getMailboxIdentity(mailbox);
+        canonicalFolders.add(identity.path);
+        for (const id of [...ids]) {
+          const key = JSON.stringify([identity.path, id]);
+          if (queried.has(key) || budget.remaining <= 0 || items.size >= 500) continue;
+          queried.add(key);
+          progressed = true;
+          const messages = await this.imapClient.fetchThreadMessages(id, identity.path, { expand: false, budget });
+          const after = await this.imapClient.getMailboxIdentity(identity.path);
+          if (after.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed during thread read.');
+          for (const message of this.locateMessages(messages, identity.path, identity.uidValidity)) {
+            if (items.size >= 500) break;
+            items.set(message.locator, message);
+            for (const ref of message.referenceIds ?? []) if (ids.size < 100) ids.add(ref);
+          }
+        }
+      }
+      if (!progressed) break;
+    }
+    return {
+      items: [...items.values()].sort((a, b) => (a.date?.getTime() ?? 0) - (b.date?.getTime() ?? 0)),
+      folders: [...canonicalFolders],
+      partial: true,
+      warning: 'Thread reconstruction is bounded to the requested folders, 500 messages and 100 searches. Missing, deleted or unreferenced messages cannot be ruled out. Include the Sent folder explicitly when needed.',
+    };
   }
 
   async readRawEmail(locator: string, maxBytes: number = 10 * 1024 * 1024): Promise<RawEmailResult> {
@@ -1097,14 +1136,14 @@ export class MailService {
     };
   }
 
-  async downloadAttachment(uid: string, filename: string, folder: string = 'INBOX', maxBytes: number = 50 * 1024 * 1024): Promise<{ content: Buffer, contentType: string }> {
+  async downloadAttachment(uid: string, filename: string, folder: string = 'INBOX', maxBytes: number = 50 * 1024 * 1024, expectedUidValidity?: string): Promise<{ content: Buffer, contentType: string }> {
     const size = await this.imapClient.fetchAttachmentSize(uid, filename, folder);
     if (size != null && size > maxBytes) {
       throw new ValidationError(
         `Attachment "${filename}" is ${Math.round(size / 1024 / 1024)} MB, which exceeds the ${Math.round(maxBytes / 1024 / 1024)} MB limit. Use an email client to download large attachments directly.`
       );
     }
-    const parsed = await this._cachedFetchBody(uid, folder);
+    const parsed = await this._cachedFetchBody(uid, folder, expectedUidValidity);
     if (!parsed.attachments || parsed.attachments.length === 0) {
       throw new Error('No attachments found in this email');
     }
@@ -1124,11 +1163,11 @@ export class MailService {
     maxBytes: number = 50 * 1024 * 1024,
   ): Promise<{ content: Buffer, contentType: string }> {
     const resolved = await this.resolveLocator(locator);
-    return this.downloadAttachment(resolved.uid.toString(), filename, resolved.mailbox, maxBytes);
+    return this.downloadAttachment(resolved.uid.toString(), filename, resolved.mailbox, maxBytes, resolved.uidValidity);
   }
 
-  async extractAttachmentText(uid: string, filename: string, folder: string = 'INBOX'): Promise<string> {
-    const { content, contentType } = await this.downloadAttachment(uid, filename, folder);
+  async extractAttachmentText(uid: string, filename: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<string> {
+    const { content, contentType } = await this.downloadAttachment(uid, filename, folder, 50 * 1024 * 1024, expectedUidValidity);
     if (contentType === 'application/pdf') {
       // pdf-parse v2 exports the PDFParse class and no default function, so the
       // v1 call shape (`pdf.default || pdf`) resolves to the module namespace
@@ -1150,7 +1189,7 @@ export class MailService {
 
   async extractLocatedAttachmentText(locator: string, filename: string): Promise<string> {
     const resolved = await this.resolveLocator(locator);
-    return this.extractAttachmentText(resolved.uid.toString(), filename, resolved.mailbox);
+    return this.extractAttachmentText(resolved.uid.toString(), filename, resolved.mailbox, resolved.uidValidity);
   }
 
   async extractContacts(folder: string = 'INBOX', count: number = 100): Promise<ContactInfo[]> {
@@ -1201,6 +1240,8 @@ export class MailService {
 
   async renameMailbox(path: string, newPath: string): Promise<{ path: string; newPath: string }> {
     const result = await this.imapClient.renameMailbox(path, newPath);
+    this.bodyCache.clear();
+    this.bodyFetches.clear();
     this.clearMailboxResolutionCaches();
     this.paginationStore.clear();
     return result;
@@ -1208,6 +1249,8 @@ export class MailService {
 
   async deleteMailbox(path: string): Promise<{ path: string }> {
     const result = await this.imapClient.deleteMailbox(path);
+    this.bodyCache.clear();
+    this.bodyFetches.clear();
     this.clearMailboxResolutionCaches();
     this.paginationStore.clear();
     return result;

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { simpleParser } from 'mailparser';
 import { MailService } from './mail.js';
 import { SmtpClient } from '../protocol/smtp.js';
+import { AppendNotSavedError } from '../protocol/imap.js';
 import { encodeMessageLocator } from '../domain/message-locator.js';
 import type { EmailAccount } from '../config.js';
 
@@ -37,6 +38,72 @@ async function fixture(overrides: Partial<EmailAccount> = {}) {
 }
 
 describe('threaded reply drafts with real MIME composition', () => {
+  it('reports a definite APPEND failure as an error instead of an uncertain saved draft', async () => {
+    const f = await fixture();
+    const error = new AppendNotSavedError('Draft was not saved: mailbox unavailable.');
+    f.append.mockRejectedValueOnce(error);
+    await expect(f.service.createReplyDraft(f.locator, 'Reply')).rejects.toBe(error);
+    expect(f.send).not.toHaveBeenCalled();
+  });
+  it.each(['draft', 'reply', 'replyAll', 'forward', 'read'] as const)('rejects a mailbox reset between locator validation and %s body fetch', async operation => {
+    const f = await fixture();
+    vi.mocked(f.service.imap.getMailboxIdentity)
+      .mockResolvedValueOnce({ path: 'INBOX', uidValidity: '1' })
+      .mockResolvedValue({ path: 'INBOX', uidValidity: '2' });
+    const action = operation === 'draft' ? f.service.createReplyDraft(f.locator, 'Body')
+      : operation === 'reply' ? f.service.replyLocatedEmail(f.locator, 'Body')
+      : operation === 'replyAll' ? f.service.replyAllEmail(f.locator, 'Body')
+      : operation === 'forward' ? f.service.forwardLocatedEmail(f.locator, 'to@example.test', 'Body')
+      : f.service.readLocatedEmail(f.locator);
+    await expect(action).rejects.toThrow('identity changed');
+    expect(f.service.imap.fetchMessageBody).not.toHaveBeenCalled();
+    expect(f.append).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
+  });
+  it('reports saved with recovery instructions when mailbox lookup fails after APPEND', async () => {
+    const f = await fixture();
+    vi.mocked(f.service.imap.getMailboxIdentity).mockImplementation(async path => {
+      if (path === 'Drafts') throw new Error('connection lost');
+      return { path, uidValidity: '1' };
+    });
+    const result = await f.service.createReplyDraft(f.locator, 'Reply');
+    expect(result).toMatchObject({ status: 'saved', retrySafe: false, folder: 'Drafts', uid: 2 });
+    expect(result.messageId).toBeTruthy();
+    expect(result.nextAction).toContain('Do not create another copy');
+    expect(result.locator).toBeUndefined();
+    expect(f.append).toHaveBeenCalledOnce();
+  });
+
+  it('uses APPENDUID identity without a post-save STATUS and reports unknown APPEND outcomes', async () => {
+    const f = await fixture();
+    f.append.mockResolvedValueOnce({ uid: 2, uidValidity: '3' });
+    expect((await f.service.createReplyDraft(f.locator, 'Reply')).locator).toBeTruthy();
+    expect(f.service.imap.getMailboxIdentity).not.toHaveBeenCalledWith('Drafts');
+    f.append.mockRejectedValueOnce(new Error('response lost'));
+    expect(await f.service.createReplyDraft(f.locator, 'Reply')).toMatchObject({ status: 'append_outcome_unknown', retrySafe: false });
+  });
+  it('retains every Reply-To recipient for drafts and immediate replies', async () => {
+    const f = await fixture();
+    f.source.replyTo = { value: [{ address: 'one@example.test', name: '' }, { address: 'two@example.test', name: '' }, { address: 'ONE@example.test', name: '' }], text: '', html: '' };
+    await f.service.createReplyDraft(f.locator, 'Reply');
+    expect((await simpleParser(f.append.mock.calls[0][1])).to).toMatchObject({ value: [{ address: 'one@example.test' }, { address: 'two@example.test' }] });
+    const send = vi.spyOn(f.service, 'sendMessage').mockResolvedValue({} as any);
+    await f.service.replyEmail('1', 'INBOX', 'Reply');
+    expect(send.mock.calls[0][0].to).toBe('one@example.test, two@example.test');
+  });
+  it('does not reuse cached bodies across UIDVALIDITY generations', async () => {
+    const f = await fixture();
+    await f.service.createReplyDraft(f.locator, 'Old reply');
+    const next = await simpleParser('From: new@example.test\r\nMessage-ID: <new@example.test>\r\n\r\nNew');
+    vi.mocked(f.service.imap.fetchMessageBody).mockResolvedValue(next);
+    vi.mocked(f.service.imap.getMailboxIdentity).mockImplementation(async path => ({ path, uidValidity: '2' }));
+    const locator = encodeMessageLocator({ accountId: 'reply-test', mailbox: 'INBOX', uidValidity: '2', uid: 1 });
+    await f.service.createReplyDraft(locator, 'New reply');
+    const draft = await simpleParser(f.append.mock.calls[1][1]);
+    expect(draft.to).toMatchObject({ value: [{ address: 'new@example.test' }] });
+    expect(draft.inReplyTo).toBe('<new@example.test>');
+    expect(f.service.imap.fetchMessageBody).toHaveBeenCalledTimes(2);
+  });
   it('saves a reply with Reply-To, a complete reference chain, HTML and a new attachment without SMTP', async () => {
     const f = await fixture();
     const result = await f.service.createReplyDraft(f.locator, '<p>Reviewed reply</p>', {

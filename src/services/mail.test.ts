@@ -24,6 +24,7 @@ const mockGetMailboxStatus = vi.fn().mockResolvedValue([
 ]);
 const mockListFolders = vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts']);
 const mockScanSenderEnvelopes = vi.fn().mockResolvedValue([]);
+const mockSearchUidPage = vi.fn().mockResolvedValue({ uids: [], nextBefore: null });
 const mockSearchMessageUids = vi.fn().mockResolvedValue([]);
 const mockFetchMessagesByUids = vi.fn().mockResolvedValue([]);
 
@@ -41,6 +42,7 @@ vi.mock('../protocol/imap.js', () => {
         listFolders: mockListFolders,
         scanSenderEnvelopes: mockScanSenderEnvelopes,
         searchMessageUids: mockSearchMessageUids,
+        searchUidPage: mockSearchUidPage,
         fetchMessagesByUids: mockFetchMessagesByUids,
       };
     }),
@@ -286,17 +288,17 @@ describe('MailService searchable delivery identifiers', () => {
       cc: 'cc@example.com',
       messageId: '<delivery@example.com>',
     }, { folder: 'Sent', limit: 5 });
-    expect(mockSearchMessageUids).toHaveBeenCalledWith({
+    expect(mockSearchUidPage).toHaveBeenCalledWith('Sent', '1', {
       to: 'to@example.com',
       cc: 'cc@example.com',
       header: { 'Message-ID': '<delivery@example.com>' },
-    }, 'Sent', 10_000);
+    }, 5, undefined);
   });
 
   it('maps bounded keyword groups and status filters without fetching message text', async () => {
     const account = { id: 'test', name: 'Test', user: 'test@example.com' } as any;
     const service = new MailService(account, false);
-    mockGetMailboxIdentity.mockResolvedValueOnce({ path: 'INBOX', uidValidity: '2' });
+    mockGetMailboxIdentity.mockResolvedValueOnce({ path: 'INBOX', uidValidity: '2' }).mockResolvedValueOnce({ path: 'INBOX', uidValidity: '2' });
     mockSearchMessageUids.mockClear();
     mockFetchMessagesByUids.mockClear();
     await service.searchEmailsPage({
@@ -308,7 +310,7 @@ describe('MailService searchable delivery identifiers', () => {
       unread: true,
       flagged: false,
     }, { folder: 'INBOX', limit: 5, headerOnly: true });
-    expect(mockSearchMessageUids).toHaveBeenCalledWith({
+    expect(mockSearchUidPage).toHaveBeenCalledWith('INBOX', '2', {
       body: 'legacy-body-term',
       flagged: false,
       not: {
@@ -320,7 +322,7 @@ describe('MailService searchable delivery identifiers', () => {
       },
       or: [{ text: 'blue' }, { text: 'red' }],
       seen: false,
-    }, 'INBOX', 10_000);
+    }, 5, undefined);
     expect(mockFetchMessagesByUids).toHaveBeenCalledWith([], 'INBOX', true);
   });
 
@@ -609,6 +611,8 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     const firstRead = service.readEmail('shared');
     const secondRead = service.readEmail('shared');
 
+    await vi.waitFor(() => expect(mockFetchMessageBody).toHaveBeenCalledTimes(1));
+
     expect(mockFetchMessageBody).toHaveBeenCalledTimes(1);
     resolveBody(makeParsedMail({}));
     await expect(Promise.all([firstRead, secondRead])).resolves.toHaveLength(2);
@@ -638,6 +642,7 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     await service.connect();
 
     const staleRead = service.readEmail('changed');
+    await vi.waitFor(() => expect(mockFetchMessageBody).toHaveBeenCalledTimes(1));
     service.invalidateBodyCache('INBOX', 'changed');
     await expect(service.readEmail('changed')).resolves.toContain('Current subject');
 
@@ -747,7 +752,7 @@ describe('MailService replyEmail', () => {
     const service = new MailService(baseAccount, false);
     await service.connect();
     await service.replyEmail('42', 'INBOX', 'My reply');
-    expect(mockFetchMessageBody).toHaveBeenCalledWith('42', 'INBOX');
+    expect(mockFetchMessageBody).toHaveBeenCalledWith('42', 'INBOX', '1');
   });
 
   it('sends to the original sender address', async () => {
@@ -1260,7 +1265,9 @@ describe('MailService.extractAttachmentText', () => {
     const service = serviceReturning(buildPdf('Invoice 39A total 1234.56'), 'application/pdf');
     const text = await service.extractAttachmentText('1', 'invoice.pdf');
     expect(text).toContain('Invoice 39A total 1234.56');
-  });
+  // The first pdf.js import/worker startup exceeds 5s on fresh Windows CI;
+  // keep the real parser assertion and a finite cold-start budget.
+  }, 30_000);
 
   it('returns text/* attachments as UTF-8', async () => {
     const service = serviceReturning(Buffer.from('plain body'), 'text/plain');

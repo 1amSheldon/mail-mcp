@@ -6,6 +6,17 @@ afterEach(() => {
 });
 
 describe('automatic package updates', () => {
+  it('does not contact the upstream registry or schedule restarts for local fork builds', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const onUpdateAvailable = vi.fn();
+    const monitor = startAutoUpdateMonitor({ currentVersion: '3.0.1-fork.1', intervalMs: 60000, onUpdateAvailable });
+    await vi.advanceTimersByTimeAsync(3600000);
+    expect(fetchSpy).not.toHaveBeenCalled();
+    expect(onUpdateAvailable).not.toHaveBeenCalled();
+    monitor.stop();
+    fetchSpy.mockRestore();
+  });
   it('compares stable semantic versions without downgrading', () => {
     expect(isVersionNewer('1.6.0', '1.5.5')).toBe(true);
     expect(isVersionNewer('2.0.0', '1.99.99')).toBe(true);
