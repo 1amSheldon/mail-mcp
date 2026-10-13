@@ -15,7 +15,7 @@ import type {
   MicrosoftSendResult,
   MicrosoftTokenProvider,
 } from './common.js';
-import { child, elements, parseEwsXml, textChild } from './xml.js';
+import { child, elements, EWS_MESSAGES_NS, parseEwsXml, textChild } from './xml.js';
 import type { Element } from '@xmldom/xmldom';
 
 export interface EwsClientOptions {
@@ -83,6 +83,15 @@ export interface EwsSearchOptions {
   folderId?: string;
   distinguishedFolderId?: string;
   maxResults?: number;
+  offset?: number;
+}
+
+export interface EwsSearchResult {
+  messages: EwsMessageSummary[];
+  partial: boolean;
+  nextOffset?: number;
+  totalItems?: number;
+  warning?: string;
 }
 
 const SOAP_NS = 'http://schemas.xmlsoap.org/soap/envelope/';
@@ -184,8 +193,12 @@ export class EwsClient {
     this.timeoutMs = options.timeoutMs ?? 30_000;
   }
 
-  async searchMessages(options: EwsSearchOptions = {}): Promise<EwsMessageSummary[]> {
+  async searchMessages(options: EwsSearchOptions = {}): Promise<EwsSearchResult> {
     const maxResults = options.maxResults ?? 50;
+    const offset = options.offset ?? 0;
+    if (!Number.isSafeInteger(offset) || offset < 0) {
+      throw new MicrosoftProviderError('ews', 'validation', 'EWS offset must be a nonnegative safe integer');
+    }
     if (!Number.isInteger(maxResults) || maxResults < 1 || maxResults > 1000) {
       throw new MicrosoftProviderError('ews', 'validation', 'EWS maxResults must be an integer from 1 to 1000');
     }
@@ -203,7 +216,7 @@ export class EwsClient {
       + '<m:ItemShape><t:BaseShape>IdOnly</t:BaseShape>'
       + '<t:AdditionalProperties><t:FieldURI FieldURI="item:Subject" />'
       + '<t:FieldURI FieldURI="message:InternetMessageId" /></t:AdditionalProperties></m:ItemShape>'
-      + `<m:IndexedPageItemView MaxEntriesReturned="${maxResults}" Offset="0" BasePoint="Beginning" />`
+      + `<m:IndexedPageItemView MaxEntriesReturned="${maxResults}" Offset="${offset}" BasePoint="Beginning" />`
       + query
       + '<m:ParentFolderIds>'
       + (options.folderId
@@ -211,7 +224,21 @@ export class EwsClient {
         : `<t:DistinguishedFolderId Id="${escapeXml(options.distinguishedFolderId ?? 'inbox')}" />`)
       + '</m:ParentFolderIds>'
       + '</m:FindItem>';
-    return parseMessages(await this.soap('FindItem', operation, false));
+    const xml = await this.soap('FindItem', operation, false);
+    const root = elements(parseEwsXml(xml), 'RootFolder', EWS_MESSAGES_NS)[0];
+    const last = root?.getAttribute('IncludesLastItemInRange');
+    const nextText = root?.getAttribute('IndexedPagingOffset');
+    const next = nextText && /^\d+$/.test(nextText) ? Number(nextText) : undefined;
+    const totalText = root?.getAttribute('TotalItemsInView');
+    const total = totalText && /^\d+$/.test(totalText) ? Number(totalText) : undefined;
+    const partial = last !== 'true';
+    const canContinue = partial && next !== undefined && Number.isSafeInteger(next) && next > offset;
+    return {
+      messages: parseMessages(xml), partial,
+      ...(canContinue ? { nextOffset: next } : {}),
+      ...(total !== undefined && Number.isSafeInteger(total) ? { totalItems: total } : {}),
+      ...(partial && !canContinue ? { warning: 'EWS did not provide a usable next-page offset. These results may be incomplete.' } : {}),
+    };
   }
 
   async getMessage(itemId: string): Promise<EwsMessage> {

@@ -123,6 +123,12 @@ export interface GraphThreadResult {
   warning?: GraphThreadWarning;
 }
 
+export interface GraphLookupResult {
+  messages: GraphMessageSummary[];
+  partial: boolean;
+  warning?: string;
+}
+
 interface GraphCollection<T> {
   value?: T[];
   '@odata.nextLink'?: string;
@@ -327,7 +333,7 @@ export class MicrosoftGraphClient {
     ));
   }
 
-  async findByInternetMessageId(internetMessageId: string): Promise<GraphMessageSummary[]> {
+  async findByInternetMessageId(internetMessageId: string): Promise<GraphLookupResult> {
     if (!internetMessageId) {
       throw new MicrosoftProviderError('graph', 'validation', 'Internet Message-ID is required');
     }
@@ -335,10 +341,35 @@ export class MicrosoftGraphClient {
       '$filter': `internetMessageId eq '${escapeODataString(internetMessageId)}'`,
       '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime',
     });
-    const collection = await this.requestJson<GraphCollection<unknown>>(
-      `${this.mailboxPath}/messages?${params.toString()}`,
-    );
-    return (collection.value ?? []).map(parseMessage);
+    let path: string | undefined = `${this.mailboxPath}/messages?${params.toString()}`;
+    const messages = new Map<string, GraphMessageSummary>();
+    const visited = new Set<string>();
+    while (path) {
+      if (visited.has(path) || visited.size >= GRAPH_MAX_THREAD_PAGES || messages.size >= GRAPH_MAX_THREAD_MESSAGES) {
+        return { messages: [...messages.values()], partial: true, warning: 'Message-ID lookup reached its pagination safety limit; absence of additional copies is not established.' };
+      }
+      visited.add(path);
+      try {
+        const collection: GraphCollection<unknown> = await this.requestJson(path);
+        if (!Array.isArray(collection.value)) throw new MicrosoftProviderError('graph', 'invalid_response', 'Missing message collection');
+        for (const value of collection.value) {
+          const message = parseMessage(value);
+          if (messages.size >= GRAPH_MAX_THREAD_MESSAGES && !messages.has(message.id)) {
+            return { messages: [...messages.values()], partial: true, warning: 'Message-ID lookup exceeded the message limit.' };
+          }
+          messages.set(message.id, message);
+        }
+        const next: unknown = collection['@odata.nextLink'];
+        if (next !== undefined && (typeof next !== 'string' || !next)) {
+          throw new MicrosoftProviderError('graph', 'invalid_response', 'Invalid next page');
+        }
+        path = next === undefined ? undefined : this.validatedNextLink(next as string);
+      } catch (error) {
+        if (!(error instanceof MicrosoftProviderError) || error.kind === 'auth' || visited.size === 1 && messages.size === 0) throw error;
+        return { messages: [...messages.values()], partial: true, warning: 'Message-ID lookup could not finish paging; absence of additional copies is not established.' };
+      }
+    }
+    return { messages: [...messages.values()], partial: false };
   }
 
   async getThread(anchor: GraphMessageSummary): Promise<GraphThreadResult> {

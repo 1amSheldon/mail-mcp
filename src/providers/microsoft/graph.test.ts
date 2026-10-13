@@ -265,7 +265,24 @@ describe('MicrosoftGraphClient', () => {
     expect(url.pathname).toBe('/v1.0/users/mailbox%2Balias%40example.com/messages');
     expect(url.searchParams.get('$filter'))
       .toBe("internetMessageId eq '<o''hara+tag@example.com>'");
-    expect(found).toEqual([{ id: 'graph-id', internetMessageId: "<o'hara+tag@example.com>" }]);
+    expect(found).toEqual({ messages: [{ id: 'graph-id', internetMessageId: "<o'hara+tag@example.com>" }], partial: false });
+  });
+
+  it.each(['complete', 'loop', 'failure', 'foreign'])('reports Message-ID lookup pagination honestly: %s', async mode => {
+    let page = 0;
+    const fetchMock = vi.fn<MicrosoftFetch>().mockImplementation(async () => {
+      page++;
+      if (page === 2 && mode === 'failure') return new Response('', { status: 503 });
+      return new Response(JSON.stringify({ value: [{ id: String(page) }],
+        ...(page === 1 || mode === 'loop' ? { '@odata.nextLink': mode === 'foreign'
+          ? 'https://attacker.example/messages' : 'https://graph.microsoft.com/v1.0/me/messages?page=2' } : {}),
+      }));
+    });
+    const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+    const result = await client.findByInternetMessageId('<same@example.com>');
+    expect(result.partial).toBe(mode !== 'complete');
+    expect(result.messages.length).toBe(mode === 'failure' || mode === 'foreign' ? 1 : 2);
+    expect(fetchMock).toHaveBeenCalledTimes(mode === 'foreign' ? 1 : 2);
   });
 
   it('returns a structured partial warning instead of pretending an anchor-only result is complete', async () => {

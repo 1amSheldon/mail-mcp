@@ -10,7 +10,7 @@ const SOAP_OK = `<?xml version="1.0"?>
 const SOAP_MESSAGES = `<?xml version="1.0"?>
 <s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" xmlns:m="http://schemas.microsoft.com/exchange/services/2006/messages" xmlns:t="http://schemas.microsoft.com/exchange/services/2006/types">
   <s:Body><m:FindItemResponse><m:ResponseMessages><m:FindItemResponseMessage ResponseClass="Success">
-    <m:ResponseCode>NoError</m:ResponseCode><m:RootFolder><t:Items><t:Message>
+    <m:ResponseCode>NoError</m:ResponseCode><m:RootFolder IncludesLastItemInRange="true" TotalItemsInView="1"><t:Items><t:Message>
       <t:ItemId Id="item-1" ChangeKey="change-1"/><t:Subject>One &amp; Two</t:Subject>
       <t:InternetMessageId>&lt;one@example.com&gt;</t:InternetMessageId>
     </t:Message></t:Items></m:RootFolder>
@@ -71,12 +71,29 @@ describe('EwsClient', () => {
     expect(body).toContain('subject:&quot;x&lt;/m:QueryString&gt;&lt;m:DeleteItem&gt;&quot; &amp; &apos;');
     expect(body).toContain('Id="inbox&quot;/&gt;&lt;t:FolderId Id=&quot;attacker"');
     expect(body).not.toContain('</m:QueryString><m:DeleteItem>');
-    expect(messages).toEqual([{
+    expect(messages).toEqual({ messages: [{
       itemId: 'item-1',
       changeKey: 'change-1',
       subject: 'One & Two',
       internetMessageId: '<one@example.com>',
-    }]);
+    }], partial: false, totalItems: 1 });
+  });
+
+  it('exposes the next EWS offset and accepts it without dropping subsequent pages', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>()
+      .mockResolvedValueOnce(new Response(SOAP_MESSAGES.replace('IncludesLastItemInRange="true"', 'IncludesLastItemInRange="false" IndexedPagingOffset="50"')))
+      .mockResolvedValueOnce(new Response(SOAP_MESSAGES));
+    const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });
+    const first = await client.searchMessages();
+    expect(first).toMatchObject({ partial: true, nextOffset: 50 });
+    expect((await client.searchMessages({ offset: first.nextOffset })).partial).toBe(false);
+    expect(String(fetchMock.mock.calls[1][1]?.body)).toContain('Offset="50"');
+  });
+
+  it('does not claim completion when EWS omits paging metadata', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(SOAP_MESSAGES.replace(' IncludesLastItemInRange="true"', '')));
+    const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });
+    expect(await client.searchMessages()).toMatchObject({ partial: true, warning: expect.any(String) });
   });
 
   it('escapes every user-controlled send field and embeds attachment bytes safely', async () => {

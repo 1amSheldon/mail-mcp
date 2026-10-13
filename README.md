@@ -192,6 +192,8 @@ Provider operations use a prefix, for example `apple.listMessages`, `microsoft.s
 
 `microsoft.searchMessages` is available through EWS. Microsoft Graph supports ID lookup, Internet Message-ID lookup, and thread lookup instead.
 
+Microsoft lookup/search results use `{ messages, partial }`. Graph Internet Message-ID lookup follows all validated pages up to 100 pages or 10,000 messages; failures or limits return `partial: true` with a warning. EWS search returns one page (default 50, maximum 1,000). When `nextOffset` is present, pass it as `offset` with the same search options to continue until `partial: false`. EWS offsets refer to a live mailbox, not a snapshot; concurrent changes can affect paging. Missing paging metadata is reported as incomplete.
+
 `microsoft.getMessage` returns the full text or HTML body with its content type, sender, recipients, dates and attachment metadata. Search and thread operations return compact summaries. Attachment bytes are not embedded in message reads. Returned HTML is email content and must be treated as untrusted by clients; the server's configured text redaction also applies to provider message bodies.
 
 Moving to Trash and permanent deletion remain separate operations: `moveToTrash` and `permanentlyDelete`.
