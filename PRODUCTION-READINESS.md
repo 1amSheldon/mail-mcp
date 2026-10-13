@@ -70,6 +70,9 @@ secrets; Microsoft requests reject redirects and treat send-side 5xx as unknown.
 - EWS attachment sends first save a draft, then send its exact ItemId/ChangeKey.
   The draft ID remains available when SendItem fails. A saved draft can remain
   after a later failure; it is not automatically deleted or resent.
+- EWS and Graph draft creation can also have an uncertain result. These errors
+  report `operation: createDraft`, `deliveryAttempted: false` and `retrySafe: false`.
+  Inspect Drafts before creating another copy; delivery has not started.
 - EWS honors `saveToSentItems: false` for both direct and attachment sends.
 - Apple Mail compose/draft operations require the chosen From address to belong
   to the selected native account. An empty alias list fails before message creation.
@@ -123,7 +126,7 @@ not silently marked resolved.
 ## Automated qualification
 
 The complete `npm run release:check` passed on Windows with Node 24 after the
-independent review fixes: build, English-only check, 1006 unit tests in 66 files,
+independent review fixes: build, English-only check, 1018 unit tests in 66 files,
 8 integration tests, stdio/HTTP/import/installed-package smoke checks, and
 `npm audit` with zero reported vulnerabilities. Three environment-dependent
 IMAP integration cases were skipped because no live test mailbox was supplied.
@@ -144,6 +147,26 @@ credentials and that real SMTP OAuth rejection triggers renewal before a single
 delivery. Independent local TLS fixtures additionally passed implicit TLS,
 STARTTLS, hostname-mismatch rejection in both modes, and disconnect during TLS
 authentication. These checks used disposable local servers and fixture tokens.
+
+Hosted Code Review additionally identified uncertain EWS SaveOnly creation;
+that finding and the equivalent Graph draft-creation paths were corrected and
+independently re-reviewed. Five failure modes per provider verify that no send
+follows an ambiguous save.
+
+The hosted security claim that an implicit-TLS custom socket sends plaintext
+AUTH was not reproduced with the locked Nodemailer 10.0.9 dependency. Its
+SMTPConnection upgrades a supplied connection when secure is true and secured
+is false. The committed real-TCP regression sends a malicious plaintext SMTP
+greeting, observes a TLS ClientHello as the first client bytes, and verifies
+there is no SMTP EHLO/AUTH or credential content. This is evidence for the
+locked dependency; the regression must keep passing after dependency updates.
+Four independent plaintext-peer cases also passed for password and OAuth2
+authentication, with greetings before and after the first client packet. None
+received SMTP commands or invoked the OAuth token callback.
+
+Linux CI also exposed a warm npx-cache permission failure after rebuilding a
+local file package. Build now restores executable mode on the compiled entrypoint;
+installed-command smoke checks this before npm can repair a cold-cache install.
 
 The tests establish bounded fetch requests, stream cancellation, cache behavior,
 protocol safety and failure semantics. They do not establish provider latency,
