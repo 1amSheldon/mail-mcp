@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -1600,13 +1601,13 @@ Options:
   --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
-  --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
-  --install-claude-code       Register an auto-updating user-scoped MCP server in Claude Code
+  --install-claude            Write a local-fork command to Claude Desktop config and exit
+  --install-claude-code       Register this local fork at user scope in Claude Code
   --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
   --skip-skill                Preserve skills without installing the bundled skill
   --install-codex-local       Install this local build as the Windows service without npm auto-updates
-  --install-codex-stdio       Write an auto-updating per-client stdio command to Codex config
-  --auto-update-seconds N     Managed HTTP service update check interval (minimum: 60)
+  --install-codex-stdio       Write a local-fork stdio command to Codex config
+  --auto-update-seconds N     Compatibility option; upstream updates are disabled in this fork
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);
@@ -1764,7 +1765,7 @@ Options:
 
   if (values['install-claude-code']) {
     try {
-      const result = await installClaudeCode(npxArgs);
+      const result = await installClaudeCode(npxArgs, { skipSkill: values['skip-skill'] });
       console.log('mail-mcp configured in Claude Code user scope.');
       if (result.stdout) console.log(result.stdout);
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
@@ -1880,7 +1881,7 @@ Options:
 }
 
 // Importing the module must not start a stdio server.
-const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
+const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
 if (isDirectRun) {
   main().catch((err) => {
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);

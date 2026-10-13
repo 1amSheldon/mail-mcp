@@ -14,6 +14,16 @@ import {
 import { buildMailMcpNpxArgs } from './npm-runtime.js';
 
 describe('installCodex', () => {
+  it('does not inspect an unreadable skill path when skill installation is skipped', async () => {
+    const home = join(tempDir, 'skip-home');
+    const malformed = join(home, 'skills', 'mail-mcp', 'SKILL.md');
+    await mkdir(malformed, { recursive: true });
+    const bundle = await installCodexBundle(join(home, 'config.toml'), home, {
+      transport: 'stdio', npxArgs: ['mail-mcp'], skipSkill: true,
+    });
+    expect(bundle.skill).toMatchObject({ changed: false, skipped: expect.any(String) });
+    await bundle.rollback();
+  });
   it('preserves a shared skill junction, including bundle rollback', async () => {
     const home = join(tempDir, 'linked-home');
     const target = join(tempDir, 'shared-skill');

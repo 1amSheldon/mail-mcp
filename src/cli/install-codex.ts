@@ -322,16 +322,15 @@ export async function installCodexBundle(
   const snapshots = await Promise.all([
     configPath,
     `${configPath}.mail-mcp.bak`,
-    skillPath,
-    `${skillPath}.mail-mcp.bak`,
   ].map(snapshotTextFile));
 
-  let skillChanged = false;
-  const rollback = () => restoreCodexBundle(skillChanged ? snapshots : snapshots.slice(0, 2));
+  const rollback = () => restoreCodexBundle(snapshots);
 
   try {
     const skill = await installCodexSkill(codexHome, { skip: server.skipSkill });
-    skillChanged = skill.changed;
+    // Default policy creates only absent skills. Existing/linked/skipped files
+    // are never read for rollback or written by it.
+    if (skill.changed) snapshots.push({ path: skillPath });
     const config = server.transport === 'http'
       ? await installCodexHttp(configPath, server.options, server.serverName)
       : await installCodex(configPath, server.npxArgs, server.serverName);

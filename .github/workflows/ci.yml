@@ -12,11 +12,14 @@ permissions:
 
 jobs:
   validate:
-    name: Node ${{ matrix.node-version }}
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / Node ${{ matrix.node-version }}
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
         node-version:
           - 20
           - 22
@@ -54,6 +57,9 @@ jobs:
 
       - name: Import smoke
         run: npm run smoke:import
+
+      - name: Installed command smoke
+        run: npm run smoke:installed
 
       - name: Package preview
         run: npm pack --dry-run

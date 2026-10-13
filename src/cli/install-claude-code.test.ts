@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -114,6 +114,15 @@ describe('Claude Code installer', () => {
     expect(await readFile(result.skillPath, 'utf8')).toContain('name: mail-mcp');
   });
 
+  it('honors skipSkill without reading or replacing a managed skill', async () => {
+    const skillPath = join(claudeHome, 'skills', 'mail-mcp', 'SKILL.md');
+    await mkdir(skillPath, { recursive: true });
+    const result = await installClaudeCode(npxArgs, {
+      execFile: vi.fn(async () => ({ stdout: '', stderr: '' })), claudeHome, skipSkill: true,
+    });
+    expect(result.skillChanged).toBe(false);
+  });
+
   it('uses the Windows wrapper when executing on native Windows', async () => {
     const execFile = vi.fn(async () => ({ stdout: '', stderr: '' }));
 
@@ -227,7 +236,8 @@ describe('Claude Code installer', () => {
     });
 
     await writeFile(first.skillPath, 'local Claude instruction\n', 'utf8');
-    const updated = await installClaudeCodeSkill(claudeHome);
+    expect((await installClaudeCodeSkill(claudeHome)).changed).toBe(false);
+    const updated = await installClaudeCodeSkill(claudeHome, { replaceExisting: true });
     expect(await readFile(updated.backupPath!, 'utf8')).toBe('local Claude instruction\n');
     expect(await readFile(updated.skillPath, 'utf8')).toBe(bundled);
   });

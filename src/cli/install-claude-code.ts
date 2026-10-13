@@ -1,10 +1,10 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { copyFile, mkdir, open, readFile, rename, rm } from 'node:fs/promises';
+import { copyFile, open, readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { promisify } from 'node:util';
-import { writeTextFileAtomic } from '../utils/atomic-write.js';
+import { installCodexSkill } from './install-codex.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -47,6 +47,7 @@ export interface ClaudeCodeInstallDependencies {
   execFile?: ClaudeCodeExecFile;
   claudeHome?: string;
   claudeConfigPath?: string;
+  skipSkill?: boolean;
 }
 
 function assertNpxArgs(npxArgs: readonly string[]): void {
@@ -142,32 +143,9 @@ async function writeBufferAtomic(filePath: string, content: Uint8Array): Promise
 
 export async function installClaudeCodeSkill(
   claudeHome: string = join(homedir(), '.claude'),
+  options: { skip?: boolean; replaceExisting?: boolean } = {},
 ): Promise<ClaudeCodeSkillInstallResult> {
-  const skillPath = join(claudeHome, 'skills', 'mail-mcp', 'SKILL.md');
-  const bundledSkill = await readFile(
-    new URL('../../skills/mail-mcp/SKILL.md', import.meta.url),
-    'utf8',
-  );
-
-  let currentSkill: string | undefined;
-  try {
-    currentSkill = await readFile(skillPath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-  }
-
-  if (currentSkill === bundledSkill) {
-    return { skillPath, changed: false };
-  }
-
-  await mkdir(dirname(skillPath), { recursive: true });
-  let backupPath: string | undefined;
-  if (currentSkill !== undefined) {
-    backupPath = `${skillPath}.mail-mcp.bak`;
-    await copyFile(skillPath, backupPath);
-  }
-  await writeTextFileAtomic(skillPath, bundledSkill);
-  return { skillPath, backupPath, changed: true };
+  return installCodexSkill(claudeHome, options);
 }
 
 /**
@@ -242,7 +220,7 @@ export async function installClaudeCode(
 
   let skill: ClaudeCodeSkillInstallResult;
   try {
-    skill = await installClaudeCodeSkill(dependencies.claudeHome);
+    skill = await installClaudeCodeSkill(dependencies.claudeHome, { skip: dependencies.skipSkill });
   } catch (error) {
     if (replacementSnapshot !== undefined) {
       try {
