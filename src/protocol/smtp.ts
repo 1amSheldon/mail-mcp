@@ -128,6 +128,8 @@ export class SmtpPreflightError extends Error {
 export class SmtpClient {
   private transporter: Transporter | null = null;
   private connectPromise: Promise<void> | null = null;
+  private connectingTransport: Transporter | null = null;
+  private generation = 0;
   private readonly composer: Transporter;
 
   constructor(
@@ -148,15 +150,20 @@ export class SmtpClient {
     if (this.transporter) return;
     if (this.connectPromise) return this.connectPromise;
 
-    this.connectPromise = this.createVerifiedTransport();
+    const pending = this.createVerifiedTransport(this.generation);
+    this.connectPromise = pending;
     try {
-      await this.connectPromise;
+      await pending;
     } finally {
-      this.connectPromise = null;
+      if (this.connectPromise === pending) this.connectPromise = null;
     }
   }
 
-  private async createVerifiedTransport(): Promise<void> {
+  private assertGeneration(generation: number): void {
+    if (generation !== this.generation) throw new Error('SMTP connection was cancelled');
+  }
+
+  private async createVerifiedTransport(generation: number): Promise<void> {
     const authConfig: Record<string, unknown> = { user: this.account.user };
 
     if (this.account.authType === 'oauth2') {
@@ -180,6 +187,7 @@ export class SmtpClient {
       }
       authConfig.pass = password;
     }
+    this.assertGeneration(generation);
 
     const smtpPort = this.account.smtpPort || 465;
     const smtpHost = this.account.smtpHost || this.account.host;
@@ -195,22 +203,29 @@ export class SmtpClient {
       auth: authConfig,
     });
 
+    this.connectingTransport = candidate;
     try {
       await candidate.verify();
+      this.assertGeneration(generation);
       this.transporter = candidate;
     } catch (error) {
       if (typeof (candidate as any).close === 'function') {
         (candidate as any).close();
       }
       throw error;
+    } finally {
+      if (this.connectingTransport === candidate) this.connectingTransport = null;
     }
   }
 
   disconnect(): void {
-    if (this.transporter && typeof (this.transporter as any).close === 'function') {
-      (this.transporter as any).close();
+    this.generation++;
+    this.connectPromise = null;
+    for (const transport of new Set([this.transporter, this.connectingTransport])) {
+      if (transport && typeof (transport as any).close === 'function') transport.close();
     }
     this.transporter = null;
+    this.connectingTransport = null;
   }
 
   async send(
@@ -260,8 +275,10 @@ export class SmtpClient {
     }
 
     let composed: SmtpComposedMessage;
+    const generation = this.generation;
     try {
       composed = await this.composeMessage(message);
+      this.assertGeneration(generation);
     } catch (error) {
       // No SMTP transaction has started; callers can correct this without delivery ambiguity.
       throw new SmtpPreflightError(error);
@@ -271,9 +288,10 @@ export class SmtpClient {
 
   async sendRawMessage({ rawMessage, messageId, envelope }: SmtpComposedMessage): Promise<SmtpSendResult> {
     if (!this.transporter) throw new Error('SMTP client not connected');
+    const transport = this.transporter;
 
     try {
-      const info = await this.transporter.sendMail({
+      const info = await transport.sendMail({
         raw: rawMessage,
         envelope: {
           ...envelope,
@@ -288,7 +306,7 @@ export class SmtpClient {
         rawMessage,
       };
     } catch (error) {
-      this.disconnect();
+      if (this.transporter === transport) this.disconnect();
       const reason = error instanceof Error ? error.message : String(error);
       const smtpError = error && typeof error === 'object'
         ? error as { code?: unknown; command?: unknown; rejected?: unknown }
