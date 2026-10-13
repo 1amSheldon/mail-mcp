@@ -4,7 +4,9 @@ const id = z.string().regex(/^(?:[a-fA-F0-9-]{36}:)?[1-9][0-9]{0,15}$/);
 // Zimbra represents single-message conversations with a negative item ID.
 const conversationId = z.string().regex(/^(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}:)?-?[1-9][0-9]{0,15}$/);
 const text = z.string().max(200000).refine(v => !v.includes('\0'));
-const short = z.string().min(1).max(256).refine(v => !/[\r\n\0]/.test(v));
+// Zimbra MailItem naming rules; reject controls instead of silently stripping them.
+const tagName = z.string().min(1).max(255).refine(v => !/[:/"\x00-\x1f]/.test(v)
+  && v.trimEnd().length > 0 && !['.', '..'].includes(v.trimEnd()));
 const addresses = z.array(z.email().max(320)).max(100);
 const page = { query: z.string().min(1).max(4096), limit: z.number().int().min(1).max(100).default(50), cursor: z.string().max(128).optional() };
 const draft = {
@@ -29,10 +31,10 @@ export const ZIMBRA_WRITE_SCHEMAS = {
   createDraft: z.object(draft).strict(),
   updateDraft: z.object({ ...draft, draftId: id }).strict(),
   sendDraft: z.object({ draftId: id }).strict(),
-  createTag: z.object({ name: short, color: z.number().int().min(0).max(9).optional() }).strict(),
+  createTag: z.object({ name: tagName, color: z.number().int().min(0).max(9).optional() }).strict(),
   deleteTag: z.object({ tagId: id }).strict(),
-  addTag: z.object({ messageIds: z.array(id).min(1).max(100), tagName: short }).strict(),
-  removeTag: z.object({ messageIds: z.array(id).min(1).max(100), tagName: short }).strict(),
+  addTag: z.object({ messageIds: z.array(id).min(1).max(100), tagName }).strict(),
+  removeTag: z.object({ messageIds: z.array(id).min(1).max(100), tagName }).strict(),
   moveMessages: z.object({ messageIds: z.array(id).min(1).max(100), folderId: id }).strict(),
   markRead: z.object({ messageIds: z.array(id).min(1).max(100), read: z.boolean() }).strict(),
   moveToTrash: z.object({ messageIds: z.array(id).min(1).max(100) }).strict(),

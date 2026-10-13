@@ -211,3 +211,20 @@ describe('Zimbra operations', () => {
     expect(body(1).Body.MsgActionRequest.action).toEqual({ id: '8,9', op: 'tag', tn: 'urgent' });
   });
 });
+
+
+describe('Zimbra tag-name validation before dispatch', () => {
+  it.each(['', 'x'.repeat(256), 'Project/2026', 'bad:name', 'bad"name', 'bad\tname', 'bad\rname', 'bad\nname', 'bad\0name', '.', '..', '   ', '.. '])('rejects invalid tag name %j without network I/O', async name => {
+    const { client, fetch } = make();
+    for (const operation of ['createTag', 'addTag', 'removeTag'] as const) {
+      await expect(client.executeWrite(operation, operation === 'createTag' ? { name } : { messageIds: ['7'], tagName: name }))
+        .rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it.each(['x'.repeat(255), 'Project 2026', 'Important'])('preserves valid tag name %j', async name => {
+    const { client, body } = make(response('CreateTag', { tag: [{ id: '9', name }] }));
+    await client.executeWrite('createTag', { name });
+    expect(body().Body.CreateTagRequest.tag.name).toBe(name);
+  });
+});

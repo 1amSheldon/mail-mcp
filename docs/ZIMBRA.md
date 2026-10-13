@@ -123,3 +123,7 @@ authentication faults still require login. Rejected input and authentication
 failures report retrySafe: true, meaning the operation can be submitted after
 correction; no automatic retry is performed. Unknown write outcomes remain unsafe.
 Conversation IDs may be negative for native virtual conversations.
+
+Tag names are limited to 255 characters and cannot contain colons, slashes,
+double quotes or control characters. Empty names and dot/dot-dot names are rejected
+before network I/O for creation, tagging and untagging.
