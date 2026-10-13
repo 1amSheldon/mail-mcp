@@ -11,10 +11,10 @@ administrator API. No deployment or changes to corporate mail are part of this P
   concurrency conflicts are explicit; send recovery survives process restart;
   recipient restrictions cannot be bypassed by webmail races or scheduling.
 - [x] Organization: folders, copy, flags, spam, deletion/recovery, tags, counts.
-- [ ] Contacts: create/update/delete, groups, GAL lookup and autocomplete.
+- [x] Contacts: create/update/delete, groups, GAL lookup and autocomplete.
 - [ ] Rules: read and safely replace incoming/outgoing rules, activation, preserve
   unsupported server rule constructs, recipient policy for forwarding actions.
-- [ ] Preferences: read/update supported user settings, signatures, identities,
+- [x] Preferences: read/update supported user settings, signatures, identities,
   out-of-office, supported server capability discovery.
 - [ ] Collaboration: sharing and mountpoints, calendars, invitations, recurrence,
   free/busy, tasks, reminders and native scheduled sending.
@@ -46,10 +46,13 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
 - a7ea7b6: request server modification sequences for guarded edits.
 - ff633c3: immutable send snapshots, exact recipient checks, durable attempt
   claims, restart/concurrency tests and Sent-copy verification.
-- Current increment: reply/reply-all/forward drafts, native identities and
+- 4b6d5af: reply/reply-all/forward drafts, native identities and
   signatures, both body formats, attachment text extraction, stats and copy.
 
-Qualification so far: TypeScript passes; all 1,174 unit tests pass on Node 24,
+- Current increment: contact groups, GAL paging, autocomplete, identities, native
+  preferences and out-of-office with recipient-policy enforcement.
+
+Qualification so far: TypeScript passes; all 1,182 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate
 writes remain untested.
 The complete acceptance matrix above is still pending; do not treat these

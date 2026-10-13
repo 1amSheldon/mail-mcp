@@ -10,6 +10,7 @@ import { composeMime, MAX_MIME_BYTES, parseUploadResponse } from './mime.js';
 import { ZimbraSendJournal, sendStatus } from './send-journal.js';
 import { validateEmailAddresses } from '../../utils/validation.js';
 import { addresses, escapeHtml, parsedAttachments, parseMime, replyEnvelope } from './compose.js';
+import { checkPreferencePolicy } from './preference-policy.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -196,7 +197,7 @@ export class ZimbraClient {
         if (remote) await this.request('GetInfo', { sections: 'mbox' }, 'urn:zimbraAccount');
         return { status: 'session_available', remoteVerified: remote, expiresAt: new Date(session.expiresAt).toISOString(), nextAction: 'Run accounts login ACCOUNT_ID locally when the session expires.' };
       }
-      case 'searchMessages': case 'searchContacts': return this.search(operation, v as { query: string; limit: number; cursor?: string });
+      case 'searchMessages': case 'searchContacts': case 'searchGal': return this.search(operation, v as { query: string; limit: number; cursor?: string; type?: string });
       case 'readMessage': return this.request('GetMsg', { m: { id: (v as { messageId: string }).messageId, html: 1, read: 0, wantModSeq: 1, max: 200000 } });
       case 'getRawMessage': return this.attachment(v as { messageId: string; maxBytes: number });
       case 'getThread': return { ...await this.request('GetConv', { c: { id: (v as { conversationId: string }).conversationId } }), partial: true, warning: 'Conversation metadata only. Read individual messages explicitly; completeness is not guaranteed.' };
@@ -216,30 +217,38 @@ export class ZimbraClient {
         return { items, warning: 'Null means the server did not return this count; mounted/inaccessible resources may be incomplete.' };
       }
       case 'listTags': return this.request('GetTag', {});
-      case 'getContact': return this.request('GetContacts', { cn: { id: (v as { contactId: string }).contactId } });
+      case 'getContact': {
+        const contact = v as typeof ZIMBRA_READ_SCHEMAS.getContact._output;
+        return this.request('GetContacts', { cn: { id: contact.contactId }, derefGroupMember: contact.dereferenceMembers ? 1 : 0, maxMembers: contact.maxMembers });
+      }
       case 'getAttachment': return this.attachment(v as { messageId: string; partId: string; maxBytes: number });
       case 'extractAttachmentText': return this.extractAttachmentText(v as typeof ZIMBRA_READ_SCHEMAS.extractAttachmentText._output);
     }
     throw new ZimbraError('INVALID_INPUT', 'Unknown Zimbra read operation.');
   }
 
-  private async search(operation: string, v: { query: string; limit: number; cursor?: string }): Promise<unknown> {
-    const key = JSON.stringify([operation, v.query, v.limit]);
+  private async search(operation: string, v: { query: string; limit: number; cursor?: string; type?: string }): Promise<unknown> {
+    const key = JSON.stringify([operation, v.query, v.limit, v.type]);
     const cursor = v.cursor ? this.cursors.get(v.cursor) : undefined;
     if (v.cursor && (!cursor || cursor.key !== key || cursor.expires <= Date.now())) throw new ZimbraError('INVALID_INPUT', 'Zimbra cursor expired or does not match the query. Restart the search.');
     const offset = cursor?.offset ?? 0;
-    const result = await this.request('Search', { query: { _content: v.query }, limit: v.limit, offset, types: operation === 'searchContacts' ? 'contact' : 'message', fetch: 'all', read: 0, max: 20000, sortBy: 'dateDesc' });
-    const items = list(result[operation === 'searchContacts' ? 'cn' : 'm']);
-    if (items.length > v.limit || (truth(result.more) && !items.length)) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra returned invalid search pagination.');
+    const gal = operation === 'searchGal';
+    const result = gal ? await this.request('SearchGal', { name: { _content: v.query }, type: v.type, limit: v.limit, offset, sortBy: 'nameAsc', needExp: 1 }, 'urn:zimbraAccount')
+      : await this.request('Search', { query: { _content: v.query }, limit: v.limit, offset, types: operation === 'searchContacts' ? 'contact' : 'message', fetch: 'all', read: 0, max: 20000, sortBy: 'dateDesc' });
+    const received = list(result[gal || operation === 'searchContacts' ? 'cn' : 'm']);
+    const pageable = !gal || truth(result.paginationSupported);
+    const items = received.slice(0, v.limit);
+    if (pageable && (received.length > v.limit || (truth(result.more) && !items.length))) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra returned invalid search pagination.');
     let nextCursor: string | null = null;
-    if (truth(result.more)) {
+    if (truth(result.more) && pageable) {
       for (const [k, entry] of this.cursors) if (entry.expires <= Date.now()) this.cursors.delete(k);
       while (this.cursors.size >= 128) this.cursors.delete(this.cursors.keys().next().value!);
       nextCursor = randomBytes(24).toString('base64url');
       this.cursors.set(nextCursor, { key, offset: offset + items.length, expires: Date.now() + 300000 });
     }
     if (v.cursor) this.cursors.delete(v.cursor);
-    return { items, nextCursor, total: null, partial: nextCursor !== null, warning: 'Native Zimbra offset paging may shift when the mailbox changes. Cursors expire after five minutes.' };
+    return { items, nextCursor, total: null, partial: truth(result.more) || received.length > items.length,
+      warning: pageable ? 'Native Zimbra offset paging may shift when the mailbox changes. Cursors expire after five minutes.' : 'The GAL backend does not confirm pagination support. Narrow the name query to retrieve omitted entries.' };
   }
 
   async executeWrite(operation: ZimbraWriteOperation, input: unknown): Promise<unknown> {
@@ -250,6 +259,14 @@ export class ZimbraClient {
     const v = parsed.data;
     if (Object.hasOwn(NATIVE_WRITE_OPERATIONS, operation)) {
       const native = NATIVE_WRITE_OPERATIONS[operation as keyof typeof NATIVE_WRITE_OPERATIONS].request(v);
+      if (native.name === 'ModifyPrefs') checkPreferencePolicy(native.params._attrs as Record<string, string | string[]>, this.account.allowedRecipients);
+      if (native.name === 'CreateIdentity' || native.name === 'ModifyIdentity') checkPreferencePolicy(object(native.params.identity)._attrs as Record<string, string | string[]>, this.account.allowedRecipients);
+      if (operation === 'updateContactGroup') {
+        const response = await this.executeRead('getContact', { contactId: (v as { contactId: string }).contactId }) as Obj;
+        const contact = object(list(response.cn)[0]);
+        const groupType = list(contact.a).map(object).find(a => a.n === 'type');
+        if (content(groupType) !== 'group' && (contact._attrs as Obj | undefined)?.type !== 'group') throw new ZimbraError('INVALID_INPUT', 'Selected contact is not a group.');
+      }
       return this.request(native.name, native.params, native.namespace, true);
     }
     switch (operation) {

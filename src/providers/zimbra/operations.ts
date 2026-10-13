@@ -53,7 +53,8 @@ export const ZIMBRA_READ_SCHEMAS = {
   mailboxStats: z.object({}).strict(),
   listTags: z.object({}).strict(),
   searchContacts: z.object(page).strict(),
-  getContact: z.object({ contactId: id }).strict(),
+  searchGal: z.object({ ...page, type: z.enum(['all', 'account', 'resource']).default('all') }).strict(),
+  getContact: z.object({ contactId: id, dereferenceMembers: z.boolean().default(false), maxMembers: z.number().int().min(1).max(1000).default(100) }).strict(),
   getAttachment: z.object({ messageId: id, partId: attachmentPart, maxBytes: z.number().int().min(1).max(25 * 1024 * 1024).default(5 * 1024 * 1024) }).strict(),
   extractAttachmentText: z.object({ messageId: id, partId: attachmentPart, maxBytes: z.number().int().min(1).max(25 * 1024 * 1024).default(5 * 1024 * 1024), maxChars: z.number().int().min(1).max(200000).default(100000), maxPages: z.number().int().min(1).max(100).default(25) }).strict(),
 };

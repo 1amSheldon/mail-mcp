@@ -39,7 +39,7 @@ Preserve the returned ID exactly, including any shared-mailbox prefix.
 | `zimbra.mailboxStats` | `{}` | Folder counts/size; missing values remain null, especially for mounted resources |
 | `zimbra.listTags` | `{}` | Tags and IDs |
 | `zimbra.searchContacts` | `query`, `limit?`, `cursor?` | Native address-book search |
-| `zimbra.getContact` | `contactId` | Contact details |
+| `zimbra.getContact` | `contactId`, `dereferenceMembers?`, `maxMembers?` | Contact/group details; member expansion defaults false, maxMembers 1-1000 (default 100) |
 | `zimbra.getAttachment` | `messageId`, `partId`, `maxBytes?` | Embedded binary resource; default 5 MiB, maximum 25 MiB |
 | `zimbra.extractAttachmentText` | `messageId`, `partId`, `maxBytes?`, `maxChars?`, `maxPages?` | PDF/text extraction; explicit partial result |
 
@@ -174,6 +174,9 @@ are not exposed yet.
 
 ## Folders, contacts and user settings
 
+For GAL, contact groups, identities, preference changes and out-of-office workflows,
+read [Zimbra contacts and settings](zimbra-contacts-settings.md).
+
 These are native Zimbra operations; prefix every operation below with `zimbra.`.
 Discover IDs with listFolders, searchContacts and listSignatures. Account IDs used
 by MCP are not Zimbra item IDs. Shared item IDs keep their owner UUID prefix.
@@ -182,8 +185,8 @@ Reads through `mail_query`:
 
 | Operation | Input | Boundary |
 | --- | --- | --- |
-| `zimbra.getAccountInfo` | `{}` | Server version, mailbox information, identities and signatures; a live authenticated read |
-| `zimbra.getPreferences` | `names` array of 1-100 zimbraPref names | Only the requested settings |
+| `zimbra.getAccountInfo` | `{}` | Server version, mailbox information, visible account attributes/features, identities and signatures |
+| `zimbra.getPreferences` | `names?` array of 1-100 zimbraPref names | Selected settings, or all returned preferences when omitted |
 | `zimbra.listIdentities`, `zimbra.listSignatures` | `{}` | Native identities/signatures, not automatically applied to compose |
 | `zimbra.getFolder` | `folderId` | Folder metadata and returned descendants |
 | `zimbra.getMessageMetadata` | `messageIds` | Flags, folder, revision and other server metadata |

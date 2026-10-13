@@ -24,11 +24,25 @@ const signatureId = z.string().uuid();
 const signatureContent = z.array(z.object({ type: z.enum(['text/plain', 'text/html']), content: z.string().max(200000) }).strict()).min(1).max(2)
   .refine(v => new Set(v.map(c => c.type)).size === v.length);
 const signatureParts = (values: z.infer<typeof signatureContent>) => values.map(v => ({ type: v.type, _content: v.content }));
+const prefName = z.string().regex(/^zimbraPref[A-Za-z0-9]+$/);
+const preferences = z.record(prefName, z.union([z.string().max(200000), z.array(z.string().max(20000)).max(100)]))
+  .refine(v => Object.keys(v).length > 0 && Object.keys(v).length <= 100 && JSON.stringify(v).length <= 1048576);
+const groupMember = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('contact'), contactId: itemId }).strict(),
+  z.object({ type: z.literal('gal'), ref: z.string().min(1).max(2048).refine(v => !/[\r\n\0]/.test(v)) }).strict(),
+  z.object({ type: z.literal('email'), email: z.email(), name: z.string().max(255).refine(v => !/[\r\n\0]/.test(v)).optional() }).strict(),
+]);
+const members = z.array(groupMember).max(1000);
+const member = (v: z.infer<typeof groupMember>) => v.type === 'contact' ? { type: 'C', value: v.contactId }
+  : v.type === 'gal' ? { type: 'G', value: v.ref } : { type: 'I', value: v.name ? `${JSON.stringify(v.name)} <${v.email}>` : v.email };
 
 export const NATIVE_READ_OPERATIONS = {
-  getAccountInfo: operation(empty, () => ({ name: 'GetInfo', namespace: 'urn:zimbraAccount', params: { sections: 'mbox,idents,sigs' } })),
-  getPreferences: operation(z.object({ names: z.array(z.string().regex(/^zimbraPref[A-Za-z0-9]+$/)).min(1).max(100) }).strict(),
-    v => ({ name: 'GetPrefs', namespace: 'urn:zimbraAccount', params: { pref: v.names.map(name => ({ name })) } })),
+  getAccountInfo: operation(empty, () => ({ name: 'GetInfo', namespace: 'urn:zimbraAccount', params: { sections: 'mbox,attrs,idents,sigs' } })),
+  getPreferences: operation(z.object({ names: z.array(prefName).min(1).max(100).optional() }).strict(),
+    v => ({ name: 'GetPrefs', namespace: 'urn:zimbraAccount', params: v.names ? { pref: v.names.map(name => ({ name })) } : {} })),
+  autoComplete: operation(z.object({ name: z.string().min(1).max(1024), includeGal: z.boolean().default(true), folderIds: ids.optional(), type: z.enum(['account', 'resource', 'group', 'all']).default('account') }).strict(),
+    v => ({ name: 'AutoComplete', params: { name: { _content: v.name }, includeGal: v.includeGal ? 1 : 0, needExp: 1, t: v.type, ...(v.folderIds ? { folders: v.folderIds.join(',') } : {}) } })),
+  getOutOfOffice: operation(empty, () => ({ name: 'GetPrefs', namespace: 'urn:zimbraAccount', params: { pref: ['zimbraPrefOutOfOfficeReplyEnabled', 'zimbraPrefOutOfOfficeReply', 'zimbraPrefOutOfOfficeFromDate', 'zimbraPrefOutOfOfficeUntilDate', 'zimbraPrefOutOfOfficeExternalReplyEnabled', 'zimbraPrefOutOfOfficeExternalReply'].map(name => ({ name })) } })),
   listSignatures: operation(empty, () => ({ name: 'GetSignatures', namespace: 'urn:zimbraAccount', params: {} })),
   listIdentities: operation(empty, () => ({ name: 'GetIdentities', namespace: 'urn:zimbraAccount', params: {} })),
   getFolder: operation(z.object({ folderId: itemId }).strict(), v => ({ name: 'GetFolder', params: { folder: { id: v.folderId } } })),
@@ -36,6 +50,31 @@ export const NATIVE_READ_OPERATIONS = {
 };
 
 export const NATIVE_WRITE_OPERATIONS = {
+  setPreferences: operation(z.object({ values: preferences }).strict(), v => ({ name: 'ModifyPrefs', namespace: 'urn:zimbraAccount', params: { _attrs: v.values } })),
+  createIdentity: operation(z.object({ name, values: preferences }).strict(), v => ({ name: 'CreateIdentity', namespace: 'urn:zimbraAccount', params: { identity: { name: v.name, _attrs: v.values } } })),
+  updateIdentity: operation(z.object({ identityId: z.string().uuid(), values: preferences }).strict(), v => ({ name: 'ModifyIdentity', namespace: 'urn:zimbraAccount', params: { identity: { id: v.identityId, _attrs: v.values } } })),
+  deleteIdentity: operation(z.object({ identityId: z.string().uuid() }).strict(), v => ({ name: 'DeleteIdentity', namespace: 'urn:zimbraAccount', params: { identity: { id: v.identityId } } })),
+  setOutOfOffice: operation(z.object({ enabled: z.boolean(), message: z.string().max(200000).optional(), startsAt: z.iso.datetime({ offset: true }).optional(), endsAt: z.iso.datetime({ offset: true }).optional() }).strict()
+    .refine(v => !v.enabled || v.message !== undefined)
+    .refine(v => !v.startsAt || !v.endsAt || Date.parse(v.startsAt) < Date.parse(v.endsAt)),
+    v => ({ name: 'ModifyPrefs', namespace: 'urn:zimbraAccount', params: { _attrs: {
+      zimbraPrefOutOfOfficeReplyEnabled: v.enabled ? 'TRUE' : 'FALSE',
+      ...(v.message !== undefined ? { zimbraPrefOutOfOfficeReply: v.message } : {}),
+      ...(v.startsAt ? { zimbraPrefOutOfOfficeFromDate: new Date(v.startsAt).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '') } : {}),
+      ...(v.endsAt ? { zimbraPrefOutOfOfficeUntilDate: new Date(v.endsAt).toISOString().replace(/[-:]/g, '').replace(/\.\d{3}/, '') } : {}),
+    } } })),
+  createContactGroup: operation(z.object({ name, folderId: itemId.optional(), members }).strict(), v => ({ name: 'CreateContact', params: { verbose: 1, cn: { ...(v.folderId ? { l: v.folderId } : {}), a: attributes({ type: 'group', nickname: v.name, fileAs: '8:' + v.name }), m: v.members.map(member) } } })),
+  updateContactGroup: operation(z.object({ contactId: itemId, name: name.optional(), addMembers: members.optional(), removeMembers: members.optional(), clearMembers: z.boolean().default(false) }).strict()
+    .refine(v => v.name !== undefined || v.clearMembers || (v.addMembers?.length ?? 0) > 0 || (v.removeMembers?.length ?? 0) > 0)
+    .refine(v => !v.clearMembers || !v.removeMembers?.length),
+    v => ({ name: 'ModifyContact', params: { replace: 0, verbose: 1, cn: { id: v.contactId,
+      ...(v.name ? { a: attributes({ nickname: v.name, fileAs: '8:' + v.name }) } : {}),
+      m: [...(v.clearMembers ? [{ op: 'reset' }] : []), ...(v.removeMembers ?? []).map(m => ({ op: '-', ...member(m) })), ...(v.addMembers ?? []).map(m => ({ op: '+', ...member(m) }))],
+    } } })),
+  addContactTag: operation(z.object({ contactIds: ids, tagName: name }).strict(), v => contactAction(v.contactIds, 'tag', { tn: v.tagName })),
+  removeContactTag: operation(z.object({ contactIds: ids, tagName: name }).strict(), v => contactAction(v.contactIds, '!tag', { tn: v.tagName })),
+  importContact: operation(z.object({ folderId: itemId.optional(), vcard: z.string().max(1048576).refine(v => /^BEGIN:VCARD\r?\n/.test(v) && /\r?\nEND:VCARD\s*$/.test(v) && (v.match(/BEGIN:VCARD/g)?.length ?? 0) === 1) }).strict(),
+    v => ({ name: 'CreateContact', params: { verbose: 1, cn: { ...(v.folderId ? { l: v.folderId } : {}), vcard: { _content: v.vcard } } } })),
   createFolder: operation(z.object({ name, parentFolderId: itemId, view: z.enum(['message', 'contact', 'appointment', 'task', 'document']).default('message'), color: color.optional() }).strict(),
     v => ({ name: 'CreateFolder', params: { folder: { name: v.name, l: v.parentFolderId, view: v.view, ...(v.color === undefined ? {} : { color: v.color }) } } })),
   renameFolder: operation(z.object({ folderId: itemId, name }).strict(), v => folderAction(v.folderId, 'rename', { name: v.name })),
