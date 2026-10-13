@@ -89,6 +89,7 @@ export const CALENDAR_READ_SCHEMAS = {
   getICalendar: z.object({ invitationId }).strict(),
 };
 export const CALENDAR_WRITE_SCHEMAS = {
+  importICalendar: z.object({ folderId: itemId, content: z.string().min(1).max(1024 * 1024).refine(v => !v.includes('\0') && Buffer.byteLength(v, 'utf8') <= 1024 * 1024) }).strict(),
   updateAppointment: z.object({ ...calendarEdit, changes: appointmentChanges, notifyAttendees: z.boolean().default(false), allowExceptionReset: z.boolean().default(false) }).strict(),
   updateTask: z.object({ ...calendarEdit, changes: taskChanges, notifyAttendees: z.boolean().default(false), allowExceptionReset: z.boolean().default(false) }).strict(),
   createAppointmentException: z.object({ ...calendarEdit, instance: calendarTime, changes: appointmentChanges, notifyAttendees: z.boolean().default(false) }).strict(),

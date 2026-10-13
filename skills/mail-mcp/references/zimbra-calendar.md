@@ -7,6 +7,8 @@ their server owner-qualified IDs and permissions.
 
 | Operation | Input | Behavior |
 | --- | --- | --- |
+| `zimbra.importICalendar` | `folderId`, `content` | Imports UTF-8 iCalendar text up to 1 MiB through native ImportAppointments. May update existing UIDs; non-atomic and unavailable for recipient-restricted accounts. |
+| `zimbra.exportICalendar` | `folderId`, `window?` (`startsAt`, `endsAt`), `includeAttachments?` (true), `maxBytes?` (10 MiB, max 50 MiB) | REST ICS export of the selected folder; returns a binary `text/calendar` resource. Optional window selects series with occurrences, not a clipped set of individual instances. |
 | `zimbra.searchAppointments` | `query`, `startsAt`, `endsAt`, `limit?`, `cursor?` | Native search with occurrences expanded in the required bounded window. Pages contain calendar items with nested instances, not one row per occurrence. |
 | `zimbra.searchTasks` | `query`, `limit?`, `cursor?` | Native task search without a date filter; includes undated tasks. Read matching tasks for full invitations. |
 | `zimbra.getAppointment` | `appointmentId`, `includeContent?` (true) | Reads invitations and replies; `sync=1` requests `ms`/`rev` for conflict handling. |
@@ -46,6 +48,39 @@ An `invitationId` is `calendarItemId-invitationMailId`, optionally preceded by
 a compound `invId` returned by a mutation. GetICal's implementation exports
 component zero only. A standalone invitation mail can be deleted independently
 of the calendar item, so do not use its raw mail ID for durable calendar reads.
+
+## Importing iCalendar
+
+For a folder export, use `exportICalendar`, not GetICal with an invented folder
+parameter. Omit `window` to include all server-exported items, including undated
+tasks. A REST window must start on or after 1970-01-01 UTC, is limited to 200 days and excludes items without occurrences
+there; selected recurring series still retain their recurrence definitions and
+may describe dates outside the window. Dense exports must fit `maxBytes` or fail
+without returning truncated bytes. Window exports are not complete backups.
+`includeAttachments: true` requests inline attachment data, increasing size.
+An ICS envelope check rejects HTML login pages and obvious truncation, but is
+not a semantic validation of every event. Inspect or trial-import the result to
+verify migration fidelity. Never assume an export includes inaccessible items.
+
+Choose the destination calendar/task folder explicitly and inspect the ICS before
+import. Native import can preserve timezone definitions, recurrence, exceptions,
+attendees and alarms represented in the file; server version and parser support
+determine the accepted content. Embedded email alarms can send later. Accounts
+with any `allowedRecipients` policy cannot use opaque ICS import; use typed
+create/update operations with checked recipients instead.
+
+The result separates `serverParsedComponents` from
+`reportedSavedInvitationIds`. `missingComponents` is their difference when the
+response permits that calculation, and `completeness` is `reported_all`,
+`partial` or `unknown`. Even `reported_all` only describes the server's report,
+not a verified round trip. The server may skip invalid components and still
+return success; multiple components can belong to one recurring item. Read each
+returned calendar item to check dates, recurrence, exceptions and alarms.
+
+Import is not a transaction across the file. Existing items with matching UIDs
+may change, and an interrupted request may already have saved some components.
+Never automatically retry the whole file. Reconcile destination items and UIDs
+before preparing a targeted retry. Use a disposable folder for migration trials.
 
 ## Editing, exceptions and responses
 

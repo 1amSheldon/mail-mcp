@@ -1,4 +1,4 @@
-import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS, nativeAlarms, nativeRecurrence, nativeTime } from './calendar-schema.js';
+import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS, invitationId, nativeAlarms, nativeRecurrence, nativeTime } from './calendar-schema.js';
 import { ZimbraError } from './session.js';
 import { CALENDAR_EDIT_OPERATIONS, ZimbraCalendarEdits, type CalendarEditOperation } from './calendar-edit.js';
 
@@ -45,6 +45,23 @@ export class ZimbraCalendar {
     }
   }
   async write(operation: WriteOperation, input: unknown): Promise<unknown> {
+    if (operation === 'importICalendar') {
+      const v = CALENDAR_WRITE_SCHEMAS.importICalendar.parse(input);
+      // Arbitrary ICS can carry email alarms and scheduling methods. A string
+      // scan is not a reliable recipient-policy check for this native parser.
+      if (this.allowedRecipients !== undefined) throw new ZimbraError('ACCESS_DENIED', 'Native iCalendar import is unavailable with allowedRecipients; use typed calendar operations with explicit recipient checks.');
+      const result = await this.request('ImportAppointments', { l: v.folderId, ct: 'text/calendar', content: { _content: v.content } }, true);
+      const nodes = Array.isArray(result.appt) ? result.appt : [result.appt];
+      const summary = nodes.length === 1 && nodes[0] && typeof nodes[0] === 'object' ? nodes[0] as Obj : {};
+      const num = typeof summary.num === 'number' ? summary.num : typeof summary.num === 'string' && /^[0-9]+$/.test(summary.num) ? Number(summary.num) : NaN;
+      const parsedComponents = Number.isSafeInteger(num) && num >= 0 ? num : null;
+      const ids = typeof summary.ids === 'string' ? summary.ids.split(',').filter(Boolean) : null;
+      const savedIds = ids?.every(id => invitationId.safeParse(id).success) ? ids : null;
+      const missing = parsedComponents !== null && savedIds !== null && parsedComponents >= savedIds.length ? parsedComponents - savedIds.length : null;
+      return { native: result, serverParsedComponents: parsedComponents, reportedSavedInvitationIds: savedIds,
+        missingComponents: missing, completeness: missing === null ? 'unknown' : missing > 0 ? 'partial' : 'reported_all',
+        warning: 'Import is not atomic and may update existing items by UID. The server can skip components; its num field is not a success count. Read returned items to verify contents. Do not automatically retry an uncertain or partial import.' };
+    }
     if ((CALENDAR_EDIT_OPERATIONS as readonly string[]).includes(operation)) return this.edits.execute(operation as CalendarEditOperation, input);
     if (operation === 'dismissCalendarAlarm' || operation === 'snoozeCalendarAlarm') {
       const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);

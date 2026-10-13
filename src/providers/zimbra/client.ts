@@ -216,6 +216,14 @@ export class ZimbraClient {
       case 'searchMessages': case 'searchContacts': case 'searchGal': case 'searchDocuments': case 'searchAppointments': case 'searchTasks': return this.search(operation, v as { query: string; limit: number; cursor?: string; type?: string; startsAt?: string; endsAt?: string });
       case 'readMessage': return this.request('GetMsg', { m: { id: (v as { messageId: string }).messageId, html: 1, read: 0, wantModSeq: 1, max: 200000 } });
       case 'getRawMessage': return this.attachment(v as { messageId: string; maxBytes: number });
+      case 'exportICalendar': {
+        const input = v as typeof ZIMBRA_READ_SCHEMAS.exportICalendar._output;
+        const bytes = await this.restBytes({ id: input.folderId, fmt: 'ics', ...(input.includeAttachments ? { icalAttach: 'inline' } : {}),
+          ...(input.window ? { start: String(Date.parse(input.window.startsAt)), end: String(Date.parse(input.window.endsAt)) } : {}) }, input.maxBytes);
+        const text = bytes.toString('utf8').replace(/^\uFEFF/, '').trim();
+        if (!text.startsWith('BEGIN:VCALENDAR') || !text.endsWith('END:VCALENDAR')) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra did not return a complete iCalendar envelope.');
+        return bytes;
+      }
       case 'getThread': return { ...await this.request('GetConv', { c: { id: (v as { conversationId: string }).conversationId } }), partial: true, warning: 'Conversation metadata only. Read individual messages explicitly; completeness is not guaranteed.' };
       case 'listFolders': return this.request('GetFolder', { folder: { path: '/' } });
       case 'mailboxStats': {
@@ -634,11 +642,15 @@ export class ZimbraClient {
   }
 
   private async attachment(v: { messageId: string; partId?: string; version?: number; document?: boolean; maxBytes: number }): Promise<unknown> {
+    return this.restBytes({ id: v.messageId, ...(v.document ? { ...(v.version ? { ver: String(v.version) } : {}) } : v.partId ? { part: v.partId } : { fmt: 'raw' }) }, v.maxBytes);
+  }
+
+  private async restBytes(params: Record<string, string>, maxBytes: number): Promise<Buffer> {
     if (this.closed) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra client is closed.');
     const session = await this.options.sessionProvider();
     if (session.endpoint !== this.endpoint || session.user !== this.account.user || session.expiresAt <= Date.now() + 5000) throw new ZimbraError('AUTH_REQUIRED', 'Run accounts login ACCOUNT_ID locally.');
     const url = new URL('/service/home/~/', this.endpoint);
-    url.search = new URLSearchParams({ id: v.messageId, ...(v.document ? { ...(v.version ? { ver: String(v.version) } : {}) } : v.partId ? { part: v.partId } : { fmt: 'raw' }), auth: 'co' }).toString();
+    url.search = new URLSearchParams({ ...params, auth: 'co' }).toString();
     const controller = new AbortController(); this.pending.add(controller);
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30000);
     try {
@@ -648,13 +660,13 @@ export class ZimbraClient {
         await response.body?.cancel();
         throw new ZimbraError(response.status === 401 ? 'AUTH_REQUIRED' : 'ACCESS_DENIED', response.status === 401 ? 'Zimbra session rejected. Run accounts login ACCOUNT_ID locally.' : 'Zimbra access denied. Check account and proxy permissions.');
       }
-      if (!response.ok) { await response.body?.cancel(); throw new ZimbraError('PROVIDER_ERROR', 'Zimbra attachment request failed.'); }
-      const bytes = await boundedBytes(response, v.maxBytes);
+      if (!response.ok) { await response.body?.cancel(); throw new ZimbraError('PROVIDER_ERROR', 'Zimbra content request failed.'); }
+      const bytes = await boundedBytes(response, maxBytes);
       // Keep binary data out of text redaction; the MCP formatter emits a resource.
       return bytes;
     } catch (error) {
       if (error instanceof ZimbraError) throw error;
-      throw new ZimbraError('PROVIDER_ERROR', 'Zimbra attachment request failed or timed out.');
+      throw new ZimbraError('PROVIDER_ERROR', 'Zimbra content request failed or timed out.');
     } finally { clearTimeout(timer); this.pending.delete(controller); }
   }
 }

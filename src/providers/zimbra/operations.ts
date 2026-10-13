@@ -55,6 +55,7 @@ export const ZIMBRA_READ_SCHEMAS = {
   searchDocuments: z.object(page).strict(),
   searchAppointments: z.object({ ...page, ...calendarWindow }).strict().refine(validWindow),
   searchTasks: z.object(page).strict(),
+  exportICalendar: z.object({ folderId: id, window: z.object(calendarWindow).strict().refine(validWindow).refine(v => Date.parse(v.startsAt) >= 0, 'REST export windows must start on or after 1970-01-01 UTC.').optional(), includeAttachments: z.boolean().default(true), maxBytes: z.number().int().min(1).max(MAX_MIME_BYTES).default(10 * 1024 * 1024) }).strict(),
   readMessage: z.object({ messageId: id }).strict(),
   getRawMessage: z.object({ messageId: id, maxBytes: z.number().int().min(1).max(MAX_MIME_BYTES).default(10 * 1024 * 1024) }).strict(),
   getThread: z.object({ conversationId }).strict(),

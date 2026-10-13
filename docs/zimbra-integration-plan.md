@@ -65,14 +65,24 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
 - 06ed442: version-guarded calendar/task partial edits, MIME and
   attachment retention, recurrence exceptions, cancellation and replies. Native
   cancellation's non-atomic derived recipients are explicit and blocked for
-  recipient-restricted accounts. Import/export, forwarded/counter invites,
+  recipient-restricted accounts. Forwarded/counter invites,
   unprocessed inbox invitations and scheduled mail remain pending.
-- Current increment: appointment search with bounded occurrence expansion and
+- 326db19: appointment search with bounded occurrence expansion and
   window-bound cursors, plus task search retaining undated items. Focused search
   and documentation tests (16) and TypeScript pass. Source inspection confirms
   ImportAppointments can skip bad components while returning the input invite
   count; implementation must expose accepted IDs and incomplete imports rather
   than interpreting that count as successfully imported items.
+- Current increment: native ICS import reports saved IDs separately from parsed
+  component counts and exposes partial/unknown results; blocked under recipient
+  restrictions because opaque calendar data can carry email alarms. REST folder
+  export preserves native series and optional inline attachments, supports bounded
+  selection windows or all-time export, enforces byte limits and rejects invalid
+  envelopes. Profile tests (221), TypeScript and English-only checks pass.
+  Sources additionally inspected: ImportAppointments, IcsFormatter, Formatter,
+  UserServletContext and DateUtil. ForwardCalendarItem sends additional organizer
+  notifications and lacks version guards; recipient-restricted forwarding must
+  not rely solely on the supplied To list.
 
 Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate

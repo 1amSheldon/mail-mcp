@@ -12,6 +12,64 @@ function fixture(responses: Response[], patch: Partial<ZimbraConfiguredAccount> 
 const event = { folderId: '10', subject: 'Planning', start: { type: 'local', at: '2026-10-14T09:00:00', timeZone: 'Europe/Kyiv' }, endExclusive: { type: 'local', at: '2026-10-14T10:00:00', timeZone: 'Europe/Kyiv' } };
 
 describe('Zimbra calendar creation semantics', () => {
+  it('exports the requested folder with inline attachments and no implicit date range', async () => {
+    const content = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n';
+    const { client, fetch } = fixture([new Response(content)]);
+    expect(await client.executeRead('exportICalendar', { folderId: '257' })).toEqual(Buffer.from(content));
+    const url = new URL(String(fetch.mock.calls[0][0]));
+    expect(Object.fromEntries(url.searchParams)).toEqual({ id: '257', fmt: 'ics', icalAttach: 'inline', auth: 'co' });
+    expect(fetch.mock.calls[0][1]).toMatchObject({ redirect: 'error', headers: { cookie: 'ZM_AUTH_TOKEN=session' } });
+  });
+  it('uses millisecond REST dates for a bounded series export', async () => {
+    const { client, fetch } = fixture([new Response('BEGIN:VCALENDAR\nEND:VCALENDAR')]);
+    const window = { startsAt: '2026-10-13T00:00:00Z', endsAt: '2026-10-20T00:00:00Z' };
+    await client.executeRead('exportICalendar', { folderId: '257', window, includeAttachments: false });
+    const params = new URL(String(fetch.mock.calls[0][0])).searchParams;
+    expect(params.get('start')).toBe(String(Date.parse(window.startsAt)));
+    expect(params.get('end')).toBe(String(Date.parse(window.endsAt)));
+    expect(params.has('icalAttach')).toBe(false);
+  });
+  it('rejects login pages, truncated exports and oversized downloads instead of returning them as ICS', async () => {
+    for (const content of ['<html>Login</html>', 'BEGIN:VCALENDAR\nVERSION:2.0']) {
+      const { client } = fixture([new Response(content)]);
+      await expect(client.executeRead('exportICalendar', { folderId: '257' })).rejects.toMatchObject({ code: 'PROVIDER_ERROR' });
+    }
+    const { client } = fixture([new Response('BEGIN:VCALENDAR\nEND:VCALENDAR')]);
+    await expect(client.executeRead('exportICalendar', { folderId: '257', maxBytes: 10 })).rejects.toBeDefined();
+  });
+  it('refuses pre-epoch REST dates that the server would silently replace with defaults', async () => {
+    const { client, fetch } = fixture([]);
+    await expect(client.executeRead('exportICalendar', { folderId: '257', window: { startsAt: '1969-12-01T00:00:00Z', endsAt: '1970-01-01T00:00:00Z' } })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+  it('reports skipped import components instead of treating native num as a success count', async () => {
+    const { client, request } = fixture([response('ImportAppointments', { appt: [{ num: 3, ids: '257-256,257-258' }] })]);
+    const content = 'BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR\r\n';
+    expect(await client.executeWrite('importICalendar', { folderId: '10', content })).toMatchObject({
+      serverParsedComponents: 3, reportedSavedInvitationIds: ['257-256', '257-258'], missingComponents: 1, completeness: 'partial',
+    });
+    expect(request().Body.ImportAppointmentsRequest).toMatchObject({ l: '10', ct: 'text/calendar', content: { _content: content } });
+  });
+  it('preserves uncertainty when import response counts or IDs cannot be reconciled', async () => {
+    for (const appt of [{ num: 'invalid', ids: '257-256' }, { num: 1, ids: 'invalid' }, { num: 0, ids: '257-256' }, undefined]) {
+      const { client } = fixture([response('ImportAppointments', { appt })]);
+      expect(await client.executeWrite('importICalendar', { folderId: '10', content: 'BEGIN:VCALENDAR\nEND:VCALENDAR' })).toMatchObject({ completeness: 'unknown', missingComponents: null });
+    }
+  });
+  it('blocks opaque import for every restricted recipient policy before sending content', async () => {
+    for (const allowedRecipients of [[], ['allowed@example.test']]) {
+      const { client, fetch } = fixture([], { allowedRecipients });
+      await expect(client.executeWrite('importICalendar', { folderId: '10', content: 'BEGIN:VCALENDAR\nEND:VCALENDAR' })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+      expect(fetch).not.toHaveBeenCalled();
+    }
+  });
+  it('bounds ICS UTF-8 bytes and never retries a failed import', async () => {
+    const { client, fetch } = fixture([new Response('Unavailable', { status: 503 })]);
+    await expect(client.executeWrite('importICalendar', { folderId: '10', content: '\u20ac'.repeat(400000) })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(fetch).not.toHaveBeenCalled();
+    await expect(client.executeWrite('importICalendar', { folderId: '10', content: 'BEGIN:VCALENDAR\nEND:VCALENDAR' })).rejects.toBeDefined();
+    expect(fetch).toHaveBeenCalledOnce();
+  });
   it('preserves wall-clock timezone for recurring events and does not notify by default', async () => {
     const { client, request } = fixture([response('CreateAppointment', { calItemId: '257', invId: '257-256' })]);
     await client.executeWrite('createAppointment', { ...event, attendees: [{ email: 'other@example.test' }], recurrence: { rules: [{ frequency: 'WEE', count: 12, byDay: [{ day: 'WE' }] }] } });
