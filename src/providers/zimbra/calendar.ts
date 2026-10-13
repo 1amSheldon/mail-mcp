@@ -1,0 +1,86 @@
+import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS, nativeAlarms, nativeRecurrence, nativeTime } from './calendar-schema.js';
+import { ZimbraError } from './session.js';
+
+type Obj = Record<string, unknown>;
+type Request = (name: string, params: Obj, write?: boolean) => Promise<Obj>;
+type ReadOperation = keyof typeof CALENDAR_READ_SCHEMAS;
+type WriteOperation = keyof typeof CALENDAR_WRITE_SCHEMAS;
+
+export class ZimbraCalendar {
+  constructor(private readonly request: Request, private readonly user: string, private readonly allowedRecipients?: readonly string[]) {}
+  private checkRecipients(recipients: string[]): void {
+    if (this.allowedRecipients === undefined) return;
+    const allowed = new Set(this.allowedRecipients.map(a => a.toLowerCase()));
+    if (recipients.some(a => !allowed.has(a.toLowerCase()))) throw new ZimbraError('ACCESS_DENIED', 'Calendar notification or email-alarm recipient is outside allowedRecipients.');
+  }
+  async read(operation: ReadOperation, input: unknown): Promise<unknown> {
+    switch (operation) {
+      case 'getAppointment': {
+        const v = CALENDAR_READ_SCHEMAS.getAppointment.parse(input);
+        return this.request('GetAppointment', { id: v.appointmentId, sync: 1, includeInvites: 1, includeContent: v.includeContent ? 1 : 0 });
+      }
+      case 'getTask': {
+        const v = CALENDAR_READ_SCHEMAS.getTask.parse(input);
+        return this.request('GetTask', { id: v.taskId, sync: 1, includeInvites: 1, includeContent: v.includeContent ? 1 : 0 });
+      }
+      case 'getRecurrence': return this.request('GetRecur', { id: CALENDAR_READ_SCHEMAS.getRecurrence.parse(input).itemId });
+      case 'getICalendar': return this.request('GetICal', { id: CALENDAR_READ_SCHEMAS.getICalendar.parse(input).invitationId });
+      case 'getCalendarSummaries': {
+        const v = CALENDAR_READ_SCHEMAS.getCalendarSummaries.parse(input);
+        const result = await this.request('GetCalendarItemSummaries', { s: Date.parse(v.startsAt), e: Date.parse(v.endsAt), l: v.folderId });
+        return { ...result, window: { startsAt: v.startsAt, endsAt: v.endsAt }, warning: 'Only occurrences in this window and accessible folder are represented. Read individual items for complete invitations; split dense or oversized windows.' };
+      }
+      case 'getFreeBusy': {
+        const v = CALENDAR_READ_SCHEMAS.getFreeBusy.parse(input);
+        return this.request('GetFreeBusy', { s: Date.parse(v.startsAt), e: Date.parse(v.endsAt), usr: v.users.map(u => ({ name: u.email, ...(u.folderId ? { l: u.folderId } : {}) })), ...(v.excludeUid ? { excludeUid: v.excludeUid } : {}) });
+      }
+      case 'getWorkingHours': {
+        const v = CALENDAR_READ_SCHEMAS.getWorkingHours.parse(input);
+        return this.request('GetWorkingHours', { s: Date.parse(v.startsAt), e: Date.parse(v.endsAt), name: v.emails.join(',') });
+      }
+    }
+  }
+  async write(operation: WriteOperation, input: unknown): Promise<unknown> {
+    if (operation === 'dismissCalendarAlarm' || operation === 'snoozeCalendarAlarm') {
+      const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);
+      return this.request(operation === 'dismissCalendarAlarm' ? 'DismissCalendarItemAlarm' : 'SnoozeCalendarItemAlarm', {
+        [v.kind === 'appointment' ? 'appt' : 'task']: [{ id: v.itemId, ...('until' in v ? { until: Date.parse(v.until) } : { dismissedAt: Date.parse(v.dismissedAt) }) }],
+      }, true);
+    }
+    const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);
+    const appointment = 'endExclusive' in v;
+    const recipients = v.notifyAttendees ? v.attendees.map(a => a.email) : [];
+    this.checkRecipients([...recipients, ...v.alarms.flatMap(a => a.type === 'email' ? a.to : [])]);
+    const comp: Obj = {
+      name: v.subject, isOrg: 1, or: { a: this.user }, class: v.privacy, priority: v.priority, status: v.status,
+      allDay: v.start?.type === 'date' || !appointment && v.due?.type === 'date' ? 1 : 0,
+      at: v.attendees.map(a => ({ a: a.email, ...(a.name === undefined ? {} : { d: a.name }), role: a.role, cutype: a.type, ptst: 'NE', rsvp: a.rsvp ? 1 : 0 })),
+      alarm: nativeAlarms(v.alarms, v.subject),
+      ...(v.start ? { s: nativeTime(v.start) } : {}),
+      ...(v.location !== undefined ? { loc: v.location } : {}),
+      ...(v.description !== undefined ? { desc: { _content: v.description } } : {}),
+      ...(v.htmlDescription !== undefined ? { descHtml: { _content: v.htmlDescription } } : {}),
+      ...(v.categories ? { category: v.categories.map(_content => ({ _content })) } : {}),
+      ...(v.url ? { url: v.url } : {}), ...(v.recurrence ? { recur: nativeRecurrence(v.recurrence) } : {}),
+    };
+    if (appointment) {
+      // SOAP represents an all-day end inclusively; our API consistently uses
+      // an exclusive end. Timed events do not need this compatibility offset.
+      comp.e = v.endExclusive.type === 'date'
+        ? nativeTime({ type: 'date', date: new Date(Date.parse(v.endExclusive.date + 'T00:00:00Z') - 86400000).toISOString().slice(0, 10) })
+        : nativeTime(v.endExclusive);
+      comp.fb = v.freeBusy;
+    } else {
+      if (v.due) comp.e = nativeTime(v.due);
+      comp.percentComplete = v.percentComplete;
+      if (v.completedAt) comp.completed = nativeTime({ type: 'instant', at: v.completedAt }).d;
+    }
+    const parts: Obj[] = [];
+    if (v.description !== undefined) parts.push({ ct: 'text/plain', content: { _content: v.description } });
+    if (v.htmlDescription !== undefined) parts.push({ ct: 'text/html', content: { _content: v.htmlDescription } });
+    if (!parts.length) parts.push({ ct: 'text/plain', content: { _content: '' } });
+    return this.request(appointment ? 'CreateAppointment' : 'CreateTask', { echo: 1, max: 200000, html: 1, forcesend: 0,
+      m: { l: v.folderId, e: recipients.map(a => ({ a, t: 't' })), su: { _content: v.subject }, inv: { comp: [comp] },
+        mp: parts.length === 1 ? parts[0] : { ct: 'multipart/alternative', mp: parts } } }, true);
+  }
+}

@@ -1,0 +1,139 @@
+# Zimbra calendars, tasks and invitations
+
+Use folders with view `appointment` or `task`, discovered through folder reads.
+Calendar item IDs, invitation IDs and MIME message IDs are different. Do not
+substitute an ordinary mail ID for a calendar item ID. Shared folders retain
+their server owner-qualified IDs and permissions.
+
+| Operation | Input | Behavior |
+| --- | --- | --- |
+| `zimbra.getAppointment` | `appointmentId`, `includeContent?` (true) | Reads invitations and replies; `sync=1` requests `ms`/`rev` for conflict handling. |
+| `zimbra.getTask` | `taskId`, `includeContent?` (true) | Reads task invitations/content and conflict versions. |
+| `zimbra.getRecurrence` | `itemId` | Reads native recurrence and exception definitions. |
+| `zimbra.getCalendarSummaries` | `folderId`, `startsAt`, `endsAt` | Occurrences in one accessible folder/window, not full invitation bodies or all-time export. |
+| `zimbra.getFreeBusy` | `startsAt`, `endsAt`, `users`, `excludeUid?` | Users are 1-100 `{email, folderId?}` entries. Preserves free/busy/tentative/unavailable/no-data distinctions. |
+| `zimbra.getWorkingHours` | `startsAt`, `endsAt`, `emails` (1-100) | Server working-hour intervals; unknown/no-data is not free. |
+| `zimbra.getICalendar` | `invitationId` | Exports component zero of the selected native invitation through GetICal. Not a complete recurring-series export. |
+| `zimbra.createAppointment` | `folderId`, `subject`, `start`, `endExclusive`, optional fields below | Creates a personal appointment or invitation draft; sending is explicit. |
+| `zimbra.createTask` | `folderId`, `subject`, optional task/shared fields below | Creates a task, including undated tasks. |
+| `zimbra.dismissCalendarAlarm` | `kind` (appointment/task), `itemId`, `dismissedAt` | Dismisses the alarm at an explicit instant; inspect returned next alarm. |
+| `zimbra.snoozeCalendarAlarm` | `kind` (appointment/task), `itemId`, `until` | Snoozes to an explicit instant. |
+
+Range timestamps and alarm action timestamps are ISO dates with a time and UTC
+offset, at whole-second precision. Read windows must be positive and at most
+200 days. Split dense windows if the bounded SOAP response is too large; do not
+interpret a failed or inaccessible calendar read as an empty calendar.
+
+An `invitationId` is `calendarItemId-invitationMailId`, optionally preceded by
+`ownerUUID:`. Build it from the actual calendar read's item and `inv.id`, or use
+a compound `invId` returned by a mutation. GetICal's implementation exports
+component zero only. A standalone invitation mail can be deleted independently
+of the calendar item, so do not use its raw mail ID for durable calendar reads.
+
+## Dates and creation fields
+
+Each calendar time is exactly one of:
+
+- `{ type: "date", date: "2026-10-14" }` for an all-day date
+- `{ type: "instant", at: "2026-10-14T09:00:00+03:00" }` for an absolute instant
+- `{ type: "local", at: "2026-10-14T09:00:00", timeZone: "Europe/Kyiv" }` for wall-clock time in a server-known zone
+
+Start/end must use the same form and local timezone. Use instants for endpoints
+expressed in different zones. Appointments require a later `endExclusive`.
+For an all-day event on October 14, start is October 14 and endExclusive is
+October 15. The client subtracts one day only at the SOAP boundary because
+Zimbra uses an inclusive all-day end. Tasks use inclusive `due`, with no such
+subtraction. A task may omit start and due; when both exist, due must not precede
+start.
+
+Local time keeps wall-clock recurrence across DST. Zimbra must know the timezone
+ID; do not silently substitute UTC for a rejected zone. Ambiguous or nonexistent
+DST local times follow server interpretation: verify returned times and actual
+occurrences. Use an explicit instant when the intended occurrence must be
+unambiguous. These tools do not invent custom timezone definitions.
+
+Both creation operations accept:
+
+- `location?`, `description?` (plain), `htmlDescription?`, `categories?` (up to
+  100 strings), `url?`, `priority?` (0-9, default 0), `privacy?` (PUB/PRI/CON,
+  default PUB).
+- `attendees?` (up to 100 unique emails), each `{ email, name?, role?, type?,
+  rsvp? }`. Roles: REQ default, OPT, CHA, NON. Types: IND default, GRO, RES, ROO,
+  UNK. RSVP defaults to true.
+- `notifyAttendees?` defaults to false. Attendees are saved in the event but no
+  invitation email is addressed unless true. Sending requires user intent;
+  recipient policy is checked before the write. Organizer is the account.
+- `alarms?` and `recurrence?`, described below.
+
+Appointments additionally accept `status?` (CONF default, TENT or CANC) and
+`freeBusy?` (B default, F free, T tentative or O unavailable). Tasks accept
+`status?` (NEED default, INPR, COMP, WAITING, DEFERRED, CANC), `percentComplete?`
+(0-100, default 0), and `completedAt?` (instant, only for COMP). A completed task
+requires percentComplete 100.
+
+## Recurrence and alarms
+
+`recurrence` contains arrays `rules`, `excludeRules`, `includeDates`,
+`excludeDates` (all default empty); at least a rule or included date is required.
+Rules are limited to 10 each, dates to 1,000 each. Recurrence requires a start;
+included/excluded dates use its time basis. A rule contains:
+
+- `frequency`: SEC, MIN, HOU, DAI, WEE, MON, YEA; `interval?` (1-10000, default 1).
+- `count?` (1-100000) or `until?`, never both. Until is a date for all-day rules,
+  an offset timestamp for timed rules, normalized to UTC. Neither means an
+  unbounded recurrence; queries still use bounded windows.
+- `byDay?`: `{day: SU|MO|TU|WE|TH|FR|SA, ordinal?: -53..-1|1..53}` entries.
+- `byMonthDay?` (-31..-1 or 1..31), `byMonth?` (1..12), `byYearDay?` (-366..-1
+  or 1..366), `byWeekNo?` (-53..-1 or 1..53), `bySetPosition?` (-366..-1 or
+  1..366), `byHour?` (0..23), `byMinute?` and `bySecond?` (0..59): arrays.
+- `weekStartsOn?`: weekday code. By-set-position requires another by-filter.
+
+The server enforces valid recurrence combinations; use only meaningful RFC
+recurrence rules for the selected frequency. Inspect actual expanded instances,
+especially month-end/ordinal patterns and DST transitions.
+
+Up to 10 alarms are supported. Each has a `trigger` that is either
+`{type: "relative", minutes, related?: "START" | "END"}` (negative minutes
+before, positive after; absolute maximum 525600) or `{type: "absolute", at}`.
+An alarm is one of:
+
+- `{type: "display", trigger, description?}` (defaults to event subject).
+- `{type: "audio", trigger}` (native/default sound).
+- `{type: "email", trigger, to, subject, body}` (1-100 recipient emails).
+
+Email alarms may send later even when notifyAttendees is false. Their recipients
+are checked independently against allowedRecipients. Server/client support
+controls whether a configured alarm is actually delivered/displayed.
+
+## Workflow: recurring team appointment
+
+Resolve the calendar folder and participants; read free/busy and working hours,
+treating no-data as unknown. Create inactive notification state first unless
+sending was requested:
+
+```json
+{
+  "accountId": "work-zimbra", "operation": "zimbra.createAppointment",
+  "input": {
+    "folderId": "10", "subject": "Weekly planning",
+    "start": { "type": "local", "at": "2026-10-14T09:00:00", "timeZone": "Europe/Kyiv" },
+    "endExclusive": { "type": "local", "at": "2026-10-14T10:00:00", "timeZone": "Europe/Kyiv" },
+    "attendees": [{ "email": "colleague@example.test" }],
+    "notifyAttendees": false,
+    "recurrence": { "rules": [{ "frequency": "WEE", "count": 8, "byDay": [{ "day": "WE" }] }] },
+    "alarms": [{ "type": "display", "trigger": { "type": "relative", "minutes": -15 } }]
+  }
+}
+```
+
+Substitute discovered IDs, recipients and intended dates. Read the returned
+calendar item and query occurrences to verify time, duration, participants and
+recurrence. A write can be saved before notification fails; uncertain writes
+must be reconciled rather than automatically repeated. Acceptance is not proof
+that invitations or alarms reached recipients.
+
+Protocol reference: Zimbra/zm-mailbox revision
+`bb771f67c53ab99a202ef0a70e1768f2fa05209b`, `store/docs/soap-calendar.txt`,
+`CalendarUtils.java` (inclusive SOAP all-day end), `GetCalendarItem.java` (sync
+versions), `CreateCalendarItem.java`, `GetICal.java`. Mock tests establish
+payloads and policy boundaries, not live server timezone or delivery behavior.

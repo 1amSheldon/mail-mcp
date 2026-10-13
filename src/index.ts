@@ -363,6 +363,7 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
         'parentFolderId', 'contactId', 'contactIds', 'signatureId', 'view', 'recursive', 'flagged', 'spam',
         'mountpointId', 'remoteFolderId', 'owner', 'permissions', 'granteeId', 'expiresAt',
         'documentId', 'expectedVersion', 'restoreVersion', 'locked', 'enabled',
+        'appointmentId', 'taskId', 'itemId', 'kind', 'start', 'endExclusive', 'due', 'notifyAttendees', 'status', 'percentComplete',
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
@@ -378,6 +379,11 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       if (operation === 'sendShareNotification') details.push('send a sharing email to the listed recipients');
       if (operation === 'deleteDocument') details.push('delete the document and its retained revisions');
       if (operation === 'restoreDocumentRevision') details.push('create a new current revision from historical content and description');
+      if (operation === 'createAppointment' || operation === 'createTask') {
+        details.push(input.notifyAttendees === true ? 'send invitations to supplied attendees' : 'save without invitation emails');
+        if (Array.isArray(input.attendees)) details.push(`attendeeEmails=${JSON.stringify(input.attendees.map(a => (a as Record<string, unknown>).email))}`);
+        if (Array.isArray(input.alarms)) details.push(`emailAlarmRecipients=${JSON.stringify(input.alarms.filter(a => (a as Record<string, unknown>).type === 'email').map(a => (a as Record<string, unknown>).to))}`);
+      }
       if (operation === 'deleteMessages' || operation === 'deleteContacts') details.push('delete selected items; recovery depends on server retention');
       return `Execute Zimbra ${operation} for account ${args.accountId as string}${details.length ? ` (${details.join(', ')})` : ''}`;
     }

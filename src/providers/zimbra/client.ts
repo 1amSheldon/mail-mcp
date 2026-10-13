@@ -13,6 +13,8 @@ import { addresses, escapeHtml, parsedAttachments, parseMime, replyEnvelope } fr
 import { checkPreferencePolicy } from './preference-policy.js';
 import { ZimbraFilters, FILTER_WRITE_SCHEMAS, type FilterWriteOperation } from './filters.js';
 import { ZimbraDocuments, DOCUMENT_READ_SCHEMAS, DOCUMENT_WRITE_SCHEMAS } from './documents.js';
+import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS } from './calendar-schema.js';
+import { ZimbraCalendar } from './calendar.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -91,6 +93,7 @@ export interface ZimbraClientOptions {
 export class ZimbraClient {
   private readonly filters: ZimbraFilters;
   private readonly documents: ZimbraDocuments;
+  private readonly calendar: ZimbraCalendar;
   private readonly sendJournal: ZimbraSendJournal;
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
@@ -102,6 +105,7 @@ export class ZimbraClient {
     this.sendJournal = new ZimbraSendJournal(JSON.stringify([account.id, this.endpoint, account.user]), options.journalDirectory);
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.filters = new ZimbraFilters((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.allowedRecipients);
+    this.calendar = new ZimbraCalendar((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.user, account.allowedRecipients);
     this.documents = new ZimbraDocuments((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write),
       (bytes, name, type) => this.upload(bytes, name, type),
       (id, version, maxBytes) => this.attachment({ messageId: id, version, document: true, maxBytes }), account.allowedAttachmentRoots);
@@ -190,6 +194,7 @@ export class ZimbraClient {
     if (!parsed.success) throw new ZimbraError('INVALID_INPUT', 'Invalid fields for Zimbra ' + operation + '.');
     const v = parsed.data;
     if (Object.hasOwn(DOCUMENT_READ_SCHEMAS, operation)) return this.documents.read(operation as keyof typeof DOCUMENT_READ_SCHEMAS, v);
+    if (Object.hasOwn(CALENDAR_READ_SCHEMAS, operation)) return this.calendar.read(operation as keyof typeof CALENDAR_READ_SCHEMAS, v);
     if (Object.hasOwn(NATIVE_READ_OPERATIONS, operation)) {
       const native = NATIVE_READ_OPERATIONS[operation as keyof typeof NATIVE_READ_OPERATIONS].request(v);
       return this.request(native.name, native.params, native.namespace);
@@ -269,6 +274,7 @@ export class ZimbraClient {
     const v = parsed.data;
     if (Object.hasOwn(FILTER_WRITE_SCHEMAS, operation)) return this.filters.write(operation as FilterWriteOperation, v);
     if (Object.hasOwn(DOCUMENT_WRITE_SCHEMAS, operation)) return this.documents.write(operation as keyof typeof DOCUMENT_WRITE_SCHEMAS, v);
+    if (Object.hasOwn(CALENDAR_WRITE_SCHEMAS, operation)) return this.calendar.write(operation as keyof typeof CALENDAR_WRITE_SCHEMAS, v);
     if (Object.hasOwn(NATIVE_WRITE_OPERATIONS, operation)) {
       const native = NATIVE_WRITE_OPERATIONS[operation as keyof typeof NATIVE_WRITE_OPERATIONS].request(v);
       if (operation === 'sendShareNotification' && this.account.allowedRecipients !== undefined) {

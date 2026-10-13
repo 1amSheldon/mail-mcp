@@ -57,11 +57,14 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   this limitation is explicit in results and skill guidance.
 - ddbb15c: folder ACLs, native share discovery/notification, mountpoints and
   reminders. Internal grants require directory IDs to prevent guest fallback.
-- Current increment: Briefcase uploads, attachment/text sources, metadata,
+- c61d915: Briefcase uploads, attachment/text sources, metadata,
   downloads, revision windows/diffs/restoration, document actions and file ACLs.
-  Calendars/tasks and scheduled mail are still pending.
+- Current increment: calendar/task reads, bounded occurrence/free-busy/working
+  hours queries, invitation iCalendar, creation with native recurrence and
+  alarms. Calendar edits, exceptions, replies, cancellation, search/import/export
+  and scheduled mail remain pending.
 
-Qualification so far: TypeScript passes; all 1,215 unit tests pass on Node 24,
+Qualification so far: TypeScript passes; all 1,225 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate
 writes remain untested.
 The complete acceptance matrix above is still pending; do not treat these
