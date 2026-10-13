@@ -10,6 +10,33 @@ function setup(...results: Response[]) {
   return { client, fetch };
 }
 describe('Zimbra bounded mail reads', () => {
+  it('keeps recurring appointment instances together and binds cursors to the window', async () => {
+    const item = { id: '7', inst: [{ s: 1791921600000 }, { s: 1792008000000 }] };
+    const { client, fetch } = setup(response('Search', { appt: [item], more: true }), response('Search', { appt: [{ id: '8' }], more: false }));
+    const input = { query: 'inid:10', startsAt: '2026-10-13T00:00:00Z', endsAt: '2026-10-20T00:00:00Z', limit: 1 };
+    const first = await client.executeRead('searchAppointments', input) as { items: unknown[]; nextCursor: string };
+    expect(first.items).toEqual([item]);
+    await expect(client.executeRead('searchAppointments', { ...input, endsAt: '2026-10-21T00:00:00Z', cursor: first.nextCursor })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(await client.executeRead('searchAppointments', { ...input, cursor: first.nextCursor })).toMatchObject({ items: [{ id: '8' }], nextCursor: null });
+    const requests = fetch.mock.calls.map(call => JSON.parse(String(call[1]?.body)).Body.SearchRequest);
+    expect(requests[0]).toMatchObject({ types: 'appointment', calExpandInstStart: Date.parse(input.startsAt), calExpandInstEnd: Date.parse(input.endsAt), offset: 0 });
+    expect(requests[1]).toMatchObject({ offset: 1 });
+  });
+  it('retrieves undated tasks without imposing occurrence expansion', async () => {
+    const { client, fetch } = setup(response('Search', { task: [{ id: '9', name: 'Undated task' }] }));
+    expect(await client.executeRead('searchTasks', { query: 'inid:15' })).toMatchObject({ items: [{ id: '9', name: 'Undated task' }] });
+    const request = JSON.parse(String(fetch.mock.calls[0][1]?.body)).Body.SearchRequest;
+    expect(request.types).toBe('task');
+    expect(request).not.toHaveProperty('calExpandInstStart');
+  });
+  it('rejects missing, reversed and oversized appointment windows before network access', async () => {
+    const { client, fetch } = setup();
+    for (const window of [{}, { startsAt: '2026-10-20T00:00:00Z', endsAt: '2026-10-13T00:00:00Z' }, { startsAt: '2026-01-01T00:00:00Z', endsAt: '2026-12-31T00:00:00Z' }]) {
+      await expect(client.executeRead('searchAppointments', { query: 'inid:10', ...window })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
   it('distinguishes local session availability from a live authenticated check', async () => {
     const { client, fetch } = setup(response('GetInfo', { version: 'test' }));
     expect(await client.executeRead('sessionStatus', {})).toMatchObject({ remoteVerified: false });

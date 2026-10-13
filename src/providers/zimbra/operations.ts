@@ -3,7 +3,7 @@ import { itemId, NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS, schemas } from
 import { attachmentsSchema, MAX_MIME_BYTES } from './mime.js';
 import { FILTER_READ_SCHEMAS, FILTER_WRITE_SCHEMAS } from './filters.js';
 import { DOCUMENT_READ_SCHEMAS, DOCUMENT_WRITE_SCHEMAS } from './documents.js';
-import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS } from './calendar-schema.js';
+import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS, calendarWindow, validWindow } from './calendar-schema.js';
 
 const id = itemId;
 const attachmentPart = z.string().regex(/^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/);
@@ -53,6 +53,8 @@ export const ZIMBRA_READ_SCHEMAS = {
   verifySentMessage: z.object({ messageId: rfcMessageId, limit: z.number().int().min(1).max(100).default(20) }).strict(),
   searchMessages: z.object(page).strict(),
   searchDocuments: z.object(page).strict(),
+  searchAppointments: z.object({ ...page, ...calendarWindow }).strict().refine(validWindow),
+  searchTasks: z.object(page).strict(),
   readMessage: z.object({ messageId: id }).strict(),
   getRawMessage: z.object({ messageId: id, maxBytes: z.number().int().min(1).max(MAX_MIME_BYTES).default(10 * 1024 * 1024) }).strict(),
   getThread: z.object({ conversationId }).strict(),

@@ -213,7 +213,7 @@ export class ZimbraClient {
         if (remote) await this.request('GetInfo', { sections: 'mbox' }, 'urn:zimbraAccount');
         return { status: 'session_available', remoteVerified: remote, expiresAt: new Date(session.expiresAt).toISOString(), nextAction: 'Run accounts login ACCOUNT_ID locally when the session expires.' };
       }
-      case 'searchMessages': case 'searchContacts': case 'searchGal': case 'searchDocuments': return this.search(operation, v as { query: string; limit: number; cursor?: string; type?: string });
+      case 'searchMessages': case 'searchContacts': case 'searchGal': case 'searchDocuments': case 'searchAppointments': case 'searchTasks': return this.search(operation, v as { query: string; limit: number; cursor?: string; type?: string; startsAt?: string; endsAt?: string });
       case 'readMessage': return this.request('GetMsg', { m: { id: (v as { messageId: string }).messageId, html: 1, read: 0, wantModSeq: 1, max: 200000 } });
       case 'getRawMessage': return this.attachment(v as { messageId: string; maxBytes: number });
       case 'getThread': return { ...await this.request('GetConv', { c: { id: (v as { conversationId: string }).conversationId } }), partial: true, warning: 'Conversation metadata only. Read individual messages explicitly; completeness is not guaranteed.' };
@@ -243,15 +243,20 @@ export class ZimbraClient {
     throw new ZimbraError('INVALID_INPUT', 'Unknown Zimbra read operation.');
   }
 
-  private async search(operation: string, v: { query: string; limit: number; cursor?: string; type?: string }): Promise<unknown> {
-    const key = JSON.stringify([operation, v.query, v.limit, v.type]);
+  private async search(operation: string, v: { query: string; limit: number; cursor?: string; type?: string; startsAt?: string; endsAt?: string }): Promise<unknown> {
+    const key = JSON.stringify([operation, v.query, v.limit, v.type, v.startsAt, v.endsAt]);
     const cursor = v.cursor ? this.cursors.get(v.cursor) : undefined;
     if (v.cursor && (!cursor || cursor.key !== key || cursor.expires <= Date.now())) throw new ZimbraError('INVALID_INPUT', 'Zimbra cursor expired or does not match the query. Restart the search.');
     const offset = cursor?.offset ?? 0;
     const gal = operation === 'searchGal';
+    const [types, resultKey] = operation === 'searchContacts' ? ['contact', 'cn']
+      : operation === 'searchDocuments' ? ['document', 'doc']
+      : operation === 'searchAppointments' ? ['appointment', 'appt']
+      : operation === 'searchTasks' ? ['task', 'task'] : ['message', 'm'];
     const result = gal ? await this.request('SearchGal', { name: { _content: v.query }, type: v.type, limit: v.limit, offset, sortBy: 'nameAsc', needExp: 1 }, 'urn:zimbraAccount')
-      : await this.request('Search', { query: { _content: v.query }, limit: v.limit, offset, types: operation === 'searchContacts' ? 'contact' : operation === 'searchDocuments' ? 'document' : 'message', fetch: 'all', read: 0, max: 20000, sortBy: 'dateDesc' });
-    const received = list(result[gal || operation === 'searchContacts' ? 'cn' : operation === 'searchDocuments' ? 'doc' : 'm']);
+      : await this.request('Search', { query: { _content: v.query }, limit: v.limit, offset, types, fetch: 'all', read: 0, max: 20000, sortBy: 'dateDesc',
+        ...(operation === 'searchAppointments' ? { calExpandInstStart: Date.parse(v.startsAt!), calExpandInstEnd: Date.parse(v.endsAt!) } : {}) });
+    const received = list(result[gal ? 'cn' : resultKey]);
     const pageable = !gal || truth(result.paginationSupported);
     const items = received.slice(0, v.limit);
     if (pageable && (received.length > v.limit || (truth(result.more) && !items.length))) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra returned invalid search pagination.');

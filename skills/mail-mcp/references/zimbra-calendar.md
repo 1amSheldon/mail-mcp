@@ -7,6 +7,8 @@ their server owner-qualified IDs and permissions.
 
 | Operation | Input | Behavior |
 | --- | --- | --- |
+| `zimbra.searchAppointments` | `query`, `startsAt`, `endsAt`, `limit?`, `cursor?` | Native search with occurrences expanded in the required bounded window. Pages contain calendar items with nested instances, not one row per occurrence. |
+| `zimbra.searchTasks` | `query`, `limit?`, `cursor?` | Native task search without a date filter; includes undated tasks. Read matching tasks for full invitations. |
 | `zimbra.getAppointment` | `appointmentId`, `includeContent?` (true) | Reads invitations and replies; `sync=1` requests `ms`/`rev` for conflict handling. |
 | `zimbra.getTask` | `taskId`, `includeContent?` (true) | Reads task invitations/content and conflict versions. |
 | `zimbra.getRecurrence` | `itemId` | Reads native recurrence and exception definitions. |
@@ -30,6 +32,14 @@ Range timestamps and alarm action timestamps are ISO dates with a time and UTC
 offset, at whole-second precision. Read windows must be positive and at most
 200 days. Split dense windows if the bounded SOAP response is too large; do not
 interpret a failed or inaccessible calendar read as an empty calendar.
+
+Search pages default to 50 items (maximum 100). Use a native folder query such
+as `inid:10`; discover actual folder IDs first. Appointment searches omit items
+without occurrences in the requested window. Task searches impose no implicit
+date range. Cursors expire after five minutes and must be used with unchanged
+query, limit and appointment window. Offset paging can shift during mailbox
+changes; nested instances may make even a small page large. Split a dense
+window when the server response exceeds the transport limit.
 
 An `invitationId` is `calendarItemId-invitationMailId`, optionally preceded by
 `ownerUUID:`. Build it from the actual calendar read's item and `inv.id`, or use
