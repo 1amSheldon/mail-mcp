@@ -133,7 +133,14 @@ async function refreshAccessToken(accountId: string, tokens: OAuth2Tokens): Prom
     throw new Error(`OAuth2 token refresh failed with HTTP ${response.status}`);
   }
 
-  const result = parseTokenResponse(JSON.parse(await readBoundedResponseText(response, 64 * 1024)));
+  const responseBody = await readBoundedResponseText(response, 64 * 1024);
+  let payload: unknown;
+  try { payload = JSON.parse(responseBody); }
+  catch {
+    // SyntaxError messages can include token bytes from the response body.
+    throw new Error('OAuth2 token endpoint returned invalid JSON');
+  }
+  const result = parseTokenResponse(payload);
   tokens.accessToken = result.accessToken;
   if (result.expiresIn !== undefined) {
     tokens.expiryDate = Date.now() + result.expiresIn * 1000;

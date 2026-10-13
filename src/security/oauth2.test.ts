@@ -78,6 +78,15 @@ describe('OAuth2 access token refresh', () => {
     expect(keychain.saveCredentials).not.toHaveBeenCalled();
   });
 
+  it('never exposes token response bytes from JSON parse errors', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('PRIVATE_TOKEN_RESPONSE')));
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify(tokenSet));
+    const error = await getValidAccessToken('work').catch(error => error);
+    expect(error.message).toBe('OAuth2 token endpoint returned invalid JSON');
+    expect(error.cause).toBeUndefined();
+    expect(keychain.saveCredentials).not.toHaveBeenCalled();
+  });
+
   it('rejects non-OAuth credentials instead of using them as a bearer token', async () => {
     keychain.loadCredentials.mockResolvedValue('plain-password');
 
