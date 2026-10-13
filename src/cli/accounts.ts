@@ -1,4 +1,4 @@
-import { createInterface } from 'node:readline/promises';
+import { createAccountPrompt, type QuestionPrompt } from './prompt.js';
 import {
   getConfiguredAccounts,
   saveConfiguredAccounts,
@@ -8,10 +8,6 @@ import {
 } from '../config.js';
 import { saveCredentials, removeCredentials } from '../security/keychain.js';
 import { validateOAuth2TokenEndpoint } from '../security/oauth2.js';
-
-interface QuestionPrompt {
-  question(query: string): Promise<string>;
-}
 
 export function inferSmtpHost(imapHost: string): string {
   return /^imap\./i.test(imapHost) ? imapHost.replace(/^imap\./i, 'smtp.') : '';
@@ -104,9 +100,9 @@ type ProviderAccountBase = {
   };
 }[Exclude<ConfiguredBackend, 'imap-smtp'>];
 
-async function askRequired(prompt: QuestionPrompt, label: string): Promise<string> {
+async function askRequired(prompt: QuestionPrompt, label: string, secret = false): Promise<string> {
   while (true) {
-    const value = (await prompt.question(`${label}: `)).trim();
+    const value = (await (secret ? prompt.secret(`${label}: `) : prompt.question(`${label}: `))).trim();
     if (value) return value;
     console.log(`  ${label} is required.`);
   }
@@ -176,7 +172,7 @@ async function addProviderAccount(
 
   if (base.backend === 'mailtrap') {
     const accountId = (await prompt.question('Mailtrap account ID (optional): ')).trim();
-    const token = await askRequired(prompt, 'Mailtrap API token');
+    const token = await askRequired(prompt, 'Mailtrap API token', true);
     await saveProviderAccount(
       existingAccounts,
       { ...base, ...(accountId ? { accountId } : {}) },
@@ -191,8 +187,8 @@ async function addProviderAccount(
     : (await prompt.question('Microsoft Graph HTTPS endpoint override (optional): ')).trim();
   const tokenEndpoint = await askOAuth2TokenEndpoint(prompt);
   const clientId = await askRequired(prompt, 'OAuth2 client ID');
-  const clientSecret = await askRequired(prompt, 'OAuth2 client secret');
-  const refreshToken = await askRequired(prompt, 'OAuth2 refresh token');
+  const clientSecret = await askRequired(prompt, 'OAuth2 client secret', true);
+  const refreshToken = await askRequired(prompt, 'OAuth2 refresh token', true);
   const account: ConfiguredAccount = base.backend === 'ews'
     ? { ...base, user, endpoint }
     : { ...base, user, ...(endpoint ? { endpoint } : {}) };
@@ -242,10 +238,7 @@ async function removeAccount(id: string | undefined): Promise<void> {
 }
 
 async function addAccount(): Promise<void> {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+  const rl = createAccountPrompt();
 
   try {
     const existingAccounts = await getConfiguredAccounts();
@@ -338,7 +331,7 @@ async function addAccount(): Promise<void> {
     let password: string | undefined;
     if (authType === 'login') {
       while (!password) {
-        password = await rl.question(
+        password = await rl.secret(
           'Password or app password (stored in the system credential store, not accounts.json): '
         );
         if (!password) console.log('  Password is required for login authentication.');

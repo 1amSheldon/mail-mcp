@@ -3,10 +3,11 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 const readline = vi.hoisted(() => ({
   question: vi.fn(),
   close: vi.fn(),
+  once: vi.fn(),
 }));
 
-vi.mock('node:readline/promises', () => ({
-  createInterface: vi.fn(() => readline),
+vi.mock('./prompt.js', () => ({
+  createAccountPrompt: vi.fn(() => ({ ...readline, secret: readline.question })),
 }));
 
 // Mock dependencies before importing the module under test
