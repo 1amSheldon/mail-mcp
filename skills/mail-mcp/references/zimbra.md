@@ -17,8 +17,8 @@ IMAP app passwords are not assumed to authenticate SOAP. SAML/SSO, email OTP,
 Use a separate account ID from IMAP. Do not replace an IMAP password with a SOAP
 session. Each operation loads the current session: successful login does not need
 an MCP restart. auth_required/auth_failed require local reauthentication, not
-automatic credential changes. `zimbra.sessionStatus` checks cached availability,
-not remote validity. Test a permitted read to establish actual access.
+automatic credential changes. `zimbra.sessionStatus` checks cached availability by
+default; pass remote=true for an authenticated GetInfo check, without renewing login.
 
 Native IDs must come from this account. Do not reuse IMAP UIDs/locators. Message,
 folder, contact, tag and draft IDs are strings; conversation IDs may be negative.
@@ -28,7 +28,7 @@ Preserve the returned ID exactly, including any shared-mailbox prefix.
 
 | Operation | Input | Result/boundary |
 | --- | --- | --- |
-| `zimbra.sessionStatus` | `{}` | Local session state only |
+| `zimbra.sessionStatus` | `remote?` | Local state by default; remote=true also verifies current server access |
 | `zimbra.getSendStatus` | `draftId` | Durable local attempt state; no network request |
 | `zimbra.verifySentMessage` | RFC `messageId`, `limit?` (1-100, default 20) | Exact Message-ID verification in Sent; found/not_found/indeterminate |
 | `zimbra.searchMessages` | `query`, `limit?`, `cursor?` | Native query, compact items and continuation |
@@ -36,10 +36,12 @@ Preserve the returned ID exactly, including any shared-mailbox prefix.
 | `zimbra.getRawMessage` | `messageId`, `maxBytes?` | Original RFC 822 bytes; default 10 MiB, maximum 50 MiB |
 | `zimbra.getThread` | `conversationId` | Conversation metadata; read individual messages afterward |
 | `zimbra.listFolders` | `{}` | Native folder tree |
+| `zimbra.mailboxStats` | `{}` | Folder counts/size; missing values remain null, especially for mounted resources |
 | `zimbra.listTags` | `{}` | Tags and IDs |
 | `zimbra.searchContacts` | `query`, `limit?`, `cursor?` | Native address-book search |
 | `zimbra.getContact` | `contactId` | Contact details |
 | `zimbra.getAttachment` | `messageId`, `partId`, `maxBytes?` | Embedded binary resource; default 5 MiB, maximum 25 MiB |
+| `zimbra.extractAttachmentText` | `messageId`, `partId`, `maxBytes?`, `maxChars?`, `maxPages?` | PDF/text extraction; explicit partial result |
 
 Search query is native Zimbra syntax, e.g. `in:inbox has:attachment`. Limit is
 1-100 (default 50). Repeat identical query and limit with newest nextCursor.
@@ -58,7 +60,9 @@ and return original bytes even with text redaction enabled.
 
 | Operation | Input |
 | --- | --- |
-| `zimbra.createDraft` | `to` array, `subject`, `body`; optional cc/bcc arrays, isHtml, originalMessageId, replyType, attachOriginal, quoteOriginal, attachments |
+| `zimbra.createDraft` | `to` array, `subject`, body fields; optional compose fields below |
+| `zimbra.createReplyDraft`, `zimbra.createReplyAllDraft` | `messageId`, `body`; isHtml?, cc?, bcc?, attachments?, includeOriginalAttachments?, quoteOriginal?, from?, replyTo?, identityId?, signatureId?, includeSignature? |
+| `zimbra.createForwardDraft` | Reply-draft fields plus explicit `to` array |
 | `zimbra.updateDraft` | `draftId`, `changes`, `expectedRevision?`; legacy complete-content form also accepted |
 | `zimbra.sendDraft` | `draftId`, `expectedRevision?` (the reviewed ms) |
 | `zimbra.createTag` | `name`, `color?` integer 0-9 |
@@ -75,14 +79,37 @@ verify tags, folders and read state afterward. Do not assume a timeout rolled ba
 
 For reply/forward supply originalMessageId and replyType together: r=reply,
 w=forward. Reply drafts require the source RFC Message-ID. To/CC/BCC and subject
-are explicit; there is no inferred reply-all. Compute them from the read source,
-check own addresses and duplicates, then inspect the saved draft. No automatic
-signature. quoteOriginal=true adds a bounded quote; HTML source is converted to
+are explicit in createDraft. For inferred recipients use createReplyDraft or
+createReplyAllDraft: Reply-To takes precedence over From, own account/registered
+aliases and duplicates are removed, and original Bcc is never inferred. A reply
+to a self-sent message uses its original To recipients. Explicit cc replaces
+inferred CC; [] clears it. Inspect saved recipients and reply headers.
+quoteOriginal=true adds a bounded quote; HTML source is converted to
 text and escaped. attachOriginal=true attaches the original message as
 message/rfc822, not a list of its original file attachments. Both default false.
+The reply/forward helpers instead offer includeOriginalAttachments=true to retain
+the original files alongside new attachments. This defaults false. All three
+helpers save drafts only; none sends a message.
+
+createDraft body fields are either body + isHtml, or textBody and/or htmlBody.
+Do not mix these two input forms. Optional compose fields: cc/bcc arrays,
+originalMessageId, replyType, attachOriginal, quoteOriginal, attachments, from,
+replyTo, identityId, signatureId, includeSignature and references (RFC Message-ID
+array). Reply helpers derive References from the source MIME. From must be the
+account, a configured fromAliases entry, or the selected server identity's From.
+Discover native identity/signature UUIDs through listIdentities/listSignatures.
+Server permission checks still apply to an identity or alias.
+
+includeSignature defaults true and inserts the configured local plain-text
+signature, if any. signatureId selects a native signature and its HTML/text
+formats; it is not an instruction to change account defaults. No remote signature
+is guessed when an ID is omitted. Use includeSignature=false if the supplied body
+already contains the signature. Referenced images in native HTML signatures are
+not automatically downloaded; provide any needed inline CID files as attachments.
 
 For updateDraft prefer `changes`: to/cc/bcc arrays, subject, textBody, htmlBody,
-attachments. Omitted fields and attachments survive. Supplying attachments replaces
+attachments, from, replyTo and identityId. Omitted fields and attachments survive.
+An empty replyTo clears that header. Supplying attachments replaces
 the list; [] removes them. Supplying one body format removes an omitted alternative:
 send textBody and htmlBody together to keep both. The legacy form replaces recipients
 and body; it also preserves attachments unless an explicit list is supplied.
@@ -156,36 +183,37 @@ Reads through `mail_query`:
 | Operation | Input | Boundary |
 | --- | --- | --- |
 | `zimbra.getAccountInfo` | `{}` | Server version, mailbox information, identities and signatures; a live authenticated read |
-| `zimbra.getPreferences` | `zimbra.names` array of 1-100 zimbraPref names | Only the requested settings |
+| `zimbra.getPreferences` | `names` array of 1-100 zimbraPref names | Only the requested settings |
 | `zimbra.listIdentities`, `zimbra.listSignatures` | `{}` | Native identities/signatures, not automatically applied to compose |
-| `zimbra.getFolder` | `zimbra.folderId` | Folder metadata and returned descendants |
-| `zimbra.getMessageMetadata` | `zimbra.messageIds` | Flags, folder, revision and other server metadata |
+| `zimbra.getFolder` | `folderId` | Folder metadata and returned descendants |
+| `zimbra.getMessageMetadata` | `messageIds` | Flags, folder, revision and other server metadata |
 
 Writes through `mail_mutate`:
 
 | Operation | Input | Effect |
 | --- | --- | --- |
-| `zimbra.createFolder` | `zimbra.name`, `zimbra.parentFolderId`, `view?`, `color?` | view: message (default), contact, appointment, task or document; name is one segment |
-| `zimbra.renameFolder` | `zimbra.folderId`, `zimbra.name` | Rename one folder |
-| `zimbra.moveFolder` | `zimbra.folderId`, `zimbra.parentFolderId` | Move its subtree |
-| `zimbra.trashFolder` | `zimbra.folderId` | Move folder to Trash; Zimbra may mark contents read and rename it |
-| `zimbra.deleteFolder` | `zimbra.folderId` | Delete folder, descendants and contents; requires explicit destructive intent |
-| `zimbra.emptyFolder` | `zimbra.folderId`, `recursive?` | Delete contents; recursive defaults false |
-| `zimbra.markFolderRead` | `zimbra.folderId` | Mark the folder contents read |
-| `zimbra.setFolderColor` | `zimbra.folderId`, `zimbra.color` | Native palette index 0-127 |
-| `zimbra.setFlagged` | `zimbra.messageIds`, `zimbra.flagged` | Set/clear stars without replacing other flags |
-| `zimbra.markSpam` | `zimbra.messageId`, `zimbra.spam` | Spam/not-spam action can move the message and train server filtering |
-| `zimbra.deleteMessages` | `zimbra.messageIds` | Delete, possibly into the server dumpster; not a guarantee of physical erasure |
-| `zimbra.recoverMessages` | `zimbra.messageIds`, `zimbra.folderId` | Recover available dumpster items; depends on server retention and permissions |
-| `zimbra.renameTag` | `zimbra.tagId`, `zimbra.name` | Rename existing tag |
-| `zimbra.setTagColor` | `zimbra.tagId`, `zimbra.color` | Native palette index 0-127 |
-| `zimbra.createContact` | `zimbra.fields`, `folderId?` | Create a native contact; default Contacts folder if omitted |
-| `zimbra.updateContact` | `zimbra.contactId`, `zimbra.fields` | Patch supplied fields; omitted fields survive; empty string removes a field |
-| `zimbra.moveContacts` | `zimbra.contactIds`, `zimbra.folderId` | Move contacts |
-| `zimbra.trashContacts`, `zimbra.deleteContacts` | `zimbra.contactIds` | Trash or delete, respectively |
-| `zimbra.createSignature` | `zimbra.name`, `zimbra.contents` | May become default if the account has no default signature |
-| `zimbra.updateSignature` | `zimbra.signatureId`, `name?`, `contents?` | Change supplied attributes; at least one change required |
-| `zimbra.deleteSignature` | `zimbra.signatureId` | Delete selected signature |
+| `zimbra.createFolder` | `name`, `parentFolderId`, `view?`, `color?` | view: message (default), contact, appointment, task or document; name is one segment |
+| `zimbra.renameFolder` | `folderId`, `name` | Rename one folder |
+| `zimbra.moveFolder` | `folderId`, `parentFolderId` | Move its subtree |
+| `zimbra.trashFolder` | `folderId` | Move folder to Trash; Zimbra may mark contents read and rename it |
+| `zimbra.deleteFolder` | `folderId` | Delete folder, descendants and contents; requires explicit destructive intent |
+| `zimbra.emptyFolder` | `folderId`, `recursive?` | Delete contents; recursive defaults false |
+| `zimbra.markFolderRead` | `folderId` | Mark the folder contents read |
+| `zimbra.setFolderColor` | `folderId`, `color` | Native palette index 0-127 |
+| `zimbra.setFlagged` | `messageIds`, `flagged` | Set/clear stars without replacing other flags |
+| `zimbra.copyMessages` | `messageIds`, `folderId` | Copy without moving originals; rediscover destination IDs |
+| `zimbra.markSpam` | `messageId`, `spam` | Spam/not-spam action can move the message and train server filtering |
+| `zimbra.deleteMessages` | `messageIds` | Delete, possibly into the server dumpster; not a guarantee of physical erasure |
+| `zimbra.recoverMessages` | `messageIds`, `folderId` | Recover available dumpster items; depends on server retention and permissions |
+| `zimbra.renameTag` | `tagId`, `name` | Rename existing tag |
+| `zimbra.setTagColor` | `tagId`, `color` | Native palette index 0-127 |
+| `zimbra.createContact` | `fields`, `folderId?` | Create a native contact; default Contacts folder if omitted |
+| `zimbra.updateContact` | `contactId`, `fields` | Patch supplied fields; omitted fields survive; empty string removes a field |
+| `zimbra.moveContacts` | `contactIds`, `folderId` | Move contacts |
+| `zimbra.trashContacts`, `zimbra.deleteContacts` | `contactIds` | Trash or delete, respectively |
+| `zimbra.createSignature` | `name`, `contents` | May become default if the account has no default signature |
+| `zimbra.updateSignature` | `signatureId`, `name?`, `contents?` | Change supplied attributes; at least one change required |
+| `zimbra.deleteSignature` | `signatureId` | Delete selected signature |
 
 Arrays of message/contact IDs accept 1-100 entries. Contact fields are a map, e.g.
 `{"firstName":"Alex","email":"alex@example.test","company":"Supplier"}`;
@@ -198,3 +226,9 @@ Before deletion, inspect folder descendants and contents or selected contacts.
 Never turn an ambiguous "remove" into permanent deletion. SOAP action responses
 may echo requested IDs even when constraints prevented an item from changing:
 re-query affected objects; an echoed ID list is not per-item success evidence.
+
+extractAttachmentText accepts only returned message/part IDs, downloads at most
+maxBytes (default 5 MiB, ceiling 25 MiB), and supports PDF or text/*. maxChars is
+1-200,000 (default 100,000); maxPages is 1-100 (default 25). partial reports either
+page or character truncation. Text uses a declared charset when available, UTF-8
+otherwise; invalid encoding is an error. No XLSX/DOCX parsing or OCR is implied.

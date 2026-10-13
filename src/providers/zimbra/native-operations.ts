@@ -46,6 +46,7 @@ export const NATIVE_WRITE_OPERATIONS = {
   markFolderRead: operation(z.object({ folderId: itemId }).strict(), v => folderAction(v.folderId, 'read')),
   setFolderColor: operation(z.object({ folderId: itemId, color }).strict(), v => folderAction(v.folderId, 'color', { color: v.color })),
   setFlagged: operation(z.object({ messageIds: ids, flagged: z.boolean() }).strict(), v => messageAction(v.messageIds, v.flagged ? 'flag' : '!flag')),
+  copyMessages: operation(z.object({ messageIds: ids, folderId: itemId }).strict(), v => messageAction(v.messageIds, 'copy', { l: v.folderId })),
   markSpam: operation(z.object({ messageId: itemId, spam: z.boolean() }).strict(), v => messageAction([v.messageId], v.spam ? 'spam' : '!spam')),
   deleteMessages: operation(z.object({ messageIds: ids }).strict(), v => messageAction(v.messageIds, 'delete')),
   recoverMessages: operation(z.object({ messageIds: ids, folderId: itemId }).strict(), v => ({ name: 'ItemAction', params: { action: { id: v.messageIds.join(','), op: 'recover', l: v.folderId } } })),

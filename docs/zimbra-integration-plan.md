@@ -5,12 +5,12 @@ administrator API. No deployment or changes to corporate mail are part of this P
 
 ## Acceptance matrix
 
-- [ ] Mail: local/base64 uploads, MIME originals, attachment extraction, inline
+- [x] Mail: local/base64 uploads, MIME originals, attachment extraction, inline
   images, reply/reply-all/forward drafts, signatures, identities and Reply-To.
 - [ ] Draft integrity: partial updates preserve omitted content and attachments;
   concurrency conflicts are explicit; send recovery survives process restart;
   recipient restrictions cannot be bypassed by webmail races or scheduling.
-- [ ] Organization: folders, copy, flags, spam, deletion/recovery, tags, counts.
+- [x] Organization: folders, copy, flags, spam, deletion/recovery, tags, counts.
 - [ ] Contacts: create/update/delete, groups, GAL lookup and autocomplete.
 - [ ] Rules: read and safely replace incoming/outgoing rules, activation, preserve
   unsupported server rule constructs, recipient policy for forwarding actions.
@@ -43,10 +43,15 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
 
 - c1c18bd: typed folder/contact/signature operations and schema-derived routing.
 - c574244: MIME uploads, raw reads and conflict-guarded partial draft updates.
+- a7ea7b6: request server modification sequences for guarded edits.
+- ff633c3: immutable send snapshots, exact recipient checks, durable attempt
+  claims, restart/concurrency tests and Sent-copy verification.
+- Current increment: reply/reply-all/forward drafts, native identities and
+  signatures, both body formats, attachment text extraction, stats and copy.
 
-Qualification so far: TypeScript passes; 1,155 unit tests were exercised. The only
-failure was an invalid placeholder in a documentation example; after correcting
-it, all five documentation tests passed. Live corporate writes remain untested.
+Qualification so far: TypeScript passes; all 1,174 unit tests pass on Node 24,
+including actual MIME/PDF parsing and mock-transport workflows. Live corporate
+writes remain untested.
 The complete acceptance matrix above is still pending; do not treat these
 increments as release qualification.
 
