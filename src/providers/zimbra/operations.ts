@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { itemId, NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS, schemas } from './native-operations.js';
+import { attachmentsSchema, MAX_MIME_BYTES } from './mime.js';
 
 const id = itemId;
 // Zimbra represents single-message conversations with a negative item ID.
@@ -16,12 +17,19 @@ const draft = {
   isHtml: z.boolean().default(false), originalMessageId: id.optional(),
   replyType: z.enum(['r', 'w']).optional(), attachOriginal: z.boolean().default(false),
   quoteOriginal: z.boolean().default(false),
+  attachments: attachmentsSchema.optional(),
 };
+export const draftChangesSchema = z.object({
+  to: addresses.min(1).optional(), cc: addresses.optional(), bcc: addresses.optional(),
+  subject: draft.subject.optional(), textBody: text.optional(), htmlBody: text.optional(),
+  attachments: attachmentsSchema.optional(),
+}).strict().refine(v => Object.keys(v).length > 0);
 export const ZIMBRA_READ_SCHEMAS = {
   ...schemas(NATIVE_READ_OPERATIONS),
   sessionStatus: z.object({}).strict(),
   searchMessages: z.object(page).strict(),
   readMessage: z.object({ messageId: id }).strict(),
+  getRawMessage: z.object({ messageId: id, maxBytes: z.number().int().min(1).max(MAX_MIME_BYTES).default(10 * 1024 * 1024) }).strict(),
   getThread: z.object({ conversationId }).strict(),
   listFolders: z.object({}).strict(),
   listTags: z.object({}).strict(),
@@ -32,7 +40,10 @@ export const ZIMBRA_READ_SCHEMAS = {
 export const ZIMBRA_WRITE_SCHEMAS = {
   ...schemas(NATIVE_WRITE_OPERATIONS),
   createDraft: z.object(draft).strict(),
-  updateDraft: z.object({ ...draft, draftId: id }).strict(),
+  updateDraft: z.union([
+    z.object({ draftId: id, changes: draftChangesSchema, expectedRevision: z.string().regex(/^[0-9]+$/).optional() }).strict(),
+    z.object({ ...draft, draftId: id }).strict(),
+  ]),
   sendDraft: z.object({ draftId: id }).strict(),
   createTag: z.object({ name: tagName, color: z.number().int().min(0).max(9).optional() }).strict(),
   deleteTag: z.object({ tagId: id }).strict(),

@@ -112,6 +112,9 @@ export const zimbraAccountSchema = secretFreeObjectSchema.pipe(z.object({
     } catch { return false; }
   }, 'Zimbra endpoint must end in /service/soap without query or fragment'),
   allowedRecipients: z.array(z.email()).optional(),
+  allowedAttachmentRoots: z.array(nonEmptyString).optional(),
+  fromAliases: z.array(z.email()).optional(),
+  signature: z.string().optional(),
 }));
 
 export const configuredAccountSchema = z.union([

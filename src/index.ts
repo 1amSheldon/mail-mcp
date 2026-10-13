@@ -364,7 +364,7 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
-      if (operation === 'updateDraft') details.push('replace draft contents with the supplied recipients and body');
+      if (operation === 'updateDraft') details.push(input.changes ? 'patch supplied draft fields; preserve omitted fields and attachments' : 'replace draft contents with the supplied recipients and body; preserve omitted attachments');
       if (operation === 'moveToTrash') details.push('move messages to Trash');
       if (operation === 'deleteFolder') details.push('delete the folder, its descendants and contents');
       if (operation === 'emptyFolder') details.push('delete folder contents');

@@ -1,9 +1,12 @@
 import { randomBytes, randomUUID } from 'node:crypto';
+import { simpleParser } from 'mailparser';
+import type { OutgoingAttachment, OutgoingMessage } from '../../domain/outgoing-message.js';
 import { htmlToMarkdown } from '../../utils/markdown.js';
 import type { ZimbraConfiguredAccount } from '../account-types.js';
 import { ZimbraError, validateZimbraEndpoint, type ZimbraSession } from './session.js';
 import { ZIMBRA_READ_SCHEMAS, ZIMBRA_WRITE_SCHEMAS, type ZimbraReadOperation, type ZimbraWriteOperation } from './operations.js';
 import { NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS } from './native-operations.js';
+import { composeMime, MAX_MIME_BYTES, parseUploadResponse } from './mime.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -90,7 +93,7 @@ export class ZimbraClient {
   }
   disconnect(): void { this.closed = true; this.cursors.clear(); for (const c of this.pending) c.abort(); }
 
-  private async request(name: string, params: Obj, namespace = 'urn:zimbraMail', write = false, auth?: Obj): Promise<Obj> {
+  private async request(name: string, params: Obj, namespace = 'urn:zimbraMail', write = false, auth?: Obj, changeToken?: string): Promise<Obj> {
     if (this.closed) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra client is closed.');
     const session = auth ? undefined : await this.options.sessionProvider();
     if (session && (session.endpoint !== this.endpoint || session.user !== this.account.user || session.expiresAt <= Date.now() + 5000)) {
@@ -105,7 +108,7 @@ export class ZimbraClient {
       const response = await this.fetchImpl(this.endpoint, {
         method: 'POST', redirect: 'error', signal: controller.signal,
         headers: { 'content-type': 'application/soap+json; charset=utf-8', accept: 'application/json', ...(cookie ? { cookie } : {}) },
-        body: JSON.stringify({ Header: { context: { _jsns: 'urn:zimbra', ...(session ? { authToken: { _content: session.authToken } } : {}) } },
+        body: JSON.stringify({ Header: { context: { _jsns: 'urn:zimbra', ...(session ? { authToken: { _content: session.authToken } } : {}), ...(changeToken ? { change: { token: changeToken, type: 'mod' } } : {}) } },
           Body: { [name + 'Request']: { _jsns: namespace, ...params } } }),
       });
       if (response.status === 401) {
@@ -127,6 +130,7 @@ export class ZimbraClient {
         const detail = fault.Detail && typeof fault.Detail === 'object' ? fault.Detail as Obj : {};
         const error = detail.Error && typeof detail.Error === 'object' ? detail.Error as Obj : {};
         const code = String(content(error.Code) ?? '');
+        if (code === 'mail.MODIFY_CONFLICT') throw new ZimbraError('CONFLICT', 'The server item changed. Read the current version before applying the edit again.');
         if (['service.AUTH_REQUIRED', 'service.AUTH_EXPIRED', 'account.AUTH_EXPIRED'].includes(code)) {
           throw new ZimbraError('AUTH_REQUIRED', 'Zimbra session was rejected. Run accounts login ACCOUNT_ID locally.');
         }
@@ -181,6 +185,7 @@ export class ZimbraClient {
       }
       case 'searchMessages': case 'searchContacts': return this.search(operation, v as { query: string; limit: number; cursor?: string });
       case 'readMessage': return this.request('GetMsg', { m: { id: (v as { messageId: string }).messageId, html: 1, read: 0, max: 200000 } });
+      case 'getRawMessage': return this.attachment(v as { messageId: string; maxBytes: number });
       case 'getThread': return { ...await this.request('GetConv', { c: { id: (v as { conversationId: string }).conversationId } }), partial: true, warning: 'Conversation metadata only. Read individual messages explicitly; completeness is not guaranteed.' };
       case 'listFolders': return this.request('GetFolder', { folder: { path: '/' } });
       case 'listTags': return this.request('GetTag', {});
@@ -221,9 +226,9 @@ export class ZimbraClient {
     }
     switch (operation) {
       case 'createDraft': case 'updateDraft': {
-        const d = v as typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output;
+        if (operation === 'updateDraft' && 'changes' in v) return this.patchDraft(v as Extract<typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output, { changes: unknown }>);
+        const d = v as typeof ZIMBRA_WRITE_SCHEMAS.createDraft._output & { draftId: string };
         if (Boolean(d.originalMessageId) !== Boolean(d.replyType) || ((d.attachOriginal || d.quoteOriginal) && !d.originalMessageId)) throw new ZimbraError('INVALID_INPUT', 'originalMessageId and replyType must be supplied together.');
-        if (operation === 'updateDraft') await this.assertDraft(d.draftId);
         let inReplyTo: string | undefined;
         let body = d.body;
         if (d.originalMessageId) {
@@ -236,14 +241,34 @@ export class ZimbraClient {
             inReplyTo = mid;
           }
         }
-        const result = await this.request('SaveDraft', { m: {
-          ...(operation === 'updateDraft' ? { id: d.draftId } : {}),
+        if (operation === 'updateDraft') return this.patchDraft({ draftId: d.draftId, changes: {
+          to: d.to, cc: d.cc ?? [], bcc: d.bcc ?? [], subject: d.subject,
+          ...(d.isHtml ? { htmlBody: body } : { textBody: body }),
+          ...(d.attachments === undefined ? {} : { attachments: d.attachments }),
+        } }, d.originalMessageId ? { originalMessageId: d.originalMessageId, replyType: d.replyType!, inReplyTo, attachOriginal: d.attachOriginal } : undefined);
+        const message = {
           e: [{ t: 'f', a: this.account.user }, ...d.to.map(a => ({ t: 't', a })), ...(d.cc ?? []).map(a => ({ t: 'c', a })), ...(d.bcc ?? []).map(a => ({ t: 'b', a }))],
           su: { _content: d.subject }, mp: { ct: d.isHtml ? 'text/html' : 'text/plain', content: { _content: body } },
           ...(d.originalMessageId ? { origid: d.originalMessageId, rt: d.replyType } : {}),
           ...(inReplyTo ? { irt: { _content: inReplyTo } } : {}),
           ...(d.attachOriginal ? { attach: { m: [{ id: d.originalMessageId }] } } : {}),
-        } }, 'urn:zimbraMail', true);
+        };
+        let savedMessage: Obj = message;
+        if (d.attachments !== undefined) {
+          const attachments = [...d.attachments];
+          if (d.attachOriginal && d.originalMessageId) {
+            const original = await this.attachment({ messageId: d.originalMessageId, maxBytes: MAX_MIME_BYTES }) as Buffer;
+            attachments.push({ filename: 'original.eml', contentBase64: original.toString('base64'), contentType: 'message/rfc822' });
+          }
+          const raw = await composeMime({ to: d.to.join(', '), cc: d.cc?.join(', '), bcc: d.bcc?.join(', '), subject: d.subject,
+            ...(d.isHtml ? { html: body } : { text: body }), attachments,
+            ...(inReplyTo ? { threading: { inReplyTo } } : {}),
+          }, this.account.user, this.account.allowedAttachmentRoots ?? []);
+          const aid = await this.upload(raw, 'message.eml', 'message/rfc822');
+          savedMessage = { aid,
+            ...(d.originalMessageId ? { origid: d.originalMessageId, rt: d.replyType } : {}) };
+        }
+        const result = await this.request('SaveDraft', { m: savedMessage }, 'urn:zimbraMail', true);
         const rawSaved = list(result.m)[0];
         if (!rawSaved || typeof rawSaved !== 'object' || Array.isArray(rawSaved)) throw new ZimbraError('OUTCOME_UNKNOWN', 'Draft response did not identify the saved message. Inspect Drafts before creating another copy.');
         const saved = rawSaved as Obj;
@@ -280,11 +305,90 @@ export class ZimbraClient {
     return draft;
   }
 
-  private async attachment(v: { messageId: string; partId: string; maxBytes: number }): Promise<unknown> {
+  private async patchDraft(v: Extract<typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output, { changes: unknown }>, linkage?: { originalMessageId: string; replyType: 'r' | 'w'; inReplyTo?: string; attachOriginal: boolean }): Promise<unknown> {
+    const source = await this.assertDraft(v.draftId);
+    const revision = String(source.ms ?? '');
+    if (!/^[0-9]+$/.test(revision)) throw new ZimbraError('CONFLICT', 'Server omitted the draft change sequence; a safe partial update is unavailable.');
+    if (v.expectedRevision !== undefined && revision !== v.expectedRevision) throw new ZimbraError('CONFLICT', 'The draft differs from the selected revision. Read it again.');
+    const raw = await this.attachment({ messageId: v.draftId, maxBytes: MAX_MIME_BYTES }) as Buffer;
+    const parsed = await simpleParser(raw, { skipHtmlToText: true, skipTextToHtml: true, skipImageLinks: true });
+    const mimeType = parsed.headers.get('content-type');
+    if (mimeType && typeof mimeType === 'object' && 'value' in mimeType && /(?:signed|encrypted|pkcs7)/i.test(String(mimeType.value))) {
+      throw new ZimbraError('INVALID_INPUT', 'Signed or encrypted drafts require a compatible signing client.');
+    }
+    const c = v.changes;
+    const field = (value: typeof parsed.to) => value === undefined ? '' : (Array.isArray(value) ? value.map(v => v.text).join(', ') : value.text);
+    let text = parsed.text; let html = typeof parsed.html === 'string' ? parsed.html : undefined;
+    if (c.textBody !== undefined || c.htmlBody !== undefined) { text = c.textBody; html = c.htmlBody; }
+    const attachments: OutgoingAttachment[] = c.attachments ?? parsed.attachments.map(a => ({
+      filename: a.filename || 'attachment', contentBase64: a.content.toString('base64'), contentType: a.contentType,
+      contentDisposition: a.contentDisposition === 'inline' ? 'inline' : 'attachment', ...(a.cid ? { cid: a.cid } : {}),
+    }));
+    if (linkage?.attachOriginal) {
+      const original = await this.attachment({ messageId: linkage.originalMessageId, maxBytes: MAX_MIME_BYTES }) as Buffer;
+      attachments.push({ filename: 'original.eml', contentBase64: original.toString('base64'), contentType: 'message/rfc822' });
+    }
+    const headers: Record<string, string> = {};
+    const controlled = /^(?:bcc|cc|content-.*|from|to|subject|date|message-id|mime-version|reply-to|references|in-reply-to|dkim-signature|return-path|received|authentication-results|arc-.*)$/i;
+    for (const entry of parsed.headerLines) {
+      if (controlled.test(entry.key)) continue;
+      if (headers[entry.key] !== undefined) throw new ZimbraError('INVALID_INPUT', 'The draft has duplicate custom headers; exact preservation requires a compatible MIME editor.');
+      headers[entry.key] = entry.line.slice(entry.line.indexOf(':') + 1).replace(/\r?\n[ \t]+/g, ' ').trim();
+    }
+    const message: OutgoingMessage = {
+      from: field(parsed.from) || this.account.user,
+      to: c.to?.join(', ') ?? field(parsed.to), cc: c.cc?.join(', ') ?? field(parsed.cc), bcc: c.bcc?.join(', ') ?? field(parsed.bcc),
+      replyTo: field(parsed.replyTo), subject: c.subject ?? parsed.subject ?? '',
+      ...(text !== undefined ? { text } : {}), ...(html !== undefined ? { html } : {}), attachments, headers,
+      threading: { inReplyTo: linkage?.inReplyTo ?? parsed.inReplyTo, references: parsed.references },
+    };
+    if (!message.to) throw new ZimbraError('INVALID_INPUT', 'The draft has no To recipients.');
+    const composed = await composeMime(message, this.account.user, this.account.allowedAttachmentRoots ?? [], { messageId: parsed.messageId, date: parsed.date });
+    const aid = await this.upload(composed, 'message.eml', 'message/rfc822');
+    const result = await this.request('SaveDraft', { m: { aid, id: v.draftId,
+      ...(linkage ? { origid: linkage.originalMessageId, rt: linkage.replyType } : source.origid ? { origid: source.origid, rt: source.rt } : {}),
+      ...(source.f ? { f: source.f } : {}), ...(source.tn ? { tn: source.tn } : {}),
+    } }, 'urn:zimbraMail', true, undefined, revision);
+    const saved = list(result.m)[0];
+    if (!saved || typeof saved !== 'object' || !('id' in saved) || typeof saved.id !== 'string') throw new ZimbraError('OUTCOME_UNKNOWN', 'Draft save did not return an ID. Inspect Drafts before another write.');
+    return { status: 'saved', draftId: saved.id, retrySafe: false, result, nextAction: 'Read the saved draft and verify its content and attachments.' };
+  }
+
+  private async upload(bytes: Buffer, filename: string, contentType: string): Promise<string> {
+    if (this.closed) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra client is closed.');
+    if (bytes.length > MAX_MIME_BYTES) throw new ZimbraError('INVALID_INPUT', 'Upload exceeds the 50 MiB limit.');
+    const session = await this.options.sessionProvider();
+    if (session.endpoint !== this.endpoint || session.user !== this.account.user || session.expiresAt <= Date.now() + 5000) throw new ZimbraError('AUTH_REQUIRED', 'Run accounts login ACCOUNT_ID locally.');
+    const cookie = sessionCookie(session.authToken);
+    const requestId = randomUUID();
+    const form = new FormData();
+    form.set('requestId', requestId);
+    form.set('file', new Blob([new Uint8Array(bytes)], { type: contentType }), filename);
+    const controller = new AbortController(); this.pending.add(controller);
+    const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30000);
+    try {
+      const response = await this.fetchImpl(new URL('/service/upload?fmt=raw', this.endpoint), {
+        method: 'POST', redirect: 'error', signal: controller.signal, headers: { cookie }, body: form,
+      });
+      if (response.status === 401 || response.status === 403) {
+        await response.body?.cancel();
+        throw new ZimbraError(response.status === 401 ? 'AUTH_REQUIRED' : 'ACCESS_DENIED', 'Zimbra upload access rejected. Check the session and server permissions.');
+      }
+      const data = await boundedBytes(response, 8192);
+      if (!response.ok) throw new ZimbraError('OUTCOME_UNKNOWN', 'Zimbra upload failed. No draft save was attempted.');
+      return parseUploadResponse(data.toString('utf8'), requestId);
+    } catch (error) {
+      if (error instanceof ZimbraError && error.code !== 'PROVIDER_ERROR') throw error;
+      throw new ZimbraError('OUTCOME_UNKNOWN', 'Zimbra upload outcome is unknown. No draft save was attempted.');
+    } finally { clearTimeout(timer); this.pending.delete(controller); }
+  }
+
+  private async attachment(v: { messageId: string; partId?: string; maxBytes: number }): Promise<unknown> {
+    if (this.closed) throw new ZimbraError('PROVIDER_ERROR', 'Zimbra client is closed.');
     const session = await this.options.sessionProvider();
     if (session.endpoint !== this.endpoint || session.user !== this.account.user || session.expiresAt <= Date.now() + 5000) throw new ZimbraError('AUTH_REQUIRED', 'Run accounts login ACCOUNT_ID locally.');
     const url = new URL('/service/home/~/', this.endpoint);
-    url.search = new URLSearchParams({ id: v.messageId, part: v.partId, auth: 'co' }).toString();
+    url.search = new URLSearchParams({ id: v.messageId, ...(v.partId ? { part: v.partId } : { fmt: 'raw' }), auth: 'co' }).toString();
     const controller = new AbortController(); this.pending.add(controller);
     const timer = setTimeout(() => controller.abort(), this.options.timeoutMs ?? 30000);
     try {

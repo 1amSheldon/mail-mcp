@@ -31,6 +31,7 @@ Preserve the returned ID exactly, including any shared-mailbox prefix.
 | `zimbra.sessionStatus` | `{}` | Local session state only |
 | `zimbra.searchMessages` | `query`, `limit?`, `cursor?` | Native query, compact items and continuation |
 | `zimbra.readMessage` | `messageId` | Body, recipients, headers/attachment metadata; does not mark read |
+| `zimbra.getRawMessage` | `messageId`, `maxBytes?` | Original RFC 822 bytes; default 10 MiB, maximum 50 MiB |
 | `zimbra.getThread` | `conversationId` | Conversation metadata; read individual messages afterward |
 | `zimbra.listFolders` | `{}` | Native folder tree |
 | `zimbra.listTags` | `{}` | Tags and IDs |
@@ -55,8 +56,8 @@ and return original bytes even with text redaction enabled.
 
 | Operation | Input |
 | --- | --- |
-| `zimbra.createDraft` | `to` array, `subject`, `body`; optional cc/bcc arrays, isHtml, originalMessageId, replyType, attachOriginal, quoteOriginal |
-| `zimbra.updateDraft` | The same COMPLETE content plus `draftId`; no nested changes object |
+| `zimbra.createDraft` | `to` array, `subject`, `body`; optional cc/bcc arrays, isHtml, originalMessageId, replyType, attachOriginal, quoteOriginal, attachments |
+| `zimbra.updateDraft` | `draftId`, `changes`, `expectedRevision?`; legacy complete-content form also accepted |
 | `zimbra.sendDraft` | `draftId` |
 | `zimbra.createTag` | `name`, `color?` integer 0-9 |
 | `zimbra.deleteTag` | `tagId` |
@@ -78,10 +79,37 @@ signature. quoteOriginal=true adds a bounded quote; HTML source is converted to
 text and escaped. attachOriginal=true attaches the original message as
 message/rfc822, not a list of its original file attachments. Both default false.
 
-updateDraft is a FULL replacement, unlike IMAP updateDraft. Omitted content and
-arbitrary existing attachments are not preserved. Do not use it on a draft whose
-attachments must survive. New local attachment upload is not implemented; use
-webmail or a separately selected IMAP account, preserving identity and authorization.
+For updateDraft prefer `changes`: to/cc/bcc arrays, subject, textBody, htmlBody,
+attachments. Omitted fields and attachments survive. Supplying attachments replaces
+the list; [] removes them. Supplying one body format removes an omitted alternative:
+send textBody and htmlBody together to keep both. The legacy form replaces recipients
+and body; it also preserves attachments unless an explicit list is supplied.
+
+Partial updates fetch raw MIME, preserve decoded HTML, CID links, attachment bytes,
+reply headers and Message-ID, and save with a server change-sequence guard. MIME
+boundaries and transfer encodings may change; this is not a byte-identical archive.
+Signed/encrypted drafts and duplicate custom headers are rejected rather than
+silently damaged. The draft must expose `ms`; optionally pass that value as
+expectedRevision to bind the edit to the version already reviewed. On conflict,
+re-read the draft and reconcile the user's changes; do not repeat a stale patch.
+
+Attachments accept `{path}` on the MCP host or `{filename,contentBase64}`, with
+optional contentType, contentDisposition (attachment/inline) and cid. At most 20
+files, 25 MiB per file and 50 MiB composed MIME. Local paths require the account's
+allowedAttachmentRoots; missing/empty roots disable paths, not base64. Paths and
+symlinks are checked by the shared attachment preparation code. Do not broaden
+roots to bypass a rejection. Upload uses the current Zimbra session and
+`/service/upload`; it does not require an IMAP app password. Upload failure does
+not trigger a draft save or automatic retry. Server size limits may be lower.
+
+```json
+{"accountId":"ZIMBRA_ACCOUNT_ID","operation":"zimbra.updateDraft","input":{"draftId":"123","changes":{"subject":"Revised subject"},"expectedRevision":"42"}}
+```
+
+Replace the example draft ID and revision with the selected draft's actual ID and ms.
+Read the saved draft, and use getRawMessage to verify exact HTML and attachment
+metadata when those must survive. Raw messages and files are binary resources,
+not redaction-safe exports.
 
 ```json
 {"accountId":"ZIMBRA_ACCOUNT_ID","operation":"zimbra.createDraft","input":{"to":["recipient@example.com"],"subject":"Re: Delivery date","body":"Approved reply text","originalMessageId":"123","replyType":"r","quoteOriginal":true}}
