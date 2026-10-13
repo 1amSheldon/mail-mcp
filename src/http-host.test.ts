@@ -408,6 +408,36 @@ describe('Streamable HTTP host', () => {
     expect((await first).status).toBe(200);
   });
 
+  it('reserves replacement capacity while an evicted session is closing', async () => {
+    let release!: () => void;
+    let closing = false;
+    let created = 0;
+    host = await startHttpHost({ host: '127.0.0.1', port: 0, bearerToken: 'test-token', maxSessions: 1,
+      createSession: () => {
+        const session = new TestMcpSession();
+        if (++created === 1) return { connect: (transport: StreamableHTTPServerTransport) => session.connect(transport),
+          shutdown: async () => { closing = true; await new Promise<void>(resolve => { release = resolve; }); await session.shutdown(); } };
+        return session;
+      },
+    });
+    const headers = { authorization: 'Bearer test-token', accept: 'application/json, text/event-stream', 'content-type': 'application/json' };
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: {
+      protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'race', version: '1' },
+    } });
+    await (await fetch(host.url, { method: 'POST', headers, body })).body?.cancel();
+    const replacement = fetch(host.url, { method: 'POST', headers, body });
+    try {
+      await vi.waitFor(() => expect(closing).toBe(true));
+      const competing = await fetch(host.url, { method: 'POST', headers, body });
+      expect(competing.status).toBe(503);
+      await competing.body?.cancel();
+      expect(created).toBe(2);
+    } finally { release(); }
+    const response = await replacement;
+    expect(response.status).toBe(200);
+    await response.body?.cancel();
+  });
+
   it('rejects invalid session lifecycle options', async () => {
     const baseOptions = {
       host: '127.0.0.1',

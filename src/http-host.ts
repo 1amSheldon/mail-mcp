@@ -135,6 +135,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   let shuttingDown = false;
   let closePromise: Promise<void> | undefined;
   let activeRecoveryRequests = 0;
+  let pendingInitializations = 0;
 
   const closeSession = (record: ActiveSession): Promise<void> => {
     if (record.closePromise) return record.closePromise;
@@ -224,6 +225,12 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
       let record = id ? sessions.get(id) : undefined;
 
       if (!record && req.method === 'POST' && !id) {
+        if (pendingInitializations >= maxSessions) {
+          rpcError(res, 503, 'Too many active MCP sessions');
+          return;
+        }
+        pendingInitializations++;
+        try {
         let body: unknown;
         try {
           body = await readJsonBody(req);
@@ -237,6 +244,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
           return;
         }
 
+        let evicted: Promise<void> | undefined;
         if (sessions.size >= maxSessions) {
           const oldestIdle = Array.from(sessions.values())
             .filter(session => session.activeRequests === 0)
@@ -245,7 +253,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
             rpcError(res, 503, 'Too many active MCP sessions');
             return;
           }
-          await closeSession(oldestIdle);
+          evicted = closeSession(oldestIdle);
         }
 
         const mcpServer = options.createSession();
@@ -266,6 +274,9 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         };
 
         try {
+          // Reserve the replacement before awaiting cleanup of the evicted
+          // session; another initializer must not take that same free slot.
+          await evicted;
           await mcpServer.connect(transport);
           await transport.handleRequest(req, res, body);
         } catch (error) {
@@ -276,6 +287,9 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
           record.lastUsedAt = Date.now();
         }
         return;
+        } finally {
+          pendingInitializations--;
+        }
       }
 
       if (!record && id && options.recoverUnknownSessions) {
@@ -375,6 +389,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         (
           Array.from(sessions.values()).some(session => session.activeRequests > 0)
           || activeRecoveryRequests > 0
+          || pendingInitializations > 0
         ) &&
         Date.now() < drainDeadline
       ) {
