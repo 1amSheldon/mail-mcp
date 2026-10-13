@@ -131,6 +131,9 @@ export class SmtpClient {
       streamTransport: true,
       buffer: true,
       newline: 'windows',
+      // All allowed attachment sources have already been resolved to checked bytes.
+      disableFileAccess: true,
+      disableUrlAccess: true,
     } as any);
   }
 

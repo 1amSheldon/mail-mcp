@@ -30,6 +30,15 @@ afterEach(async () => {
 });
 
 describe('outgoing MIME contract', () => {
+  it.each(['text', 'html'])('rejects file and URL sources in %s before resolving attachments', async field => {
+    for (const value of [{ path: '/private/secret' }, { path: 'http://127.0.0.1/private' }, { href: 'https://example.com' }, Buffer.from('body'), null]) {
+      await expect(prepareOutgoingMessage({
+        to: 'to@example.com', subject: 'Invalid source', [field]: value,
+        attachments: [{ path: '/must-not-be-opened' }],
+      } as any, 'from@example.com', { allowedAttachmentRoots: [] })).rejects.toThrow('Invalid outgoing message');
+    }
+  });
+
   it('builds text and HTML alternatives with threading, Reply-To, and inline attachment bytes', async () => {
     const options = await prepareOutgoingMessage({
       to: 'to@example.com',

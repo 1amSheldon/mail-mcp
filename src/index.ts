@@ -140,6 +140,19 @@ function requireObject(value: unknown, field: string): Record<string, unknown> {
 }
 
 function outgoingMessageFromArgs(args: Record<string, unknown>): MailSendMessage {
+  for (const field of ['to', 'subject', 'body', 'textBody', 'htmlBody', 'cc', 'bcc', 'replyTo', 'from']) {
+    if (args[field] !== undefined && typeof args[field] !== 'string') {
+      throw new Error(`${field} must be a string`);
+    }
+  }
+  for (const field of ['isHtml', 'includeSignature']) {
+    if (args[field] !== undefined && typeof args[field] !== 'boolean') {
+      throw new Error(`${field} must be a boolean`);
+    }
+  }
+  if (args.attachments !== undefined && !Array.isArray(args.attachments)) {
+    throw new Error('attachments must be an array');
+  }
   const body = args.body as string | undefined;
   const isHtml = args.isHtml === true;
   const text = (args.textBody as string | undefined) ?? (!isHtml ? body : undefined);
@@ -1102,8 +1115,9 @@ export class MailMCPServer {
       }
 
       if (name === 'create_draft') {
+        const message = outgoingMessageFromArgs(args);
         const service = await this.getService(args.accountId as string);
-        const draft = await service.createDraftMessage(outgoingMessageFromArgs(args));
+        const draft = await service.createDraftMessage(message);
         return {
           content: [{ type: 'text', text: JSON.stringify(draft, null, 2) }],
         };
