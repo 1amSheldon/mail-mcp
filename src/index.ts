@@ -1431,6 +1431,9 @@ export class MailMCPServer {
         if (!account) {
           throw new Error(`Account ${accountId} not found in configuration.`);
         }
+        if (account.authType !== 'login') {
+          throw new Error('ManageSieve currently supports login credentials only; OAuth2 accounts cannot use filter operations.');
+        }
         const { loadCredentials } = await import('./security/keychain.js');
         const password = await loadCredentials(accountId);
         if (!password) {

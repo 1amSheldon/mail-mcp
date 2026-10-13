@@ -221,5 +221,8 @@ export function getAccountCapabilities(
     return { ...ACCOUNT_BACKEND_CAPABILITIES['apple-mail'], manageRules: account.allowGlobalRules === true,
       rulesScope: 'application-global' };
   }
+  if (isImapSmtpAccount(account) && account.authType === 'oauth2') {
+    return { ...ACCOUNT_BACKEND_CAPABILITIES['imap-smtp'], manageRules: false };
+  }
   return ACCOUNT_BACKEND_CAPABILITIES[account.backend ?? 'imap-smtp'];
 }
