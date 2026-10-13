@@ -58,7 +58,7 @@ For a production deployment, separately verify the real host and account:
 | Runtime | Intended commit/entrypoint and transport; tools and guide from that process |
 | Read | Folder/resource discovery, bounded search, full message read, partial-result handling |
 | Draft | Authorized test draft saved, read back, correct recipients/headers/body/attachments |
-| Update | Approved changes survive readback; omitted IMAP fields preserved; Zimbra replacement respected |
+| Update | Approved changes survive readback; omitted IMAP/Zimbra fields and attachments preserved; stale Zimbra revisions rejected |
 | Send | Only with explicit send authorization and intended recipient; inspect acceptance, rejection and archive evidence |
 | Recovery | Use isolated fixtures for timeout/duplicate/conflict scenarios, not destructive experiments in production |
 | Cleanup | Only authorized test artifacts removed; draft state, existing mail and unrelated config preserved |

@@ -10,7 +10,7 @@ export const zimbraSessionSchema = z.object({
 export type ZimbraSession = z.infer<typeof zimbraSessionSchema>;
 
 export class ZimbraError extends Error {
-  constructor(public readonly code: 'AUTH_REQUIRED' | 'TWO_FACTOR_REQUIRED' | 'AUTH_FAILED' | 'INVALID_INPUT' | 'ACCESS_DENIED' | 'PROVIDER_ERROR' | 'OUTCOME_UNKNOWN', message: string) {
+  constructor(public readonly code: 'AUTH_REQUIRED' | 'TWO_FACTOR_REQUIRED' | 'AUTH_FAILED' | 'INVALID_INPUT' | 'ACCESS_DENIED' | 'PROVIDER_ERROR' | 'OUTCOME_UNKNOWN' | 'CONFLICT', message: string) {
     super(message); this.name = 'ZimbraError';
   }
 }

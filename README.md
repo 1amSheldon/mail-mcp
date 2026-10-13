@@ -20,7 +20,7 @@ See [production hardening qualification](PRODUCTION-READINESS.md) for the audit 
 | Backend | What it supports | Runtime requirement |
 | --- | --- | --- |
 | IMAP + SMTP | Cursor-based listing and search, stable message locators, raw RFC 822, folders, copy/move/trash/permanent delete, flags, threads, contacts, MIME drafts and sends, reply-all, attachments, delivery verification | Any provider exposing IMAP and SMTP |
-| Zimbra SOAP | Native search, tags, address-book reads, conversation metadata, server drafts and native draft sending | Zimbra HTTPS SOAP endpoint and locally authenticated session |
+| Zimbra SOAP/REST | Mail/MIME attachments and durable sends, native scheduling, folders/tags, contacts/groups/GAL, filters/settings, sharing, calendars/tasks/invitations and Briefcase | Zimbra HTTPS user endpoint and locally authenticated session; server permissions/features apply |
 | ManageSieve | List, read, create, update, and delete server-side filters | A ManageSieve endpoint on the IMAP account |
 | Apple Mail | Accounts, mailboxes, messages, raw source, drafts, compose, reply, reply-all, forward, flags, move, trash, and rule management | macOS with Mail.app and Automation permission |
 | Microsoft Graph | Read by ID, Internet Message-ID lookup, thread lookup, send, reply, inline attachments, and large attachment upload sessions | Pre-provisioned Microsoft OAuth2 credentials |
@@ -31,8 +31,10 @@ Gmail, Google Workspace, Mail.ru, iCloud, Fastmail, Yahoo, Zoho, and other stand
 
 ## Zimbra SOAP and 2FA
 
-The optional `zimbra` backend adds native search, tags, address-book reads,
-conversation metadata, server reply/forward drafts and native draft sending.
+The optional `zimbra` backend covers native mail with MIME attachments and guarded
+draft edits, contacts/groups, filters, user settings, sharing, calendars/tasks,
+invitations, Briefcase and scheduled delivery. Recipient restrictions and native
+concurrency limits are explicit in the operation references.
 Authenticate locally with `node dist/index.js accounts login ACCOUNT_ID`;
 only the completed session is stored, not the password or OTP. Expired or revoked
 sessions require local reauthentication. Existing IMAP/SMTP app-password accounts
@@ -40,7 +42,7 @@ remain separate. See [Zimbra setup, operations and limitations](docs/ZIMBRA.md).
 
 ## Install
 
-The current release is `starychenko/mail-mcp` **v3.1.0**. Use a reviewed checkout or the package attached to its [GitHub release](https://github.com/starychenko/mail-mcp/releases/tag/v3.1.0). The upstream npm package is a separate distribution. Keep the checkout at a stable path.
+The current release is `starychenko/mail-mcp` **v3.2.0**. Use a reviewed checkout or the package attached to its [GitHub release](https://github.com/starychenko/mail-mcp/releases/tag/v3.2.0). The upstream npm package is a separate distribution. Keep the checkout at a stable path.
 
 ```bash
 git clone https://github.com/starychenko/mail-mcp.git

@@ -73,7 +73,10 @@ installation. Preserve ~/.config/mail-mcp/draft-state during a migration; treat
 it as operational data, not disposable cache. It does not coordinate independent
 sends from other computers or webmail. Do not clear records to force a retry.
 
-Zimbra updates replace full content, including attachments. Microsoft may return
+Zimbra partial draft updates preserve omitted content and attachments and use
+server modification guards. Its send/schedule journal is stored separately at
+`~/.config/mail-mcp/zimbra-send-state`; preserve it across migrations and never
+clear uncertain attempts to force another send. Microsoft may return
 an intermediate draftId during a failed upload/send; operation=createDraft and
 deliveryAttempted=false means delivery was not attempted, but duplicate draft
 creation is still unsafe without inspection. Apple/Mailtrap have separate native
@@ -94,6 +97,10 @@ and mailbox deletion need the user's intended irreversible scope, not a generic
 request to tidy mail. Do not broaden permissions after an access-denied error.
 
 ## Scheduling
+
+Zimbra has [native scheduling](zimbra-scheduling.md), with mutable server drafts,
+durable local claims and explicit cancellation limits. It does not depend on a
+local scheduler. Do not apply the IMAP host-scheduler instructions below to it.
 
 The MCP has no generic IMAP scheduled-send operation. A local scheduler belongs to
 the host/client and must actually exist and be configured when the user requests it.

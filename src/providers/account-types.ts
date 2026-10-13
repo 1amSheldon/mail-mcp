@@ -112,6 +112,9 @@ export const zimbraAccountSchema = secretFreeObjectSchema.pipe(z.object({
     } catch { return false; }
   }, 'Zimbra endpoint must end in /service/soap without query or fragment'),
   allowedRecipients: z.array(z.email()).optional(),
+  allowedAttachmentRoots: z.array(nonEmptyString).optional(),
+  fromAliases: z.array(z.email()).optional(),
+  signature: z.string().optional(),
 }));
 
 export const configuredAccountSchema = z.union([
@@ -152,8 +155,8 @@ export interface AccountCapabilityDescriptor {
 export const ACCOUNT_BACKEND_CAPABILITIES = {
   zimbra: {
     backend: 'zimbra', credentialSource: 'keychain', readMail: true, sendMail: true,
-    manageMailboxes: false, manageRules: false, providerApi: true,
-    updateDraft: true, sendDraft: true,
+    manageMailboxes: true, manageRules: true, providerApi: true,
+    updateDraft: true, sendDraft: true, createReplyDraft: true, createReplyAllDraft: true,
   },
   'imap-smtp': {
     updateDraft: true,
@@ -239,7 +242,7 @@ export function isZimbraAccount(account: ConfiguredAccount): account is ZimbraCo
 export function getAccountCapabilities(
   account: ConfiguredAccount,
 ): AccountCapabilityDescriptor {
-  if (isZimbraAccount(account) && account.allowedRecipients !== undefined) {
+  if (isZimbraAccount(account) && account.allowedRecipients?.length === 0) {
     return { ...ACCOUNT_BACKEND_CAPABILITIES.zimbra, sendMail: false, sendDraft: false };
   }
   if (isAppleMailAccount(account)) {

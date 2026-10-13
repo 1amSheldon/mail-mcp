@@ -184,19 +184,19 @@ function usesExtendedOutgoingArgs(args: Record<string, unknown>): boolean {
     || args.attachments !== undefined;
 }
 
-function formatProviderResult(result: unknown, uri: string) {
+function formatProviderResult(result: unknown, uri: string, mediaType = 'application/octet-stream') {
   if (result instanceof Uint8Array) {
     return {
       content: [
         {
           type: 'text' as const,
-          text: JSON.stringify({ bytes: result.byteLength, mediaType: 'application/octet-stream' }, null, 2),
+          text: JSON.stringify({ bytes: result.byteLength, mediaType }, null, 2),
         },
         {
           type: 'resource' as const,
           resource: {
             uri,
-            mimeType: 'application/octet-stream',
+            mimeType: mediaType,
             blob: Buffer.from(result).toString('base64'),
           },
         },
@@ -358,13 +358,48 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       const operation = String(args.operation);
       // Only describe action metadata, never message bodies or authentication material.
       const details = [
-        'draftId', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
+        'draftId', 'sendAt', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
         'to', 'cc', 'bcc', 'subject', 'originalMessageId', 'replyType', 'attachOriginal', 'quoteOriginal',
+        'parentFolderId', 'contactId', 'contactIds', 'signatureId', 'view', 'recursive', 'flagged', 'spam',
+        'mountpointId', 'remoteFolderId', 'owner', 'permissions', 'granteeId', 'expiresAt',
+        'documentId', 'expectedVersion', 'restoreVersion', 'locked', 'enabled',
+        'appointmentId', 'taskId', 'itemId', 'kind', 'start', 'endExclusive', 'due', 'notifyAttendees', 'status', 'percentComplete',
+        'invitationId', 'messageId', 'proposerEmail', 'component', 'expectedModSequence', 'expectedRevision', 'instance', 'range', 'allowExceptionReset', 'response', 'notifyOrganizer',
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
-      if (operation === 'updateDraft') details.push('replace draft contents with the supplied recipients and body');
+      if (operation === 'scheduleDraft') details.push('schedule native delivery of this server draft; later webmail edits can change what is sent');
+      if (operation === 'cancelScheduledDraft') details.push('clear scheduled delivery while preserving draft MIME; cannot recall a send already started');
+      if (operation === 'updateDraft') details.push(input.changes ? 'patch supplied draft fields; preserve omitted fields and attachments' : 'replace draft contents with the supplied recipients and body; preserve omitted attachments');
       if (operation === 'moveToTrash') details.push('move messages to Trash');
+      if (operation === 'deleteFolder') details.push('delete the folder, its descendants and contents');
+      if (operation === 'emptyFolder') details.push('delete folder contents');
+      if (operation === 'grantFolderAccess' || operation === 'grantDocumentAccess') {
+        const target = input.grantee as Record<string, unknown> | undefined;
+        details.push('change sharing permissions', `grantee=${JSON.stringify({ type: target?.type, id: target?.id, name: target?.name, email: target?.email })}`);
+      }
+      if (operation === 'removeMountpoint') details.push('remove local link to the shared folder');
+      if (operation === 'sendShareNotification') details.push('send a sharing email to the listed recipients');
+      if (operation === 'deleteDocument') details.push('delete the document and its retained revisions');
+      if (operation === 'restoreDocumentRevision') details.push('create a new current revision from historical content and description');
+      if (operation === 'importICalendar') details.push('import calendar content, including embedded alarms; may update existing items by UID and partially succeed');
+      if (operation === 'forwardAppointment') details.push('forward the selected meeting to listed recipients and permit native organizer notification');
+      if (operation === 'counterAppointment') details.push('send the organizer a proposed new time/location; does not reschedule the meeting');
+      if (operation === 'forwardInboxInvitation') details.push('forward all appointment components in the message and permit native organizer notification');
+      if (operation === 'replyToInboxInvitation') details.push(input.notifyOrganizer === false ? 'record participation and permit native calendar creation/update including alarms; no organizer reply' : 'reply to organizer and permit native calendar creation/update including alarms');
+      if (operation === 'declineCounterProposal') details.push('send rejection of the selected incoming time proposal to its proposer; does not change the meeting');
+      if (Array.isArray(input.attachments)) details.push(`newAttachmentCount=${input.attachments.length}`);
+      const calendarChanges = input.changes as Record<string, unknown> | undefined;
+      if (calendarChanges && Array.isArray(calendarChanges.attachments)) details.push(`replace attachments with ${calendarChanges.attachments.length} supplied files`);
+      if (operation === 'cancelAppointment' || operation === 'cancelTask') details.push('cancel selected calendar scope and permit native attendee cancellation emails');
+      if (operation === 'replyToInvitation') details.push(input.notifyOrganizer === false ? 'record local participation only' : 'reply to the calendar organizer');
+      if (['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException'].includes(operation)) details.push(input.notifyAttendees === true ? 'update calendar content and notify affected attendees' : 'patch calendar content without invitation emails; edits requiring cancellation notices are refused');
+      if (operation === 'createAppointment' || operation === 'createTask') {
+        details.push(input.notifyAttendees === true ? 'send invitations to supplied attendees' : 'save without invitation emails');
+        if (Array.isArray(input.attendees)) details.push(`attendeeEmails=${JSON.stringify(input.attendees.map(a => (a as Record<string, unknown>).email))}`);
+        if (Array.isArray(input.alarms)) details.push(`emailAlarmRecipients=${JSON.stringify(input.alarms.filter(a => (a as Record<string, unknown>).type === 'email').map(a => (a as Record<string, unknown>).to))}`);
+      }
+      if (operation === 'deleteMessages' || operation === 'deleteContacts') details.push('delete selected items; recovery depends on server retention');
       return `Execute Zimbra ${operation} for account ${args.accountId as string}${details.length ? ` (${details.join(', ')})` : ''}`;
     }
     case 'mailtrap_mutate': {
@@ -725,7 +760,8 @@ export class MailMCPServer {
             ? await this.providerRuntime.executeZimbraRead(args.accountId as string, args.operation as ZimbraReadOperation, input)
             : await this.providerRuntime.executeZimbraWrite(args.accountId as string, args.operation as ZimbraWriteOperation, input);
           return formatProviderResult(result,
-            `zimbra-result://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(String(args.operation))}`);
+            `zimbra-result://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(String(args.operation))}`,
+            args.operation === 'exportICalendar' ? 'text/calendar' : undefined);
         } catch (error) { throw new Error(providerErrorMessage(error), { cause: error }); }
       }
 

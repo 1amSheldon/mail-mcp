@@ -35,7 +35,7 @@ Read only the references needed for the selected workflow:
 | Task/backend | Reference |
 | --- | --- |
 | IMAP search, MIME drafts, folders, attachments, templates and Sieve | [IMAP/SMTP](references/imap-smtp.md) |
-| Native Zimbra search, tags, contacts, drafts and local login | [Zimbra](references/zimbra.md) |
+| Zimbra mail, scheduling, calendars/tasks, contacts, rules, settings, sharing, Briefcase and local login | [Zimbra](references/zimbra.md) |
 | macOS Mail.app messages, compose and global rules | [Apple Mail](references/apple-mail.md) |
 | Graph or Exchange Web Services | [Microsoft](references/microsoft.md) |
 | Mailtrap sandbox, inbound, resources and campaigns | [Mailtrap](references/mailtrap.md) |
