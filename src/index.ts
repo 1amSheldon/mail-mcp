@@ -98,6 +98,7 @@ export function parseCliArgs(args: string[]) {
       'install-claude-code': { type: 'boolean', default: false },
       'install-codex': { type: 'boolean', default: false },
       'install-codex-local': { type: 'boolean', default: false },
+      'skip-skill': { type: 'boolean', default: false },
       'install-codex-stdio': { type: 'boolean', default: false },
       'auto-update-seconds': { type: 'string' },
       'version': { type: 'boolean', default: false },
@@ -1602,6 +1603,7 @@ Options:
   --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
   --install-claude-code       Register an auto-updating user-scoped MCP server in Claude Code
   --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
+  --skip-skill                Preserve skills without installing the bundled skill
   --install-codex-local       Install this local build as the Windows service without npm auto-updates
   --install-codex-stdio       Write an auto-updating per-client stdio command to Codex config
   --auto-update-seconds N     Managed HTTP service update check interval (minimum: 60)
@@ -1653,6 +1655,7 @@ Options:
       if (process.platform === 'win32') {
         const expectedUrl = `http://${SHARED_HTTP_HOST}:${SHARED_HTTP_PORT}/mcp`;
         const bundle = await installCodexBundle(configPath, codexHome, {
+          skipSkill: values['skip-skill'],
           transport: 'http',
           options: {
             url: expectedUrl,
@@ -1680,7 +1683,7 @@ Options:
         }
         console.log(`Service task: ${service.taskName}`);
         console.log(`Health check: ${service.healthUrl}`);
-        console.log(`Codex skill: ${bundle.skill.skillPath}`);
+        console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
         console.log('Service status: healthy');
         console.log(bundle.config.changed || !service.reusedBearerToken
           ? 'Restart Codex to load the connection settings and bearer token.'
@@ -1690,6 +1693,7 @@ Options:
 
       await prepareMailMcpNpxRuntime();
       const bundle = await installCodexBundle(configPath, codexHome, {
+          skipSkill: values['skip-skill'],
         transport: 'stdio',
         npxArgs,
       });
@@ -1700,7 +1704,7 @@ Options:
         console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
-      console.log(`Codex skill: ${bundle.skill.skillPath}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1716,6 +1720,7 @@ Options:
     const configPath = join(codexHome, 'config.toml');
     try {
       const bundle = await installCodexBundle(configPath, codexHome, {
+          skipSkill: values['skip-skill'],
         transport: 'stdio',
         npxArgs,
       });
@@ -1726,7 +1731,7 @@ Options:
         console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
-      console.log(`Codex skill: ${bundle.skill.skillPath}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
