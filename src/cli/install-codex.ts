@@ -1,5 +1,6 @@
 import { copyFile, lstat, mkdir, readFile, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'smol-toml';
 import { writeTextFileAtomic } from '../utils/atomic-write.js';
 
@@ -52,18 +53,47 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function tableName(line: string): string | undefined {
-  const match = line.match(/^\s*\[{1,2}\s*([^\]]+?)\s*\]{1,2}\s*(?:#.*)?$/);
-  return match?.[1].replace(/\s*\.\s*/g, '.');
+function serverTable(line: string, serverName: string): boolean | undefined {
+  if (!/^\s*\[/.test(line)) return undefined;
+  try {
+    // Let the TOML parser interpret quoted keys, escapes and table arrays.
+    const parsed = parse(`${line}\n__mail_mcp_table_marker = true`);
+    return Object.hasOwn((parsed.mcp_servers ?? {}) as object, serverName);
+  } catch {
+    return undefined;
+  }
 }
 
-function isServerTable(name: string, serverName: string): boolean {
-  const roots = [
-    `mcp_servers.${serverName}`,
-    `mcp_servers."${serverName}"`,
-    `mcp_servers.'${serverName}'`,
-  ];
-  return roots.some((root) => name === root || name.startsWith(`${root}.`));
+function advanceStringState(line: string, state: string | undefined): string | undefined {
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index];
+    if (!state) {
+      if (character === '#') break;
+      if (character !== '"' && character !== "'") continue;
+      state = line.slice(index, index + 3) === character.repeat(3) ? character.repeat(3) : character;
+      index += state.length - 1;
+    } else {
+      if (state[0] === '"' && character === '\\') { index++; continue; }
+      if (state.length === 1 && character === state) { state = undefined; continue; }
+      if (state.length === 3 && line.slice(index, index + 3) === state) {
+        // TOML allows one or two literal quote characters immediately before
+        // the closing delimiter (runs of four or five quotes).
+        while (line[index + 1] === state[0]) index++;
+        state = undefined;
+      }
+    }
+  }
+  return state;
+}
+
+function withoutTarget(source: string, serverName: string): unknown {
+  const result = parse(source.replace(/^\uFEFF/, ''));
+  const servers = result.mcp_servers;
+  if (servers && typeof servers === 'object' && !Array.isArray(servers)) {
+    delete (servers as Record<string, unknown>)[serverName];
+    if (Object.keys(servers).length === 0) delete result.mcp_servers;
+  }
+  return result;
 }
 
 export function buildCodexServerSection(
@@ -122,12 +152,15 @@ function upsertCodexServerSection(
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const kept: string[] = [];
   let skippingTarget = false;
+  let stringState: string | undefined;
+  const bom = source.startsWith('\uFEFF') ? '\uFEFF' : '';
 
-  for (const line of source.split(/\r?\n/)) {
-    const header = tableName(line);
+  for (const line of source.replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const header = stringState ? undefined : serverTable(line, serverName);
     if (header !== undefined) {
-      skippingTarget = isServerTable(header, serverName);
+      skippingTarget = header;
     }
+    stringState = advanceStringState(line, stringState);
     if (!skippingTarget) {
       kept.push(line);
     }
@@ -135,7 +168,11 @@ function upsertCodexServerSection(
 
   const base = kept.join(newline).trimEnd();
   const normalizedSection = section.replace(/\n/g, newline);
-  return `${base}${base === '' ? '' : `${newline}${newline}`}${normalizedSection}${newline}`;
+  const updated = `${bom}${base}${base === '' ? '' : `${newline}${newline}`}${normalizedSection}${newline}`;
+  if (!isDeepStrictEqual(withoutTarget(source, serverName), withoutTarget(updated, serverName))) {
+    throw new Error('Refusing to change Codex settings outside the requested MCP server.');
+  }
+  return updated;
 }
 
 export function upsertCodexServer(
@@ -182,7 +219,7 @@ async function installCodexSection(
 
   if (source.trim() !== '') {
     try {
-      parse(source);
+      parse(source.replace(/^\uFEFF/, ''));
     } catch (error) {
       throw new Error(`Invalid existing Codex config at ${configPath}: ${(error as Error).message}`);
     }
@@ -190,7 +227,7 @@ async function installCodexSection(
 
   const updated = upsertCodexServerSection(source, section, serverName);
   try {
-    parse(updated);
+    parse(updated.replace(/^\uFEFF/, ''));
   } catch (error) {
     throw new Error(`Generated Codex config is invalid: ${(error as Error).message}`);
   }
