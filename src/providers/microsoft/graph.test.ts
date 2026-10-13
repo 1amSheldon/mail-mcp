@@ -313,6 +313,23 @@ describe('MicrosoftGraphClient', () => {
     expect(requestUrl(fetchMock.mock.calls[1][0]).searchParams.get('$skiptoken')).toBe('next');
   });
 
+  it.each([false, true])('sorts across pages without an invalid filter/orderby combination (partial=%s)', async (failLast) => {
+    let page = 0;
+    const fetchMock = vi.fn<MicrosoftFetch>().mockImplementation(async input => {
+      const url = requestUrl(input);
+      if (url.searchParams.has('$orderby')) return new Response('InefficientFilter', { status: 400 });
+      page++;
+      if (page === 3 && failLast) return new Response('Unavailable', { status: 503 });
+      return new Response(JSON.stringify({ value: [{ id: String(page), receivedDateTime: `2026-01-0${4 - page}T00:00:00Z` }],
+        ...(page < 3 ? { '@odata.nextLink': `https://graph.microsoft.com/v1.0/me/messages?page=${page + 1}` } : {}),
+      }));
+    });
+    const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+    const result = await client.getThread({ id: 'anchor', conversationId: 'thread' });
+    expect(result.messages.map(item => item.id)).toEqual(failLast ? ['2', '1'] : ['3', '2', '1']);
+    expect(result.partial).toBe(failLast);
+  });
+
   it('returns accumulated messages as partial when a later thread page fails', async () => {
     const responses = [
       new Response(JSON.stringify({

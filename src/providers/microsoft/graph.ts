@@ -137,6 +137,11 @@ function escapeODataString(value: string): string {
   return value.replace(/'/g, "''");
 }
 
+function chronological(messages: GraphMessageSummary[]): GraphMessageSummary[] {
+  return messages.sort((left, right) => (Date.parse(left.receivedDateTime ?? '') || 0)
+    - (Date.parse(right.receivedDateTime ?? '') || 0));
+}
+
 function recipients(addresses?: string[]): GraphRecipient[] | undefined {
   if (!addresses || addresses.length === 0) return undefined;
   return addresses.map(address => ({ emailAddress: { address } }));
@@ -352,7 +357,6 @@ export class MicrosoftGraphClient {
     const params = new URLSearchParams({
       '$filter': `conversationId eq '${escapeODataString(anchor.conversationId)}'`,
       '$select': 'id,conversationId,internetMessageId,subject,receivedDateTime',
-      '$orderby': 'receivedDateTime asc',
     });
     let nextPath: string | undefined = `${this.mailboxPath}/messages?${params.toString()}`;
     const messages: GraphMessageSummary[] = [];
@@ -424,7 +428,7 @@ export class MicrosoftGraphClient {
         );
       }
     }
-    return { messages, partial: false };
+    return { messages: chronological(messages), partial: false };
   }
 
   private partialThread(
@@ -433,7 +437,7 @@ export class MicrosoftGraphClient {
     message: string,
   ): GraphThreadResult {
     return {
-      messages,
+      messages: chronological(messages),
       partial: true,
       warning: { code, strategy: 'partial_conversation', message },
     };
