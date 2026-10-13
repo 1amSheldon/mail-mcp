@@ -40,10 +40,7 @@ describe('OAuth2 access token refresh', () => {
   });
 
   it('shares one refresh across concurrent callers', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ access_token: 'fresh-token', expires_in: 3600 }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: 'fresh-token', expires_in: 3600 })));
     vi.stubGlobal('fetch', fetchMock);
     keychain.loadCredentials.mockResolvedValue(JSON.stringify(tokenSet));
 
@@ -60,10 +57,7 @@ describe('OAuth2 access token refresh', () => {
   });
 
   it('replaces a rejected token even when its stored expiry is still valid', async () => {
-    const fetchMock = vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ access_token: 'replacement-token', expires_in: 3600 }),
-    });
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ access_token: 'replacement-token', expires_in: 3600 })));
     vi.stubGlobal('fetch', fetchMock);
     keychain.loadCredentials.mockResolvedValue(JSON.stringify({
       ...tokenSet, accessToken: 'revoked-token', expiryDate: Date.now() + 3_600_000,
@@ -75,10 +69,7 @@ describe('OAuth2 access token refresh', () => {
   });
 
   it('rejects a successful response without an access token', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
-      ok: true,
-      json: async () => ({ expires_in: 3600 }),
-    }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ expires_in: 3600 }))));
     keychain.loadCredentials.mockResolvedValue(JSON.stringify(tokenSet));
 
     await expect(getValidAccessToken('work')).rejects.toThrow(
@@ -93,6 +84,26 @@ describe('OAuth2 access token refresh', () => {
     await expect(getValidAccessToken('work')).rejects.toThrow(
       'OAuth2 credentials for account work are not valid JSON'
     );
+  });
+
+  it('does not echo endpoint errors that contain credentials', async () => {
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify(tokenSet));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('client_secret=PRIVATE', { status: 400 })));
+    await expect(getValidAccessToken('work')).rejects.toThrow(/^OAuth2 token refresh failed with HTTP 400$/);
+  });
+
+  it('bounds response bytes and never saves an oversized token response', async () => {
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify(tokenSet));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(new Uint8Array(65537))));
+    await expect(getValidAccessToken('work')).rejects.toThrow('65536-byte limit');
+    expect(keychain.saveCredentials).not.toHaveBeenCalled();
+  });
+
+  it('drops an old expiry when a forced refresh supplies no lifetime', async () => {
+    keychain.loadCredentials.mockResolvedValue(JSON.stringify({ ...tokenSet, accessToken: 'old', expiryDate: Date.now() + 3_600_000 }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('{"access_token":"new"}')));
+    await getValidAccessToken('work', true);
+    expect(JSON.parse(keychain.saveCredentials.mock.calls[0][1])).not.toHaveProperty('expiryDate');
   });
 
   it('rejects an invalid token endpoint before making a request', async () => {

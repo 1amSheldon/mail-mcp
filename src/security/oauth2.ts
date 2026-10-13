@@ -1,5 +1,6 @@
 import { isIP } from 'node:net';
 import { loadCredentials, saveCredentials } from './keychain.js';
+import { readBoundedResponseText } from '../utils/http-body.js';
 
 export interface OAuth2Tokens {
   clientId: string;
@@ -92,7 +93,7 @@ function parseTokenResponse(value: unknown): OAuth2TokenResponse {
   }
   return {
     accessToken: response.access_token,
-    ...(typeof response.expires_in === 'number' && response.expires_in > 0
+    ...(typeof response.expires_in === 'number' && Number.isFinite(response.expires_in) && response.expires_in > 0
       ? { expiresIn: response.expires_in }
       : {}),
     ...(typeof response.refresh_token === 'string' && response.refresh_token !== ''
@@ -127,16 +128,17 @@ async function refreshAccessToken(accountId: string, tokens: OAuth2Tokens): Prom
   }
 
   if (!response.ok) {
-    const detail = (await response.text()).trim().slice(0, 500);
-    throw new Error(
-      `OAuth2 token refresh failed with HTTP ${response.status}${detail ? `: ${detail}` : ''}`
-    );
+    void response.body?.cancel().catch(() => undefined);
+    // Token endpoints sometimes echo request fields; never put them in errors.
+    throw new Error(`OAuth2 token refresh failed with HTTP ${response.status}`);
   }
 
-  const result = parseTokenResponse(await response.json());
+  const result = parseTokenResponse(JSON.parse(await readBoundedResponseText(response, 64 * 1024)));
   tokens.accessToken = result.accessToken;
   if (result.expiresIn !== undefined) {
     tokens.expiryDate = Date.now() + result.expiresIn * 1000;
+  } else {
+    delete tokens.expiryDate;
   }
   if (result.refreshToken !== undefined) {
     tokens.refreshToken = result.refreshToken;
