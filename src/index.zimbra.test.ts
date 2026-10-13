@@ -105,3 +105,19 @@ describe('Zimbra MCP router gates', () => {
     await server.shutdown(); vi.unstubAllGlobals();
   });
 });
+
+
+describe('Zimbra binary attachment output', () => {
+  it.each([false, true])('preserves exact bytes through the router with redaction=%s', async redact => {
+    const bytes = Buffer.from('+1234567890123456/AAA', 'base64');
+    mocks.credential.mockResolvedValue(JSON.stringify({ kind: 'zimbra-session-v1', endpoint: mocks.accounts[0].endpoint, user: mocks.accounts[0].user, authToken: 'secret-token', expiresAt: Date.now() + 60000 }));
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(bytes)));
+    const server = new MailMCPServer(false, undefined, undefined, false, redact);
+    try {
+      const result = await server.dispatchTool('mail_query', false, { accountId: 'z', operation: 'zimbra.getAttachment', input: { messageId: '7', partId: '2' } });
+      expect(result.isError).not.toBe(true);
+      expect(result.content[1]).toMatchObject({ type: 'resource', resource: { mimeType: 'application/octet-stream', blob: bytes.toString('base64') } });
+      expect(readJSON(result)).toMatchObject({ bytes: bytes.length });
+    } finally { await server.shutdown(); vi.unstubAllGlobals(); }
+  });
+});

@@ -59,7 +59,9 @@ minutes and are consumed only after successful reads. Zimbra uses native offset
 paging internally, so mailbox changes can shift pages; no immutable snapshot is
 promised. Message bodies are bounded and can be truncated by the provider.
 SOAP responses are capped at 8 MiB. Attachments use the authenticated cookie over
-HTTPS, not an auth token in the URL; redirects are rejected.
+HTTPS, not an auth token in the URL; redirects are rejected. Attachment bytes are
+returned as an embedded MCP resource with application/octet-stream metadata.
+Binary resources retain their exact bytes even when text redaction is enabled.
 
 | Write operation | Input |
 | --- | --- |

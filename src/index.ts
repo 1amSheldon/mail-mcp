@@ -1691,6 +1691,7 @@ Commands:
   accounts add        Add a new email account (interactive)
   accounts list       List configured accounts
   accounts remove ID  Remove an account
+  accounts login ID   Authenticate a Zimbra account locally
 
 Options:
   --read-only                 Start in read-only mode (no send/move/label tools)

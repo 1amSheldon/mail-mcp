@@ -195,7 +195,7 @@ describe('Zimbra operations', () => {
   });
   it('uses a cookie instead of putting the attachment token in the URL', async () => {
     const { client, fetch } = make(new Response('file', { headers: { 'content-type': 'text/plain' } }));
-    await expect(client.executeRead('getAttachment', { messageId: '7', partId: '2.1' })).resolves.toMatchObject({ size: 4, contentBase64: 'ZmlsZQ==' });
+    await expect(client.executeRead('getAttachment', { messageId: '7', partId: '2.1' })).resolves.toEqual(Buffer.from('file'));
     expect(String(fetch.mock.calls[0][0])).not.toContain('secret-token');
     expect(fetch.mock.calls[0][1]!.headers).toMatchObject({ cookie: 'ZM_AUTH_TOKEN=secret-token' });
   });

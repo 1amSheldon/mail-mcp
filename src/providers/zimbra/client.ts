@@ -284,7 +284,8 @@ export class ZimbraClient {
       }
       if (!response.ok) { await response.body?.cancel(); throw new ZimbraError('PROVIDER_ERROR', 'Zimbra attachment request failed.'); }
       const bytes = await boundedBytes(response, v.maxBytes);
-      return { messageId: v.messageId, partId: v.partId, contentType: response.headers.get('content-type') ?? 'application/octet-stream', size: bytes.length, transferEncoding: 'base64', contentBase64: bytes.toString('base64') };
+      // Keep binary data out of text redaction; the MCP formatter emits a resource.
+      return bytes;
     } catch (error) {
       if (error instanceof ZimbraError) throw error;
       throw new ZimbraError('PROVIDER_ERROR', 'Zimbra attachment request failed or timed out.');
