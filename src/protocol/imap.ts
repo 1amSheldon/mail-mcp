@@ -58,6 +58,7 @@ export interface SenderEnvelope {
 
 export interface AppendMessageResult {
   uid?: number;
+  uidValidity?: string;
 }
 
 const MAX_MAILBOX_STATUS_CONCURRENCY = 8;
@@ -256,7 +257,7 @@ export class ImapClient {
       if (!response) {
         throw new Error(`IMAP APPEND to ${folder} returned no confirmation`);
       }
-      return { uid: response.uid };
+      return { uid: response.uid, ...(response.uidValidity !== undefined ? { uidValidity: response.uidValidity.toString() } : {}) };
     } finally {
       lock.release();
     }

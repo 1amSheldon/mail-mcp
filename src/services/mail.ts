@@ -127,6 +127,9 @@ export interface CopyEmailResult extends CopyMessagesResult {
 }
 
 export interface DraftCreationResult {
+  status: 'saved' | 'append_outcome_unknown';
+  retrySafe: false;
+  nextAction: string;
   draftId?: string;
   warning?: string;
   folder: string;
@@ -840,10 +843,24 @@ export class MailService {
     const effective = this.effectiveOutgoingMessage(message);
     const composed = await this.smtpClient.composeMessage(effective, { stripBcc: false });
     const draftsFolder = await this.resolveDraftsFolder();
-    const appended = await this.imapClient.appendMessage(draftsFolder, composed.rawMessage, ['\\Draft']);
+    let appended;
+    try {
+      appended = await this.imapClient.appendMessage(draftsFolder, composed.rawMessage, ['\\Draft']);
+    } catch {
+      return {
+        status: 'append_outcome_unknown', retrySafe: false, folder: draftsFolder,
+        messageId: composed.messageId,
+        nextAction: 'Do not create another copy. Search the Drafts folder for this Message-ID and inspect the result before retrying.',
+        warning: 'APPEND did not return confirmation; the draft may already be saved.',
+      };
+    }
     let locator: string | undefined;
+    let warning: string | undefined;
+    try {
     if (appended.uid !== undefined) {
-      const identity = await this.imapClient.getMailboxIdentity(draftsFolder);
+      const identity = appended.uidValidity
+        ? { path: draftsFolder, uidValidity: appended.uidValidity }
+        : await this.imapClient.getMailboxIdentity(draftsFolder);
       locator = encodeMessageLocator({
         accountId: this.account.id,
         mailbox: identity.path,
@@ -851,8 +868,10 @@ export class MailService {
         uid: appended.uid,
       });
     }
+    } catch {
+      warning = 'Draft saved, but its mailbox identity could not be resolved. Search by Message-ID before updating or sending. Do not create another copy.';
+    }
     let draftId: string | undefined;
-    let warning: string | undefined;
     if (locator) {
       try {
         draftId = await this.draftWorkflow().adopt(locator, composed.messageId);
@@ -863,6 +882,8 @@ export class MailService {
       }
     }
     return {
+      status: 'saved', retrySafe: false,
+      nextAction: locator ? 'Use this locator or draftId to update or send the saved draft. Do not create another copy.' : 'Search the Drafts folder by Message-ID to locate the saved draft. Do not create another copy.',
       ...(draftId ? { draftId } : {}),
       ...(warning ? { warning } : {}),
       folder: draftsFolder,
@@ -905,7 +926,7 @@ export class MailService {
         const folder = await this.resolveDraftsFolder();
         const result = await this.imapClient.appendMessage(folder, raw, ['\\Draft']);
         const identity = await this.imapClient.getMailboxIdentity(folder);
-        return { folder, uid: result.uid, ...(result.uid !== undefined ? { locator: encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid: result.uid }) } : {}) };
+        return { status: 'saved', retrySafe: false, nextAction: 'Use the saved draft locator.', folder, uid: result.uid, ...(result.uid !== undefined ? { locator: encodeMessageLocator({ accountId: this.account.id, mailbox: folder, uidValidity: identity.uidValidity, uid: result.uid }) } : {}) };
       },
       trash: locator => this.deleteLocatedEmail(locator),
       compose: message => this.smtpClient.composeMessage(this.effectiveOutgoingMessage({ ...message, includeSignature: false }), { stripBcc: false }),

@@ -37,6 +37,28 @@ async function fixture(overrides: Partial<EmailAccount> = {}) {
 }
 
 describe('threaded reply drafts with real MIME composition', () => {
+  it('reports saved with recovery instructions when mailbox lookup fails after APPEND', async () => {
+    const f = await fixture();
+    vi.mocked(f.service.imap.getMailboxIdentity).mockImplementation(async path => {
+      if (path === 'Drafts') throw new Error('connection lost');
+      return { path, uidValidity: '1' };
+    });
+    const result = await f.service.createReplyDraft(f.locator, 'Reply');
+    expect(result).toMatchObject({ status: 'saved', retrySafe: false, folder: 'Drafts', uid: 2 });
+    expect(result.messageId).toBeTruthy();
+    expect(result.nextAction).toContain('Do not create another copy');
+    expect(result.locator).toBeUndefined();
+    expect(f.append).toHaveBeenCalledOnce();
+  });
+
+  it('uses APPENDUID identity without a post-save STATUS and reports unknown APPEND outcomes', async () => {
+    const f = await fixture();
+    f.append.mockResolvedValueOnce({ uid: 2, uidValidity: '3' });
+    expect((await f.service.createReplyDraft(f.locator, 'Reply')).locator).toBeTruthy();
+    expect(f.service.imap.getMailboxIdentity).not.toHaveBeenCalledWith('Drafts');
+    f.append.mockRejectedValueOnce(new Error('response lost'));
+    expect(await f.service.createReplyDraft(f.locator, 'Reply')).toMatchObject({ status: 'append_outcome_unknown', retrySafe: false });
+  });
   it('retains every Reply-To recipient for drafts and immediate replies', async () => {
     const f = await fixture();
     f.source.replyTo = { value: [{ address: 'one@example.test', name: '' }, { address: 'two@example.test', name: '' }, { address: 'ONE@example.test', name: '' }], text: '', html: '' };
