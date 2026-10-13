@@ -50,7 +50,7 @@
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "npm run clean && tsc",
+    "build": "npm run clean && tsc && node scripts/prepare-bin.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
     "check:english": "node scripts/check-english.mjs",
