@@ -10,6 +10,7 @@ function operation<S extends z.ZodType>(schema: S, build: (input: z.output<S>) =
   return { schema, request: (input: unknown) => build(schema.parse(input)) };
 }
 export const itemId = z.string().regex(/^(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}:)?[1-9][0-9]{0,15}$/);
+const localItemId = z.string().regex(/^[1-9][0-9]{0,15}$/);
 const ids = z.array(itemId).min(1).max(100);
 const name = z.string().min(1).max(255).refine(v => !/[:/"\x00-\x1f]/.test(v) && v.trimEnd().length > 0 && !['.', '..'].includes(v.trimEnd()));
 const color = z.number().int().min(0).max(127);
@@ -35,8 +36,25 @@ const groupMember = z.discriminatedUnion('type', [
 const members = z.array(groupMember).max(1000);
 const member = (v: z.infer<typeof groupMember>) => v.type === 'contact' ? { type: 'C', value: v.contactId }
   : v.type === 'gal' ? { type: 'G', value: v.ref } : { type: 'I', value: v.name ? `${JSON.stringify(v.name)} <${v.email}>` : v.email };
+const grantee = z.discriminatedUnion('type', [
+  // Grant-by-name can silently fall back from an unknown internal user to a
+  // guest in FolderAction. Require an actual directory ID for internal grants.
+  z.object({ type: z.enum(['usr', 'grp', 'dom', 'cos']), id: z.string().uuid() }).strict(),
+  z.object({ type: z.enum(['all', 'pub']) }).strict(),
+  z.object({ type: z.literal('guest'), email: z.email(), password: z.string().min(1).max(1024) }).strict(),
+  z.object({ type: z.literal('key'), email: z.email(), accessKey: z.string().min(16).max(1024).regex(/^[A-Za-z0-9_-]+$/) }).strict(),
+]);
+const grantTarget = (v: z.output<typeof grantee>): Record<string, unknown> => {
+  if (v.type === 'guest') return { gt: 'guest', d: v.email, pw: v.password };
+  if (v.type === 'key') return { gt: 'key', d: v.email, key: v.accessKey };
+  if (v.type === 'all' || v.type === 'pub') return { gt: v.type };
+  return { gt: v.type, ...('id' in v ? { zid: v.id } : {}) };
+};
 
 export const NATIVE_READ_OPERATIONS = {
+  getShareInfo: operation(z.object({ owner: z.email().optional(), includeOwn: z.boolean().default(true), granteeType: z.enum(['usr', 'grp', 'dom', 'cos', 'all', 'pub']).optional() }).strict(),
+    v => ({ name: 'GetShareInfo', namespace: 'urn:zimbraAccount', params: { includeSelf: v.includeOwn ? 1 : 0, ...(v.owner ? { owner: { by: 'name', _content: v.owner } } : {}), ...(v.granteeType ? { grantee: { type: v.granteeType } } : {}) } })),
+  getFolderGrants: operation(z.object({ folderId: itemId }).strict(), v => ({ name: 'GetFolder', params: { folder: { id: v.folderId }, depth: 0, needGranteeName: 1 } })),
   getAccountInfo: operation(empty, () => ({ name: 'GetInfo', namespace: 'urn:zimbraAccount', params: { sections: 'mbox,attrs,idents,sigs' } })),
   getPreferences: operation(z.object({ names: z.array(prefName).min(1).max(100).optional() }).strict(),
     v => ({ name: 'GetPrefs', namespace: 'urn:zimbraAccount', params: v.names ? { pref: v.names.map(name => ({ name })) } : {} })),
@@ -50,6 +68,15 @@ export const NATIVE_READ_OPERATIONS = {
 };
 
 export const NATIVE_WRITE_OPERATIONS = {
+  grantFolderAccess: operation(z.object({ folderId: itemId, grantee, permissions: z.string().min(1).max(8).regex(/^[rwidaxpf]+$/).refine(v => new Set(v).size === v.length), expiresAt: z.union([z.iso.datetime({ offset: true }), z.literal('never')]).optional() }).strict(),
+    v => folderAction(v.folderId, 'grant', { grant: { ...grantTarget(v.grantee), perm: v.permissions, ...(v.expiresAt ? { expiry: v.expiresAt === 'never' ? 0 : Date.parse(v.expiresAt) } : {}) } })),
+  revokeFolderAccess: operation(z.object({ folderId: itemId, granteeId: z.union([z.string().uuid(), z.email()]) }).strict(), v => folderAction(v.folderId, '!grant', { zid: v.granteeId })),
+  createMountpoint: operation(z.object({ name, parentFolderId: itemId, owner: z.email(), remoteFolderId: z.string().regex(/^[1-9][0-9]{0,15}$/), view: z.enum(['message', 'contact', 'appointment', 'task', 'document']).optional(), color: color.optional(), reminders: z.boolean().default(false) }).strict(),
+    v => ({ name: 'CreateMountpoint', params: { link: { name: v.name, l: v.parentFolderId, owner: v.owner, rid: v.remoteFolderId, reminder: v.reminders ? 1 : 0, ...(v.view ? { view: v.view } : {}), ...(v.color === undefined ? {} : { color: v.color }) } } })),
+  setSharedReminders: operation(z.object({ mountpointId: localItemId, enabled: z.boolean() }).strict(), v => ({ name: 'EnableSharedReminder', params: { link: { id: v.mountpointId, reminder: v.enabled ? 1 : 0 } } })),
+  removeMountpoint: operation(z.object({ mountpointId: localItemId }).strict(), v => folderAction(v.mountpointId, 'delete')),
+  sendShareNotification: operation(z.object({ folderId: itemId, to: z.array(z.email()).min(1).max(100), notes: z.string().max(20000).optional(), revoked: z.boolean().default(false) }).strict(),
+    v => ({ name: 'SendShareNotification', params: { item: { id: v.folderId }, e: v.to.map(a => ({ a, t: 't' })), ...(v.notes === undefined ? {} : { notes: { _content: v.notes } }), ...(v.revoked ? { action: 'revoke' } : {}) } })),
   setPreferences: operation(z.object({ values: preferences }).strict(), v => ({ name: 'ModifyPrefs', namespace: 'urn:zimbraAccount', params: { _attrs: v.values } })),
   createIdentity: operation(z.object({ name, values: preferences }).strict(), v => ({ name: 'CreateIdentity', namespace: 'urn:zimbraAccount', params: { identity: { name: v.name, _attrs: v.values } } })),
   updateIdentity: operation(z.object({ identityId: z.string().uuid(), values: preferences }).strict(), v => ({ name: 'ModifyIdentity', namespace: 'urn:zimbraAccount', params: { identity: { id: v.identityId, _attrs: v.values } } })),

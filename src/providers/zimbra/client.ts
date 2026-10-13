@@ -58,7 +58,7 @@ function withoutSecrets(value: unknown, authToken: string): unknown {
   if (Array.isArray(value)) return value.map(v => withoutSecrets(v, authToken));
   if (!value || typeof value !== 'object') return value;
   return Object.fromEntries(Object.entries(value).map(([k, v]) => [k,
-    /(?:password|secret|token|credential|authorization)$/i.test(k) ? '[REDACTED]' : withoutSecrets(v, authToken)]));
+    /(?:password|secret|token|credential|authorization)$/i.test(k) || /^(?:pw|key)$/i.test(k) ? '[REDACTED]' : withoutSecrets(v, authToken)]));
 }
 
 async function boundedBytes(response: Response, max: number): Promise<Buffer> {
@@ -264,6 +264,15 @@ export class ZimbraClient {
     if (Object.hasOwn(FILTER_WRITE_SCHEMAS, operation)) return this.filters.write(operation as FilterWriteOperation, v);
     if (Object.hasOwn(NATIVE_WRITE_OPERATIONS, operation)) {
       const native = NATIVE_WRITE_OPERATIONS[operation as keyof typeof NATIVE_WRITE_OPERATIONS].request(v);
+      if (operation === 'sendShareNotification' && this.account.allowedRecipients !== undefined) {
+        const allowed = new Set(this.account.allowedRecipients.map(a => a.toLowerCase()));
+        if ((v as { to: string[] }).to.some(a => !allowed.has(a.toLowerCase()))) throw new ZimbraError('ACCESS_DENIED', 'Share notification destination is outside allowedRecipients.');
+      }
+      if (operation === 'removeMountpoint') {
+        const id = (v as { mountpointId: string }).mountpointId;
+        const folders = await this.request('GetFolder', { folder: { id }, depth: 0, tr: 0 });
+        if (!list(folders.link).some(link => String(object(link).id) === id)) throw new ZimbraError('INVALID_INPUT', 'Selected item is not a local mountpoint. Use folder deletion explicitly for owned folders.');
+      }
       if (native.name === 'ModifyPrefs') checkPreferencePolicy(native.params._attrs as Record<string, string | string[]>, this.account.allowedRecipients);
       if (native.name === 'CreateIdentity' || native.name === 'ModifyIdentity') checkPreferencePolicy(object(native.params.identity)._attrs as Record<string, string | string[]>, this.account.allowedRecipients);
       if (operation === 'updateContactGroup') {
