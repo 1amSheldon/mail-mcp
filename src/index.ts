@@ -68,6 +68,8 @@ import type { MailtrapAction } from './providers/mailtrap/types.js';
 import { AppleMailError } from './providers/apple-mail/errors.js';
 import { MailtrapHttpError, MailtrapSendOutcomeUnknownError } from './providers/mailtrap/client.js';
 import { MicrosoftProviderError } from './providers/microsoft/common.js';
+import { ZimbraError } from './providers/zimbra/session.js';
+import type { ZimbraReadOperation, ZimbraWriteOperation } from './providers/zimbra/operations.js';
 import type { OutgoingAttachment } from './domain/outgoing-message.js';
 import { validateOAuth2TokenEndpoint } from './security/oauth2.js';
 import {
@@ -210,6 +212,11 @@ function formatProviderResult(result: unknown, uri: string) {
 }
 
 function providerErrorMessage(error: unknown): string {
+  if (error instanceof ZimbraError) return JSON.stringify({ provider: 'zimbra', status: error.code.toLowerCase(),
+    retrySafe: ['INVALID_INPUT', 'AUTH_REQUIRED', 'AUTH_FAILED', 'TWO_FACTOR_REQUIRED'].includes(error.code), message: error.message,
+    nextAction: ['AUTH_REQUIRED', 'AUTH_FAILED', 'TWO_FACTOR_REQUIRED'].includes(error.code) ? 'Run accounts login ACCOUNT_ID locally. Never paste credentials or OTPs into chat.'
+      : error.code === 'OUTCOME_UNKNOWN' ? 'Inspect the current server state. Never retry this write automatically.'
+        : error.code === 'ACCESS_DENIED' ? 'Review account permissions and server access policy before retrying.' : 'Review the input and server policy.' });
   if (error instanceof ProviderRuntimeError) {
     return `[${error.code}] ${error.message}`;
   }
@@ -344,6 +351,22 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
     case 'microsoft_mail_send':
       return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
+    case 'zimbra_mail_mutate': {
+      const input = args.input && typeof args.input === 'object' && !Array.isArray(args.input)
+        ? args.input as Record<string, unknown>
+        : {};
+      const operation = String(args.operation);
+      // Only describe action metadata, never message bodies or authentication material.
+      const details = [
+        'draftId', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
+        'to', 'cc', 'bcc', 'subject', 'originalMessageId', 'replyType', 'attachOriginal', 'quoteOriginal',
+      ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
+      if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
+      if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
+      if (operation === 'updateDraft') details.push('replace draft contents with the supplied recipients and body');
+      if (operation === 'moveToTrash') details.push('move messages to Trash');
+      return `Execute Zimbra ${operation} for account ${args.accountId as string}${details.length ? ` (${details.join(', ')})` : ''}`;
+    }
     case 'mailtrap_mutate': {
       const input = args.input && typeof args.input === 'object' && !Array.isArray(args.input)
         ? args.input as Record<string, unknown>
@@ -693,6 +716,17 @@ export class MailMCPServer {
         } catch (error) {
           throw new Error(providerErrorMessage(error), { cause: error });
         }
+      }
+
+      if (name === 'zimbra_mail_query' || name === 'zimbra_mail_mutate') {
+        try {
+          const input = requireObject(args.input, 'input');
+          const result = name === 'zimbra_mail_query'
+            ? await this.providerRuntime.executeZimbraRead(args.accountId as string, args.operation as ZimbraReadOperation, input)
+            : await this.providerRuntime.executeZimbraWrite(args.accountId as string, args.operation as ZimbraWriteOperation, input);
+          return formatProviderResult(result,
+            `zimbra-result://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(String(args.operation))}`);
+        } catch (error) { throw new Error(providerErrorMessage(error), { cause: error }); }
       }
 
       if (name === 'microsoft_mail_query' || name === 'microsoft_mail_send') {
@@ -1657,6 +1691,7 @@ Commands:
   accounts add        Add a new email account (interactive)
   accounts list       List configured accounts
   accounts remove ID  Remove an account
+  accounts login ID   Authenticate a Zimbra account locally
 
 Options:
   --read-only                 Start in read-only mode (no send/move/label tools)

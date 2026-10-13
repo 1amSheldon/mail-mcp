@@ -8,6 +8,8 @@ import {
 } from '../config.js';
 import { saveCredentials, removeCredentials } from '../security/keychain.js';
 import { validateOAuth2TokenEndpoint } from '../security/oauth2.js';
+import { handleZimbraLogin } from './zimbra-login.js';
+import { validateZimbraEndpoint } from '../providers/zimbra/session.js';
 
 export function inferSmtpHost(imapHost: string): string {
   return /^imap\./i.test(imapHost) ? imapHost.replace(/^imap\./i, 'smtp.') : '';
@@ -42,6 +44,9 @@ export async function handleAccountsCommand(args: string[]): Promise<boolean> {
   const subcommand = args[1];
 
   switch (subcommand) {
+    case 'login':
+      await handleZimbraLogin(args[2]);
+      return true;
     case 'list':
       await listAccounts();
       return true;
@@ -55,7 +60,7 @@ export async function handleAccountsCommand(args: string[]): Promise<boolean> {
       return true;
 
     default:
-      console.log('Usage: mail-mcp accounts <add|list|remove>');
+      console.log('Usage: mail-mcp accounts <add|list|remove|login>');
       process.exit(1);
   }
 }
@@ -91,7 +96,7 @@ async function listAccounts(): Promise<void> {
   }
 }
 
-type ConfiguredBackend = 'imap-smtp' | 'apple-mail' | 'microsoft-graph' | 'ews' | 'mailtrap';
+type ConfiguredBackend = 'imap-smtp' | 'apple-mail' | 'microsoft-graph' | 'ews' | 'mailtrap' | 'zimbra';
 type ProviderAccountBase = {
   [Backend in Exclude<ConfiguredBackend, 'imap-smtp'>]: {
     id: string;
@@ -126,14 +131,15 @@ async function askBackend(prompt: QuestionPrompt): Promise<ConfiguredBackend> {
     '3': 'microsoft-graph',
     '4': 'ews',
     '5': 'mailtrap',
+    '6': 'zimbra',
   };
   while (true) {
     const raw = (await prompt.question(
-      'Backend: 1) IMAP/SMTP  2) Apple Mail  3) Microsoft Graph  4) EWS  5) Mailtrap [1]: '
+      'Backend: 1) IMAP/SMTP  2) Apple Mail  3) Microsoft Graph  4) EWS  5) Mailtrap  6) Zimbra SOAP [1]: '
     )).trim();
     const backend = choices[raw || '1'];
     if (backend) return backend;
-    console.log('  Choose a backend from 1 to 5.');
+    console.log('  Choose a backend from 1 to 6.');
   }
 }
 
@@ -161,6 +167,13 @@ async function addProviderAccount(
   existingAccounts: ConfiguredAccount[],
   base: ProviderAccountBase,
 ): Promise<void> {
+  if (base.backend === 'zimbra') {
+    const user = await askRequired(prompt, 'Zimbra mailbox email');
+    const endpoint = validateZimbraEndpoint(await askRequired(prompt, 'Zimbra HTTPS endpoint (https://mail.example.com/service/soap)'));
+    await saveProviderAccount(existingAccounts, { ...base, user, endpoint });
+    console.log(`Run accounts login ${base.id} locally to authenticate, including 2FA when required.`);
+    return;
+  }
   if (base.backend === 'apple-mail') {
     const nativeAccountName = await askRequired(
       prompt,
