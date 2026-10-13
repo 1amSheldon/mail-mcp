@@ -1,8 +1,12 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { ZIMBRA_READ_SCHEMAS, ZIMBRA_WRITE_SCHEMAS } from '../providers/zimbra/operations.js';
+
+function zimbraNames<T extends Record<string, unknown>>(schemas: T): Array<`zimbra.${Extract<keyof T, string>}`> {
+  return Object.keys(schemas).map(name => `zimbra.${name}` as `zimbra.${Extract<keyof T, string>}`);
+}
 
 export const MAIL_QUERY_OPERATIONS = [
-  'zimbra.sessionStatus', 'zimbra.searchMessages', 'zimbra.readMessage', 'zimbra.getThread',
-  'zimbra.listFolders', 'zimbra.listTags', 'zimbra.searchContacts', 'zimbra.getContact', 'zimbra.getAttachment',
+  ...zimbraNames(ZIMBRA_READ_SCHEMAS),
   'listMessages', 'searchMessages', 'verifySentMessage', 'readMessage', 'listFolders',
   'getRawMessage', 'getThread', 'getAttachment', 'extractAttachmentText', 'mailboxStats',
   'extractContacts', 'listTemplates', 'renderTemplate', 'listFilters', 'getFilter',
@@ -18,8 +22,7 @@ export const MAIL_QUERY_OPERATIONS = [
 ] as const;
 
 export const MAIL_MUTATION_OPERATIONS = [
-  'zimbra.createDraft', 'zimbra.updateDraft', 'zimbra.sendDraft', 'zimbra.createTag', 'zimbra.deleteTag',
-  'zimbra.addTag', 'zimbra.removeTag', 'zimbra.moveMessages', 'zimbra.markRead', 'zimbra.moveToTrash',
+  ...zimbraNames(ZIMBRA_WRITE_SCHEMAS),
   'sendMessage', 'createDraft', 'createReplyDraft', 'createReplyAllDraft', 'updateDraft', 'sendDraft', 'createMailbox', 'renameMailbox', 'deleteMailbox',
   'copyMessage', 'moveMessage', 'modifyLabels', 'registerOAuth2', 'batchMessages',
   'reply', 'replyAll', 'forward', 'moveToTrash', 'permanentlyDelete', 'markRead',

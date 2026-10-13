@@ -360,11 +360,15 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       const details = [
         'draftId', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
         'to', 'cc', 'bcc', 'subject', 'originalMessageId', 'replyType', 'attachOriginal', 'quoteOriginal',
+        'parentFolderId', 'contactId', 'contactIds', 'signatureId', 'view', 'recursive', 'flagged', 'spam',
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
       if (operation === 'updateDraft') details.push('replace draft contents with the supplied recipients and body');
       if (operation === 'moveToTrash') details.push('move messages to Trash');
+      if (operation === 'deleteFolder') details.push('delete the folder, its descendants and contents');
+      if (operation === 'emptyFolder') details.push('delete folder contents');
+      if (operation === 'deleteMessages' || operation === 'deleteContacts') details.push('delete selected items; recovery depends on server retention');
       return `Execute Zimbra ${operation} for account ${args.accountId as string}${details.length ? ` (${details.join(', ')})` : ''}`;
     }
     case 'mailtrap_mutate': {

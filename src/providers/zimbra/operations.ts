@@ -1,6 +1,7 @@
 import { z } from 'zod';
+import { itemId, NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS, schemas } from './native-operations.js';
 
-const id = z.string().regex(/^(?:[a-fA-F0-9-]{36}:)?[1-9][0-9]{0,15}$/);
+const id = itemId;
 // Zimbra represents single-message conversations with a negative item ID.
 const conversationId = z.string().regex(/^(?:[a-fA-F0-9]{8}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{4}-[a-fA-F0-9]{12}:)?-?[1-9][0-9]{0,15}$/);
 const text = z.string().max(200000).refine(v => !v.includes('\0'));
@@ -17,6 +18,7 @@ const draft = {
   quoteOriginal: z.boolean().default(false),
 };
 export const ZIMBRA_READ_SCHEMAS = {
+  ...schemas(NATIVE_READ_OPERATIONS),
   sessionStatus: z.object({}).strict(),
   searchMessages: z.object(page).strict(),
   readMessage: z.object({ messageId: id }).strict(),
@@ -28,6 +30,7 @@ export const ZIMBRA_READ_SCHEMAS = {
   getAttachment: z.object({ messageId: id, partId: z.string().regex(/^[1-9][0-9]*(?:\.[1-9][0-9]*)*$/), maxBytes: z.number().int().min(1).max(25 * 1024 * 1024).default(5 * 1024 * 1024) }).strict(),
 };
 export const ZIMBRA_WRITE_SCHEMAS = {
+  ...schemas(NATIVE_WRITE_OPERATIONS),
   createDraft: z.object(draft).strict(),
   updateDraft: z.object({ ...draft, draftId: id }).strict(),
   sendDraft: z.object({ draftId: id }).strict(),

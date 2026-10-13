@@ -93,5 +93,59 @@ has allowedRecipients configured, native send is disabled: concurrent webmail ed
 cannot be checked atomically. Do not bypass this by changing account policy.
 
 For outcome_unknown, inspect Drafts/Sent or affected objects before deciding on
-recovery; never automatically repeat a write. Native scheduling, calendars,
-contact writes, mailbox management and permanent deletion are not exposed.
+recovery; never automatically repeat a write. Native scheduling and calendars
+are not exposed yet.
+
+## Folders, contacts and user settings
+
+These are native Zimbra operations; prefix every operation below with `zimbra.`.
+Discover IDs with listFolders, searchContacts and listSignatures. Account IDs used
+by MCP are not Zimbra item IDs. Shared item IDs keep their owner UUID prefix.
+
+Reads through `mail_query`:
+
+| Operation | Input | Boundary |
+| --- | --- | --- |
+| `zimbra.getAccountInfo` | `{}` | Server version, mailbox information, identities and signatures; a live authenticated read |
+| `zimbra.getPreferences` | `zimbra.names` array of 1-100 zimbraPref names | Only the requested settings |
+| `zimbra.listIdentities`, `zimbra.listSignatures` | `{}` | Native identities/signatures, not automatically applied to compose |
+| `zimbra.getFolder` | `zimbra.folderId` | Folder metadata and returned descendants |
+| `zimbra.getMessageMetadata` | `zimbra.messageIds` | Flags, folder, revision and other server metadata |
+
+Writes through `mail_mutate`:
+
+| Operation | Input | Effect |
+| --- | --- | --- |
+| `zimbra.createFolder` | `zimbra.name`, `zimbra.parentFolderId`, `view?`, `color?` | view: message (default), contact, appointment, task or document; name is one segment |
+| `zimbra.renameFolder` | `zimbra.folderId`, `zimbra.name` | Rename one folder |
+| `zimbra.moveFolder` | `zimbra.folderId`, `zimbra.parentFolderId` | Move its subtree |
+| `zimbra.trashFolder` | `zimbra.folderId` | Move folder to Trash; Zimbra may mark contents read and rename it |
+| `zimbra.deleteFolder` | `zimbra.folderId` | Delete folder, descendants and contents; requires explicit destructive intent |
+| `zimbra.emptyFolder` | `zimbra.folderId`, `recursive?` | Delete contents; recursive defaults false |
+| `zimbra.markFolderRead` | `zimbra.folderId` | Mark the folder contents read |
+| `zimbra.setFolderColor` | `zimbra.folderId`, `zimbra.color` | Native palette index 0-127 |
+| `zimbra.setFlagged` | `zimbra.messageIds`, `zimbra.flagged` | Set/clear stars without replacing other flags |
+| `zimbra.markSpam` | `zimbra.messageId`, `zimbra.spam` | Spam/not-spam action can move the message and train server filtering |
+| `zimbra.deleteMessages` | `zimbra.messageIds` | Delete, possibly into the server dumpster; not a guarantee of physical erasure |
+| `zimbra.recoverMessages` | `zimbra.messageIds`, `zimbra.folderId` | Recover available dumpster items; depends on server retention and permissions |
+| `zimbra.renameTag` | `zimbra.tagId`, `zimbra.name` | Rename existing tag |
+| `zimbra.setTagColor` | `zimbra.tagId`, `zimbra.color` | Native palette index 0-127 |
+| `zimbra.createContact` | `zimbra.fields`, `folderId?` | Create a native contact; default Contacts folder if omitted |
+| `zimbra.updateContact` | `zimbra.contactId`, `zimbra.fields` | Patch supplied fields; omitted fields survive; empty string removes a field |
+| `zimbra.moveContacts` | `zimbra.contactIds`, `zimbra.folderId` | Move contacts |
+| `zimbra.trashContacts`, `zimbra.deleteContacts` | `zimbra.contactIds` | Trash or delete, respectively |
+| `zimbra.createSignature` | `zimbra.name`, `zimbra.contents` | May become default if the account has no default signature |
+| `zimbra.updateSignature` | `zimbra.signatureId`, `name?`, `contents?` | Change supplied attributes; at least one change required |
+| `zimbra.deleteSignature` | `zimbra.signatureId` | Delete selected signature |
+
+Arrays of message/contact IDs accept 1-100 entries. Contact fields are a map, e.g.
+`{"firstName":"Alex","email":"alex@example.test","company":"Supplier"}`;
+at most 100 fields, 20,000 characters each. Signatures use server UUIDs and
+`contents: [{"type":"text/plain","content":"Alex"}]`; one entry per format,
+text/plain and/or text/html, at most 200,000 characters per entry. Read back the
+signature before assuming how the server preserves its other format.
+
+Before deletion, inspect folder descendants and contents or selected contacts.
+Never turn an ambiguous "remove" into permanent deletion. SOAP action responses
+may echo requested IDs even when constraints prevented an item from changing:
+re-query affected objects; an echoed ID list is not per-item success evidence.

@@ -3,6 +3,7 @@ import { htmlToMarkdown } from '../../utils/markdown.js';
 import type { ZimbraConfiguredAccount } from '../account-types.js';
 import { ZimbraError, validateZimbraEndpoint, type ZimbraSession } from './session.js';
 import { ZIMBRA_READ_SCHEMAS, ZIMBRA_WRITE_SCHEMAS, type ZimbraReadOperation, type ZimbraWriteOperation } from './operations.js';
+import { NATIVE_READ_OPERATIONS, NATIVE_WRITE_OPERATIONS } from './native-operations.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -169,6 +170,10 @@ export class ZimbraClient {
     const parsed = schema.safeParse(input);
     if (!parsed.success) throw new ZimbraError('INVALID_INPUT', 'Invalid fields for Zimbra ' + operation + '.');
     const v = parsed.data;
+    if (Object.hasOwn(NATIVE_READ_OPERATIONS, operation)) {
+      const native = NATIVE_READ_OPERATIONS[operation as keyof typeof NATIVE_READ_OPERATIONS].request(v);
+      return this.request(native.name, native.params, native.namespace);
+    }
     switch (operation) {
       case 'sessionStatus': {
         const session = await this.options.sessionProvider();
@@ -182,6 +187,7 @@ export class ZimbraClient {
       case 'getContact': return this.request('GetContacts', { cn: { id: (v as { contactId: string }).contactId } });
       case 'getAttachment': return this.attachment(v as { messageId: string; partId: string; maxBytes: number });
     }
+    throw new ZimbraError('INVALID_INPUT', 'Unknown Zimbra read operation.');
   }
 
   private async search(operation: string, v: { query: string; limit: number; cursor?: string }): Promise<unknown> {
@@ -209,6 +215,10 @@ export class ZimbraClient {
     const parsed = schema.safeParse(input);
     if (!parsed.success) throw new ZimbraError('INVALID_INPUT', 'Invalid fields for Zimbra ' + operation + '.');
     const v = parsed.data;
+    if (Object.hasOwn(NATIVE_WRITE_OPERATIONS, operation)) {
+      const native = NATIVE_WRITE_OPERATIONS[operation as keyof typeof NATIVE_WRITE_OPERATIONS].request(v);
+      return this.request(native.name, native.params, native.namespace, true);
+    }
     switch (operation) {
       case 'createDraft': case 'updateDraft': {
         const d = v as typeof ZIMBRA_WRITE_SCHEMAS.updateDraft._output;
@@ -255,7 +265,9 @@ export class ZimbraClient {
       case 'deleteTag': return this.request('TagAction', { action: { id: (v as { tagId: string }).tagId, op: 'delete' } }, 'urn:zimbraMail', true);
       default: {
         const a = v as { messageIds: string[]; tagName?: string; folderId?: string; read?: boolean };
-        const op = { addTag: 'tag', removeTag: '!tag', moveMessages: 'move', markRead: a.read ? 'read' : '!read', moveToTrash: 'trash' }[operation];
+        const actions: Partial<Record<ZimbraWriteOperation, string>> = { addTag: 'tag', removeTag: '!tag', moveMessages: 'move', markRead: a.read ? 'read' : '!read', moveToTrash: 'trash' };
+        const op = actions[operation];
+        if (!op) throw new ZimbraError('INVALID_INPUT', 'Unknown Zimbra write operation.');
         return this.request('MsgAction', { action: { id: a.messageIds.join(','), op, ...(a.tagName ? { tn: a.tagName } : {}), ...(a.folderId ? { l: a.folderId } : {}) } }, 'urn:zimbraMail', true);
       }
     }
