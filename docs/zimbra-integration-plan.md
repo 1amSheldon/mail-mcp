@@ -95,7 +95,7 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   Source inspection also confirmed CreateTaskException exists; no corresponding
   ForwardTaskInvite/DeclineCounterTask handlers exist in the pinned source, so
   forwarding/counter rejection explicitly require appointment components.
-- Current increment: ordinary draft edits refuse native scheduled drafts rather
+- da6f63a: ordinary draft edits refuse native scheduled drafts rather
   than silently canceling them. Verified in SaveDraft and AutoSendDraftTask:
   SaveDraft defaults autoSendTime to zero, cancels the old task and optionally
   schedules a new one; the worker reads the current draft MIME at execution,
@@ -106,6 +106,13 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   and report cancellation as observed state rather than proof of non-delivery.
   Scheduling and delivery are distinct: read-back of autoSendTime does not prove
   the scheduler task exists or has delivered anything. No live mailbox writes.
+- Current increment: scheduleDraft, getScheduledDraft and cancelScheduledDraft
+  preserve raw MIME, use revision guards/read-back and share durable claims with
+  immediate sending. Claims survive cancellation and uncertain writes; a new
+  authorized send needs a new reviewed draft ID after reconciliation. Restricted
+  accounts can cancel but cannot schedule mutable native drafts. Native scheduler
+  state/delivery are not implied by draft metadata. All 242 focused Zimbra/router/
+  documentation tests pass, including concurrent manual-vs-scheduled attempts.
 
 Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate

@@ -10,7 +10,8 @@ const recordSchema = z.object({
   version: z.literal(1), draftId: z.string(), attemptId: z.string().uuid(),
   startedAt: z.string(), mimeHash: z.string().regex(/^[a-f0-9]{64}$/),
   messageId: z.string().optional(),
-  status: z.enum(['sending', 'outcome_unknown', 'accepted']),
+  status: z.enum(['sending', 'outcome_unknown', 'accepted', 'schedule_saved', 'schedule_cleared']),
+  action: z.enum(['schedule', 'cancel_schedule']).optional(), scheduledFor: z.string().optional(),
   sentMessageId: z.string().optional(),
   draftCleanup: z.enum(['retained', 'moved_to_trash', 'retained_changed_or_unverified']).default('retained'),
 }).strict();
@@ -38,9 +39,9 @@ export class ZimbraSendJournal {
       throw new ZimbraError('OUTCOME_UNKNOWN', 'Send journal is incomplete or unreadable. Inspect server state; do not send again.');
     }
   }
-  async begin(draftId: string, raw: Buffer, messageId?: string): Promise<SendRecord> {
+  async begin(draftId: string, raw: Buffer, messageId?: string, schedule?: { action: 'schedule' | 'cancel_schedule'; scheduledFor?: string }): Promise<SendRecord> {
     const record: SendRecord = { version: 1, draftId, attemptId: randomUUID(), startedAt: new Date().toISOString(),
-      mimeHash: hash(raw), messageId, status: 'sending', draftCleanup: 'retained' };
+      mimeHash: hash(raw), messageId, status: 'sending', draftCleanup: 'retained', ...schedule };
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     try {
       await mkdir(this.directory, { recursive: true, mode: 0o700 });
@@ -50,7 +51,7 @@ export class ZimbraSendJournal {
       return record;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new ZimbraError('OUTCOME_UNKNOWN', 'A send attempt already exists for this draft. Inspect getSendStatus before any further action.');
-      throw new ZimbraError('PROVIDER_ERROR', 'Unable to persist the send claim. No SendMsg request was made.');
+      throw new ZimbraError('PROVIDER_ERROR', 'Unable to persist the send claim. No send or schedule request was made.');
     } finally { await handle?.close(); }
   }
   async save(record: SendRecord): Promise<void> {
@@ -66,7 +67,10 @@ export function sendStatus(record: SendRecord) {
   return { status: record.status === 'sending' ? 'outcome_unknown' : record.status,
     draftId: record.draftId, attemptId: record.attemptId, messageId: record.messageId,
     sentMessageId: record.sentMessageId, startedAt: record.startedAt, draftCleanup: record.draftCleanup,
-    retrySafe: false, nextAction: record.status === 'accepted'
+    ...(record.action ? { action: record.action, scheduledFor: record.scheduledFor } : {}),
+    retrySafe: false, nextAction: record.action
+      ? 'Inspect getScheduledDraft and Sent. Schedule metadata is not proof of delivery or non-delivery. This draft retains its send claim; create a new reviewed draft for any separately authorized new send.'
+      : record.status === 'accepted'
       ? 'Do not resend. Server acceptance is not proof of recipient delivery.'
       : 'Inspect Sent and the draft with getSendStatus/verifySentMessage. Never retry an uncertain send automatically.' };
 }

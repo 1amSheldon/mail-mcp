@@ -1,5 +1,7 @@
 # Zimbra SOAP
 
+For delayed delivery and cancellation, see [native scheduling](zimbra-scheduling.md).
+
 For server filters, see [incoming and outgoing rules](zimbra-rules.md).
 For folder ACLs and shared resources, see [sharing and mountpoints](zimbra-sharing.md).
 For files and revision history, see [Briefcase](zimbra-documents.md).

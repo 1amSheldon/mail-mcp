@@ -358,7 +358,7 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       const operation = String(args.operation);
       // Only describe action metadata, never message bodies or authentication material.
       const details = [
-        'draftId', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
+        'draftId', 'sendAt', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
         'to', 'cc', 'bcc', 'subject', 'originalMessageId', 'replyType', 'attachOriginal', 'quoteOriginal',
         'parentFolderId', 'contactId', 'contactIds', 'signatureId', 'view', 'recursive', 'flagged', 'spam',
         'mountpointId', 'remoteFolderId', 'owner', 'permissions', 'granteeId', 'expiresAt',
@@ -368,6 +368,8 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
+      if (operation === 'scheduleDraft') details.push('schedule native delivery of this server draft; later webmail edits can change what is sent');
+      if (operation === 'cancelScheduledDraft') details.push('clear scheduled delivery while preserving draft MIME; cannot recall a send already started');
       if (operation === 'updateDraft') details.push(input.changes ? 'patch supplied draft fields; preserve omitted fields and attachments' : 'replace draft contents with the supplied recipients and body; preserve omitted attachments');
       if (operation === 'moveToTrash') details.push('move messages to Trash');
       if (operation === 'deleteFolder') details.push('delete the folder, its descendants and contents');

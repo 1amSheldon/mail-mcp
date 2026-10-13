@@ -15,6 +15,7 @@ import { ZimbraFilters, FILTER_WRITE_SCHEMAS, type FilterWriteOperation } from '
 import { ZimbraDocuments, DOCUMENT_READ_SCHEMAS, DOCUMENT_WRITE_SCHEMAS } from './documents.js';
 import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS } from './calendar-schema.js';
 import { ZimbraCalendar } from './calendar.js';
+import { ZimbraScheduledDrafts } from './scheduled-drafts.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -95,6 +96,7 @@ export class ZimbraClient {
   private readonly documents: ZimbraDocuments;
   private readonly calendar: ZimbraCalendar;
   private readonly sendJournal: ZimbraSendJournal;
+  private readonly scheduledDrafts: ZimbraScheduledDrafts;
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
   private readonly cursors = new Map<string, { key: string; offset: number; expires: number }>();
@@ -110,6 +112,11 @@ export class ZimbraClient {
     this.documents = new ZimbraDocuments((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write),
       (bytes, name, type) => this.upload(bytes, name, type),
       (id, version, maxBytes) => this.attachment({ messageId: id, version, document: true, maxBytes }), account.allowedAttachmentRoots);
+    this.scheduledDrafts = new ZimbraScheduledDrafts({ read: id => this.assertDraft(id),
+      raw: async id => await this.attachment({ messageId: id, maxBytes: MAX_MIME_BYTES }) as Buffer,
+      upload: raw => this.upload(raw, 'message.eml', 'message/rfc822'),
+      save: (params, revision) => this.request('SaveDraft', params, 'urn:zimbraMail', true, undefined, revision),
+    }, this.sendJournal, account.allowedRecipients !== undefined);
   }
   disconnect(): void { this.closed = true; this.cursors.clear(); for (const c of this.pending) c.abort(); }
 
@@ -201,6 +208,7 @@ export class ZimbraClient {
       return this.request(native.name, native.params, native.namespace);
     }
     switch (operation) {
+      case 'getScheduledDraft': return this.scheduledDrafts.read((v as { draftId: string }).draftId);
       case 'getFilterRules': return this.filters.read((v as { direction: 'incoming' | 'outgoing' }).direction);
       case 'getSendStatus': {
         const record = await this.sendJournal.read((v as { draftId: string }).draftId);
@@ -382,6 +390,7 @@ export class ZimbraClient {
         if (typeof saved.id !== 'string' || !saved.id) throw new ZimbraError('OUTCOME_UNKNOWN', 'Draft response did not identify the saved message. Inspect Drafts before creating another copy.');
         return { status: 'saved', draftId: saved.id, retrySafe: false, result, nextAction: 'Read the saved draft and preserve its provider ID. Do not create another copy.' };
       }
+      case 'scheduleDraft': case 'cancelScheduledDraft': return this.scheduledDrafts.write(v as typeof ZIMBRA_WRITE_SCHEMAS.scheduleDraft._output);
       case 'sendDraft': {
         return this.sendDraft(v as typeof ZIMBRA_WRITE_SCHEMAS.sendDraft._output);
       }
