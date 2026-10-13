@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { itemId } from './native-operations.js';
+import { attachmentsSchema } from './mime.js';
 
 const line = z.string().max(998).refine(v => !/[\r\n\0]/.test(v));
 const text = z.string().max(200000).refine(v => !v.includes('\0'));
@@ -59,6 +60,7 @@ export const alarms = z.array(z.discriminatedUnion('type', [
   z.object({ type: z.literal('audio'), trigger: alarmTrigger }).strict(),
 ])).max(10);
 export const sharedFields = {
+  attachments: attachmentsSchema.optional(),
   subject: line, location: line.optional(), description: text.optional(), htmlDescription: text.optional(),
   privacy: z.enum(['PUB', 'PRI', 'CON']).default('PUB'), priority: z.number().int().min(0).max(9).default(0),
   categories: z.array(line).max(100).optional(), url: z.url().max(2048).optional(), attendees: attendees.default([]),
@@ -69,6 +71,7 @@ export const taskFields = { ...sharedFields, start: calendarTime.optional(), due
 const commonCreate = { folderId: itemId, notifyAttendees: z.boolean().default(false) };
 const inboxInvitation = { messageId: itemId, component: z.number().int().min(0).max(1000).default(0), expectedModSequence: z.string().regex(/^[1-9][0-9]*$/), message: text.default('') };
 const commonChanges = {
+  attachments: attachmentsSchema.optional(),
   subject: line.optional(), location: line.optional(), description: text.optional(), htmlDescription: text.optional(),
   privacy: sharedFields.privacy.removeDefault().optional(), priority: sharedFields.priority.removeDefault().optional(),
   categories: sharedFields.categories, url: z.union([z.url().max(2048), z.literal('')]).optional(),

@@ -2,6 +2,8 @@ import { z } from 'zod';
 import { parseMime } from './compose.js';
 import { CALENDAR_WRITE_SCHEMAS, calendarEdit, calendarTime, compareTimes, sameTimeBasis, nativeAlarms, nativeRecurrence, nativeTime, type CalendarTime } from './calendar-schema.js';
 import { ZimbraError } from './session.js';
+import { noCalendarUploads, type CalendarAttach } from './calendar-attachments.js';
+import type { OutgoingAttachment } from '../../domain/outgoing-message.js';
 
 type Obj = Record<string, unknown>;
 export const CALENDAR_EDIT_OPERATIONS = ['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException', 'cancelAppointment', 'cancelTask', 'replyToInvitation', 'forwardAppointment', 'counterAppointment'] as const;
@@ -50,7 +52,7 @@ function shiftTime(v: CalendarTime, milliseconds: number): CalendarTime {
 interface Snapshot { item: Obj; invite: Obj; comp: Obj; invites: Obj[]; itemId: string }
 
 export class ZimbraCalendarEdits {
-  constructor(private readonly request: Request, private readonly raw: (id: string) => Promise<Buffer>, private readonly user: string, private readonly allowed?: readonly string[]) {}
+  constructor(private readonly request: Request, private readonly raw: (id: string) => Promise<Buffer>, private readonly user: string, private readonly allowed?: readonly string[], private readonly attach: CalendarAttach = noCalendarUploads) {}
   private check(recipients: string[]): void {
     if (this.allowed === undefined) return;
     const allowed = new Set(this.allowed.map(a => a.toLowerCase()));
@@ -118,12 +120,13 @@ export class ZimbraCalendarEdits {
         else attachments.push(ref);
       }
     };
-    walk(snapshot.invite.mp, 0);
-    if (attachmentCount !== inline.length + attachments.length) throw new ZimbraError('PROVIDER_ERROR', 'Calendar MIME attachments do not match the returned part metadata. No update was submitted.');
-    return { l: snapshot.item.l, e: to.map(a => ({ a, t: 't' })), su: { _content: String(comp.name ?? '') },
+    if (changes.attachments === undefined) walk(snapshot.invite.mp, 0);
+    if (changes.attachments === undefined && attachmentCount !== inline.length + attachments.length) throw new ZimbraError('PROVIDER_ERROR', 'Calendar MIME attachments do not match the returned part metadata. No update was submitted.');
+    const message = { l: snapshot.item.l, e: to.map(a => ({ a, t: 't' })), su: { _content: String(comp.name ?? '') },
       inv: { ...(snapshot.invite.tz ? { tz: snapshot.invite.tz } : {}), comp: [comp] },
       mp: inline.length ? { ct: 'multipart/related', mp: [body, ...inline] } : body,
       ...(attachments.length ? { attach: { mp: attachments } } : {}) };
+    return changes.attachments === undefined ? message : this.attach(message, changes.attachments as OutgoingAttachment[]);
   }
   async execute(operation: CalendarEditOperation, input: unknown): Promise<unknown> {
     const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);

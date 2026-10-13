@@ -89,6 +89,28 @@ before preparing a targeted retry. Use a disposable folder for migration trials.
 
 ## Editing, exceptions and responses
 
+Create operations accept `attachments`; update/exception operations accept
+`changes.attachments`. Each is the same local-file or base64 attachment shape as
+mail composition: `{path, filename?, contentType?, contentDisposition?, cid?}`
+or `{filename, contentBase64, contentType?, contentDisposition?, cid?}`. Local
+paths must be within configured `allowedAttachmentRoots`. Up to 20 attachments
+are accepted, with a combined decoded size of 25 MiB. Validate the whole set
+before any upload; a failed upload prevents the calendar mutation but earlier
+uploads may remain temporarily on the server until its cleanup expires them.
+
+An inline attachment needs a distinct bare `cid` such as `logo`, an appropriate
+`contentType`, and HTML referring to `cid:logo`. Do not wrap the CID in angle
+brackets or combine it with `contentDisposition: "attachment"`. Omitted MIME
+types use `application/octet-stream`.
+
+On edit, omitting `changes.attachments` preserves the original native MIME part
+references. Supplying the array replaces all attachments; `[]` removes them.
+To append, explicitly supply the complete intended set (download and include
+existing files if necessary). Replacing inline images also requires updating
+HTML that refers to removed CIDs. Descriptions are otherwise preserved. These
+attachments follow the same notification intent and revision guard as the
+calendar operation; uploading bytes alone does not send an invitation.
+
 For an unprocessed invitation in Inbox, first use `readMessage`. Its `m.id`,
 `m.ms` and selected `m.inv[].comp[].compNum` form the **inbox guard**:
 `messageId`, `expectedModSequence`, `component?` (default zero). Use the actual

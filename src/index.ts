@@ -388,6 +388,9 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       if (operation === 'forwardInboxInvitation') details.push('forward all appointment components in the message and permit native organizer notification');
       if (operation === 'replyToInboxInvitation') details.push(input.notifyOrganizer === false ? 'record participation and permit native calendar creation/update including alarms; no organizer reply' : 'reply to organizer and permit native calendar creation/update including alarms');
       if (operation === 'declineCounterProposal') details.push('send rejection of the selected incoming time proposal to its proposer; does not change the meeting');
+      if (Array.isArray(input.attachments)) details.push(`newAttachmentCount=${input.attachments.length}`);
+      const calendarChanges = input.changes as Record<string, unknown> | undefined;
+      if (calendarChanges && Array.isArray(calendarChanges.attachments)) details.push(`replace attachments with ${calendarChanges.attachments.length} supplied files`);
       if (operation === 'cancelAppointment' || operation === 'cancelTask') details.push('cancel selected calendar scope and permit native attendee cancellation emails');
       if (operation === 'replyToInvitation') details.push(input.notifyOrganizer === false ? 'record local participation only' : 'reply to the calendar organizer');
       if (['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException'].includes(operation)) details.push(input.notifyAttendees === true ? 'update calendar content and notify affected attendees' : 'patch calendar content without invitation emails; edits requiring cancellation notices are refused');

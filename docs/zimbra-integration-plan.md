@@ -113,7 +113,7 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   accounts can cancel but cannot schedule mutable native drafts. Native scheduler
   state/delivery are not implied by draft metadata. All 242 focused Zimbra/router/
   documentation tests pass, including concurrent manual-vs-scheduled attempts.
-- Current increment: README, backend documentation, changelog and cross-provider
+- 3d648d7: README, backend documentation, changelog and cross-provider
   outcome/acceptance guidance now describe the expanded integration. Added an
   explicit disposable-account acceptance matrix, with no corporate writes.
   Full release:check passed on Node 24 at f32c0d9: 1,268 unit tests, 8 integration
@@ -122,6 +122,11 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   subsequent documentation edits passed the five documentation contract tests.
   Before PR: complete new calendar attachment composition, audit remaining
   operational gaps, then rerun relevant final gates and create the review PR.
+- Current increment: appointment/task creation and guarded edits accept new
+  local/base64 attachments and inline CIDs. Omission preserves original parts;
+  an explicit list replaces them and an empty list removes them. All files are
+  validated before uploads, with an aggregate 25 MiB bound, and upload failure
+  prevents the calendar mutation. The 39 focused calendar tests pass.
 
 Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate

@@ -16,6 +16,7 @@ import { ZimbraDocuments, DOCUMENT_READ_SCHEMAS, DOCUMENT_WRITE_SCHEMAS } from '
 import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS } from './calendar-schema.js';
 import { ZimbraCalendar } from './calendar.js';
 import { ZimbraScheduledDrafts } from './scheduled-drafts.js';
+import { calendarAttachmentWriter } from './calendar-attachments.js';
 
 type Obj = Record<string, unknown>;
 function object(value: unknown): Obj {
@@ -108,7 +109,8 @@ export class ZimbraClient {
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
     this.filters = new ZimbraFilters((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.allowedRecipients);
     this.calendar = new ZimbraCalendar((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write), account.user, account.allowedRecipients,
-      async id => await this.attachment({ messageId: id, maxBytes: MAX_MIME_BYTES }) as Buffer);
+      async id => await this.attachment({ messageId: id, maxBytes: MAX_MIME_BYTES }) as Buffer,
+      calendarAttachmentWriter((bytes, name, type) => this.upload(bytes, name, type), account.allowedAttachmentRoots));
     this.documents = new ZimbraDocuments((name, params, write = false) => this.request(name, params, 'urn:zimbraMail', write),
       (bytes, name, type) => this.upload(bytes, name, type),
       (id, version, maxBytes) => this.attachment({ messageId: id, version, document: true, maxBytes }), account.allowedAttachmentRoots);

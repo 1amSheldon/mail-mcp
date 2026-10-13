@@ -2,6 +2,7 @@ import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS, invitationId, nativeAlar
 import { ZimbraError } from './session.js';
 import { CALENDAR_EDIT_OPERATIONS, ZimbraCalendarEdits, type CalendarEditOperation } from './calendar-edit.js';
 import { CALENDAR_INBOX_OPERATIONS, ZimbraCalendarInbox, type CalendarInboxOperation } from './calendar-inbox.js';
+import { noCalendarUploads, type CalendarAttach } from './calendar-attachments.js';
 
 type Obj = Record<string, unknown>;
 type Request = (name: string, params: Obj, write?: boolean) => Promise<Obj>;
@@ -11,8 +12,8 @@ type WriteOperation = keyof typeof CALENDAR_WRITE_SCHEMAS;
 export class ZimbraCalendar {
   private readonly edits: ZimbraCalendarEdits;
   private readonly inbox: ZimbraCalendarInbox;
-  constructor(private readonly request: Request, private readonly user: string, private readonly allowedRecipients: readonly string[] | undefined, raw: (id: string) => Promise<Buffer>) {
-    this.edits = new ZimbraCalendarEdits(request, raw, user, allowedRecipients);
+  constructor(private readonly request: Request, private readonly user: string, private readonly allowedRecipients: readonly string[] | undefined, raw: (id: string) => Promise<Buffer>, private readonly attach: CalendarAttach = noCalendarUploads) {
+    this.edits = new ZimbraCalendarEdits(request, raw, user, allowedRecipients, attach);
     this.inbox = new ZimbraCalendarInbox(request, user, allowedRecipients);
   }
   private checkRecipients(recipients: string[]): void {
@@ -105,8 +106,8 @@ export class ZimbraCalendar {
     if (v.description !== undefined) parts.push({ ct: 'text/plain', content: { _content: v.description } });
     if (v.htmlDescription !== undefined) parts.push({ ct: 'text/html', content: { _content: v.htmlDescription } });
     if (!parts.length) parts.push({ ct: 'text/plain', content: { _content: '' } });
-    return this.request(appointment ? 'CreateAppointment' : 'CreateTask', { echo: 1, max: 200000, html: 1, forcesend: 0,
-      m: { l: v.folderId, e: recipients.map(a => ({ a, t: 't' })), su: { _content: v.subject }, inv: { comp: [comp] },
-        mp: parts.length === 1 ? parts[0] : { ct: 'multipart/alternative', mp: parts } } }, true);
+    const m = await this.attach({ l: v.folderId, e: recipients.map(a => ({ a, t: 't' })), su: { _content: v.subject }, inv: { comp: [comp] },
+      mp: parts.length === 1 ? parts[0] : { ct: 'multipart/alternative', mp: parts } }, v.attachments ?? []);
+    return this.request(appointment ? 'CreateAppointment' : 'CreateTask', { echo: 1, max: 200000, html: 1, forcesend: 0, m }, true);
   }
 }
