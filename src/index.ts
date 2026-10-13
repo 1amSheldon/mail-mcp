@@ -927,7 +927,8 @@ export class MailMCPServer {
         const service = await this.getService(args.accountId as string);
         const messages = await service.getThread(
           args.threadId as string,
-          (args.folder as string | undefined) ?? 'INBOX'
+          (args.folder as string | undefined) ?? 'INBOX',
+          args.folders as string[] | undefined
         );
         return {
           content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],

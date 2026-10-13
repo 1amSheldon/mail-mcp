@@ -97,7 +97,7 @@ describe('ImapClient', () => {
     expect(messages[0].threadId).toBe('123');
     const latestInstance = (await import('imapflow')).ImapFlow as any;
     const flow = latestInstance.mock.results.at(-1)?.value;
-    expect(flow.search).toHaveBeenCalledWith({ 'x-gm-thrid': '123' }, { uid: true });
+    expect(flow.search).toHaveBeenCalledWith({ header: { 'Message-ID': '123' } }, { uid: true });
   });
 
   it('uses UIDs for every thread search so sequence numbers cannot select the wrong messages', async () => {
@@ -147,12 +147,11 @@ describe('ImapClient', () => {
     await client.connect();
     const messages = await client.fetchThreadMessages('thread-message-id');
 
-    expect(search).toHaveBeenCalledTimes(4);
-    expect(search).toHaveBeenNthCalledWith(1, { 'x-gm-thrid': 'thread-message-id' }, { uid: true });
-    expect(search).toHaveBeenNthCalledWith(2, { header: { References: 'thread-message-id' } }, { uid: true });
-    expect(search).toHaveBeenNthCalledWith(3, { header: { 'In-Reply-To': 'thread-message-id' } }, { uid: true });
-    expect(search).toHaveBeenNthCalledWith(4, { header: { 'Message-ID': 'thread-message-id' } }, { uid: true });
-    expect(fetch).toHaveBeenCalledWith('7001,7002,7003', { envelope: true, flags: true, internalDate: true }, { uid: true });
+    expect(search).toHaveBeenCalledTimes(3);
+    expect(search).toHaveBeenNthCalledWith(1, { header: { References: 'thread-message-id' } }, { uid: true });
+    expect(search).toHaveBeenNthCalledWith(2, { header: { 'In-Reply-To': 'thread-message-id' } }, { uid: true });
+    expect(search).toHaveBeenNthCalledWith(3, { header: { 'Message-ID': 'thread-message-id' } }, { uid: true });
+    expect(fetch).toHaveBeenCalledWith('7001,7002,7003', expect.objectContaining({ envelope: true, threadId: true, headers: ['Message-ID', 'References', 'In-Reply-To'] }), { uid: true });
     expect(messages.map(message => message.uid)).toEqual([7001, 7002, 7003]);
   });
 

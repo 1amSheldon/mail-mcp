@@ -213,13 +213,13 @@ describe('MailService redaction on standard reads', () => {
     }]);
     const service = new MailService(baseAccount, true);
 
-    await expect(service.getThread('thread-unchanged')).resolves.toEqual([{
-      id: '8',
+    await expect(service.getThread('thread-unchanged')).resolves.toMatchObject({ partial: true, folders: ['INBOX'], items: [{
+      locator: expect.stringMatching(/^imap:v1:/),
       uid: 8,
       subject: 'password: [REDACTED]',
       snippet: '[REDACTED CC]',
       threadId: 'thread-unchanged',
-    }]);
+    }] });
   });
 });
 

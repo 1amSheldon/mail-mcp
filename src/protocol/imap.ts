@@ -48,6 +48,7 @@ export interface MessageMetadata {
   date?: Date;
   snippet?: string;
   threadId?: string;
+  referenceIds?: string[];
 }
 
 export interface SenderEnvelope {
@@ -191,56 +192,50 @@ export class ImapClient {
   }
 
   async fetchThreadMessages(threadId: string, folder: string = 'INBOX'): Promise<MessageMetadata[]> {
-    if (!this.client) {
-      throw new Error('Not connected');
-    }
-
+    if (!this.client) throw new Error('Not connected');
+    if (!threadId || threadId.length > 998 || /[\r\n\0]/.test(threadId)) throw new Error('Invalid thread ID');
     const lock = await this.client.getMailboxLock(folder);
     try {
-      // Use GM-THRID for Gmail, fall back to References/Message-ID header search
-      let uids: number[] = [];
-      try {
-        uids = await this.client.search({ 'x-gm-thrid': threadId } as any, { uid: true }) as number[];
-      } catch (e) {
-        // x-gm-thrid not supported — fall through to header search below
-      }
-
-      if (!uids || uids.length === 0) {
-        try {
-          const refUids = await this.client.search(
-            { header: { References: threadId } },
-            { uid: true },
-          ) as number[];
-          const replyUids = await this.client.search(
-            { header: { 'In-Reply-To': threadId } },
-            { uid: true },
-          ) as number[];
-          const rootUids = await this.client.search(
-            { header: { 'Message-ID': threadId } },
-            { uid: true },
-          ) as number[];
-          uids = [...new Set([...(refUids || []), ...(replyUids || []), ...(rootUids || [])])];
-        } catch (e2) {
-          // header search not supported — return empty
-          return [];
+      const messages = new Map<number, MessageMetadata>();
+      const pending = [threadId];
+      const searched = new Set<string>();
+      const gmail = /^\d+$/.test(threadId) && this.client.capabilities?.has('X-GM-EXT-1');
+      while (pending.length && searched.size < 100 && messages.size < 500) {
+        const id = pending.shift()!;
+        if (searched.has(id)) continue;
+        searched.add(id);
+        let uids: number[] = [];
+        if (gmail) {
+          const found = await this.client.search({ threadId: id }, { uid: true });
+          uids = found || [];
+        } else {
+          for (const header of ['References', 'In-Reply-To', 'Message-ID']) {
+            const found = await this.client.search({ header: { [header]: id } }, { uid: true });
+            if (found) uids.push(...found);
+          }
+        }
+        uids = [...new Set(uids)].filter(uid => !messages.has(uid)).slice(0, 500 - messages.size);
+        if (!uids.length) continue;
+        for await (const msg of this.client.fetch(uids.join(','), {
+          envelope: true, flags: true, internalDate: true, threadId: true,
+          headers: ['Message-ID', 'References', 'In-Reply-To'],
+        }, { uid: true })) {
+          const parsed = msg.headers ? await simpleParser(msg.headers) : undefined;
+          const refs = [parsed?.messageId, parsed?.inReplyTo, ...(Array.isArray(parsed?.references) ? parsed.references : [parsed?.references])]
+            .flatMap(value => value?.match(/<[^<>\s]+>/g) ?? []);
+          // HEADER search is substring-based; retain only exact graph edges.
+          if (!gmail && parsed && !refs.includes(id)) continue;
+          messages.set(msg.uid, {
+            id: String(msg.uid), uid: msg.uid, subject: msg.envelope?.subject,
+            from: msg.envelope?.from?.[0]?.address || 'Unknown',
+            date: msg.envelope?.date || (msg.internalDate ? new Date(msg.internalDate) : undefined),
+            snippet: '', threadId: msg.threadId?.toString() || threadId,
+            referenceIds: refs,
+          });
+          if (!gmail) for (const ref of refs) if (!searched.has(ref) && pending.length < 100) pending.push(ref);
         }
       }
-
-      if (!uids || uids.length === 0) return [];
-
-      const messages: MessageMetadata[] = [];
-      for await (const msg of this.client.fetch(uids.join(','), { envelope: true, flags: true, internalDate: true }, { uid: true })) {
-        messages.push({
-          id: msg.uid.toString(),
-          uid: msg.uid,
-          subject: msg.envelope?.subject,
-          from: msg.envelope?.from?.[0]?.address || 'Unknown',
-          date: msg.envelope?.date || (msg.internalDate instanceof Date ? msg.internalDate : (msg.internalDate ? new Date(msg.internalDate) : undefined)),
-          snippet: '',
-          threadId: (msg as any).threadId?.toString() || threadId,
-        });
-      }
-      return messages.sort((a, b) => (a.date?.getTime() || 0) - (b.date?.getTime() || 0));
+      return [...messages.values()].sort((a, b) => (a.date?.getTime() || 0) - (b.date?.getTime() || 0));
     } finally {
       lock.release();
     }
@@ -317,7 +312,7 @@ export class ImapClient {
     if (uids.length === 0) return [];
     const lock = await this.client.getMailboxLock(folder);
     try {
-      const fetchOptions: any = { envelope: true, flags: true, internalDate: true };
+      const fetchOptions: any = { envelope: true, flags: true, internalDate: true, threadId: true };
       if (!headerOnly) fetchOptions.bodyParts = ['TEXT'];
       const byUid = new Map<number, MessageMetadata>();
       for await (const msg of this.client.fetch(uids.join(','), fetchOptions, { uid: true })) {

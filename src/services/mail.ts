@@ -1105,9 +1105,45 @@ export class MailService {
     return this.readEmail(resolved.uid.toString(), resolved.mailbox);
   }
 
-  async getThread(threadId: string, folder: string = 'INBOX'): Promise<MessageMetadata[]> {
-    const messages = await this.imapClient.fetchThreadMessages(threadId, folder);
-    return messages.map(message => this.redactMessageMetadata(message));
+  async getThread(threadId: string, folder: string = 'INBOX', folders?: string[]) {
+    if (folders !== undefined && (!Array.isArray(folders) || folders.some(path => typeof path !== 'string'))) {
+      throw new ValidationError('Thread folders must be an array of mailbox paths.');
+    }
+    const scope = [...new Set(folders ?? [folder])];
+    if (!scope.length || scope.length > 10 || scope.some(path => !path || /[\r\n\0]/.test(path))) {
+      throw new ValidationError('Thread folders must contain between 1 and 10 mailbox paths.');
+    }
+    const items = new Map<string, LocatedMessageMetadata>();
+    const ids = new Set([threadId]);
+    const queried = new Set<string>();
+    // Revisit earlier folders for ancestors discovered in a later folder.
+    for (let round = 0; round < 10; round++) {
+      let progressed = false;
+      for (const mailbox of scope) {
+        const identity = await this.imapClient.getMailboxIdentity(mailbox);
+        for (const id of [...ids]) {
+          const key = JSON.stringify([mailbox, id]);
+          if (queried.has(key) || queried.size >= 100 || items.size >= 500) continue;
+          queried.add(key);
+          progressed = true;
+          const messages = await this.imapClient.fetchThreadMessages(id, mailbox);
+          const after = await this.imapClient.getMailboxIdentity(mailbox);
+          if (after.uidValidity !== identity.uidValidity) throw new ValidationError('Mailbox identity changed during thread read.');
+          for (const message of this.locateMessages(messages, mailbox, identity.uidValidity)) {
+            if (items.size >= 500) break;
+            items.set(message.locator, message);
+            for (const ref of message.referenceIds ?? []) if (ids.size < 100) ids.add(ref);
+          }
+        }
+      }
+      if (!progressed) break;
+    }
+    return {
+      items: [...items.values()].sort((a, b) => (a.date?.getTime() ?? 0) - (b.date?.getTime() ?? 0)),
+      folders: scope,
+      partial: true,
+      warning: 'Thread reconstruction is bounded to the requested folders, 500 messages and 100 searches. Missing, deleted or unreferenced messages cannot be ruled out. Include the Sent folder explicitly when needed.',
+    };
   }
 
   async readRawEmail(locator: string, maxBytes: number = 10 * 1024 * 1024): Promise<RawEmailResult> {
