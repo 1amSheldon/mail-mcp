@@ -1,6 +1,7 @@
 import { CALENDAR_READ_SCHEMAS, CALENDAR_WRITE_SCHEMAS, invitationId, nativeAlarms, nativeRecurrence, nativeTime } from './calendar-schema.js';
 import { ZimbraError } from './session.js';
 import { CALENDAR_EDIT_OPERATIONS, ZimbraCalendarEdits, type CalendarEditOperation } from './calendar-edit.js';
+import { CALENDAR_INBOX_OPERATIONS, ZimbraCalendarInbox, type CalendarInboxOperation } from './calendar-inbox.js';
 
 type Obj = Record<string, unknown>;
 type Request = (name: string, params: Obj, write?: boolean) => Promise<Obj>;
@@ -9,8 +10,10 @@ type WriteOperation = keyof typeof CALENDAR_WRITE_SCHEMAS;
 
 export class ZimbraCalendar {
   private readonly edits: ZimbraCalendarEdits;
+  private readonly inbox: ZimbraCalendarInbox;
   constructor(private readonly request: Request, private readonly user: string, private readonly allowedRecipients: readonly string[] | undefined, raw: (id: string) => Promise<Buffer>) {
     this.edits = new ZimbraCalendarEdits(request, raw, user, allowedRecipients);
+    this.inbox = new ZimbraCalendarInbox(request, user, allowedRecipients);
   }
   private checkRecipients(recipients: string[]): void {
     if (this.allowedRecipients === undefined) return;
@@ -45,6 +48,7 @@ export class ZimbraCalendar {
     }
   }
   async write(operation: WriteOperation, input: unknown): Promise<unknown> {
+    if ((CALENDAR_INBOX_OPERATIONS as readonly string[]).includes(operation)) return this.inbox.execute(operation as CalendarInboxOperation, input);
     if (operation === 'importICalendar') {
       const v = CALENDAR_WRITE_SCHEMAS.importICalendar.parse(input);
       // Arbitrary ICS can carry email alarms and scheduling methods. A string

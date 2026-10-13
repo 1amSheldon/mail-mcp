@@ -7,6 +7,9 @@ their server owner-qualified IDs and permissions.
 
 | Operation | Input | Behavior |
 | --- | --- | --- |
+| `zimbra.replyToInboxInvitation` | Inbox guard, `response` (ACCEPT/TENTATIVE/DECLINE), `notifyOrganizer?` (true), `instance?`, `identityId?`, `message?` | Responds to a REQUEST in an ordinary mail item; can create/update the calendar and persist alarms. Unrestricted accounts only. |
+| `zimbra.forwardInboxInvitation` | Inbox guard, `to` (1-100 emails), `message?` | Forwards every appointment REQUEST component in the mail, possibly notifying the organizer. Unrestricted accounts only. |
+| `zimbra.declineCounterProposal` | Inbox guard, `proposerEmail`, `message?` | Organizer declines the original incoming appointment COUNTER details to a matching attendee; checks recipient policy. Does not reschedule the meeting. |
 | `zimbra.forwardAppointment` | Edit guard, `to` (1-100 emails), `instance?`, `message?` | Forwards the series or original occurrence and may additionally notify the native organizer. Unrestricted accounts only. |
 | `zimbra.counterAppointment` | Edit guard, `start`, `endExclusive`, `location?`, `instance?`, `message?` | Attendee sends a proposed time/location to the inspected organizer; does not reschedule or record acceptance. |
 | `zimbra.importICalendar` | `folderId`, `content` | Imports UTF-8 iCalendar text up to 1 MiB through native ImportAppointments. May update existing UIDs; non-atomic and unavailable for recipient-restricted accounts. |
@@ -85,6 +88,35 @@ Never automatically retry the whole file. Reconcile destination items and UIDs
 before preparing a targeted retry. Use a disposable folder for migration trials.
 
 ## Editing, exceptions and responses
+
+For an unprocessed invitation in Inbox, first use `readMessage`. Its `m.id`,
+`m.ms` and selected `m.inv[].comp[].compNum` form the **inbox guard**:
+`messageId`, `expectedModSequence`, `component?` (default zero). Use the actual
+component number, not its array position. These operations re-read the message
+without marking it read and refuse stale or ambiguous metadata. This preflight
+does not atomically lock the subsequent server operation.
+
+`replyToInboxInvitation` can add the event/task to its default calendar folder,
+update an existing item, or restore it from Trash according to native semantics.
+It may also persist embedded/default alarms, including email alarms. Setting
+`notifyOrganizer: false` suppresses the organizer reply, not the calendar write.
+Thus it is unavailable under any recipient restriction, even for a local-only
+reply. Read the resulting calendar item after success. The server can refuse an
+outdated invitation or suppress a reply where RSVP was not requested.
+
+`forwardInboxInvitation` acts on the whole mail, not just the selected component;
+all returned components must be appointment REQUESTs. It can send an additional
+organizer notification and is unavailable under recipient restrictions. Use
+`forwardAppointment` for a selected occurrence already in the calendar.
+
+To reject a proposed time, select its incoming COUNTER message, inspect its
+proposed dates and attendee, then call `declineCounterProposal` with that
+`proposerEmail`. The response echoes the original UID, sequence, dates and
+recurrence ID, rather than inventing proposal data from the current meeting.
+Only the inspected matching attendee receives the explicit response; original
+alarms/attachments are not copied. This does not remove or accept the proposal,
+move the incoming message, or update the meeting. Review any uncertain send
+before retrying.
 
 Forwarding and counter proposals use the same edit guard below. Forwarding is a
 native send with no atomic version guard: preflight can detect an already stale

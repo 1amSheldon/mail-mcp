@@ -65,8 +65,7 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
 - 06ed442: version-guarded calendar/task partial edits, MIME and
   attachment retention, recurrence exceptions, cancellation and replies. Native
   cancellation's non-atomic derived recipients are explicit and blocked for
-  recipient-restricted accounts. Unprocessed inbox invitations and scheduled mail
-  remain pending.
+  recipient-restricted accounts. Scheduled mail remains pending.
 - 326db19: appointment search with bounded occurrence expansion and
   window-bound cursors, plus task search retaining undated items. Focused search
   and documentation tests (16) and TypeScript pass. Source inspection confirms
@@ -83,12 +82,19 @@ draft updates. See `store/src/java/com/zimbra/cs/service/mail/GetMsg.java` and
   UserServletContext and DateUtil. ForwardCalendarItem sends additional organizer
   notifications and lacks version guards; recipient-restricted forwarding must
   not rely solely on the supplied To list.
-- Current increment: native meeting forwarding with explicit instance selection
+- 8f0a1f0: native meeting forwarding with explicit instance selection
   and fail-closed restricted-recipient behavior; attendee counter proposals with
   inspected UID/organizer, explicit dates and native pre-send version checks.
   Focused edit/documentation tests (21) pass. Counter proposals do not alter the
   meeting or copy alarms/attachments. Inbox invitation reply/forward and decline
   of an incoming COUNTER message remain for the next increment.
+- Current increment: guarded inbox invitation participation replies, whole-mail
+  forwarding, and organizer rejection of original incoming COUNTER details.
+  Native inbox replies can persist alarms or restore calendar items; this is
+  explicit in confirmations/skills and blocked under recipient restrictions.
+  Source inspection also confirmed CreateTaskException exists; no corresponding
+  ForwardTaskInvite/DeclineCounterTask handlers exist in the pinned source, so
+  forwarding/counter rejection explicitly require appointment components.
 
 Qualification so far: TypeScript passes; all 1,236 unit tests pass on Node 24,
 including actual MIME/PDF parsing and mock-transport workflows. Live corporate

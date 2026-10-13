@@ -67,6 +67,7 @@ export const sharedFields = {
 export const appointmentFields = { ...sharedFields, start: calendarTime, endExclusive: calendarTime, status: z.enum(['TENT', 'CONF', 'CANC']).default('CONF'), freeBusy: z.enum(['F', 'B', 'T', 'O']).default('B') };
 export const taskFields = { ...sharedFields, start: calendarTime.optional(), due: calendarTime.optional(), status: z.enum(['NEED', 'INPR', 'COMP', 'WAITING', 'DEFERRED', 'CANC']).default('NEED'), percentComplete: z.number().int().min(0).max(100).default(0), completedAt: instant.optional() };
 const commonCreate = { folderId: itemId, notifyAttendees: z.boolean().default(false) };
+const inboxInvitation = { messageId: itemId, component: z.number().int().min(0).max(1000).default(0), expectedModSequence: z.string().regex(/^[1-9][0-9]*$/), message: text.default('') };
 const commonChanges = {
   subject: line.optional(), location: line.optional(), description: text.optional(), htmlDescription: text.optional(),
   privacy: sharedFields.privacy.removeDefault().optional(), priority: sharedFields.priority.removeDefault().optional(),
@@ -89,6 +90,9 @@ export const CALENDAR_READ_SCHEMAS = {
   getICalendar: z.object({ invitationId }).strict(),
 };
 export const CALENDAR_WRITE_SCHEMAS = {
+  replyToInboxInvitation: z.object({ ...inboxInvitation, response: z.enum(['ACCEPT', 'TENTATIVE', 'DECLINE']), notifyOrganizer: z.boolean().default(true), instance: calendarTime.optional(), identityId: z.string().uuid().optional() }).strict(),
+  forwardInboxInvitation: z.object({ ...inboxInvitation, to: z.array(z.email()).min(1).max(100) }).strict(),
+  declineCounterProposal: z.object({ ...inboxInvitation, proposerEmail: z.email() }).strict(),
   forwardAppointment: z.object({ ...calendarEdit, to: z.array(z.email()).min(1).max(100), instance: calendarTime.optional(), message: text.default('') }).strict(),
   counterAppointment: z.object({ ...calendarEdit, start: calendarTime, endExclusive: calendarTime, location: line.optional(), instance: calendarTime.optional(), message: text.default('') }).strict().refine(v => compareTimes(v.start, v.endExclusive) < 0),
   importICalendar: z.object({ folderId: itemId, content: z.string().min(1).max(1024 * 1024).refine(v => !v.includes('\0') && Buffer.byteLength(v, 'utf8') <= 1024 * 1024) }).strict(),

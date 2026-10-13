@@ -364,7 +364,7 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
         'mountpointId', 'remoteFolderId', 'owner', 'permissions', 'granteeId', 'expiresAt',
         'documentId', 'expectedVersion', 'restoreVersion', 'locked', 'enabled',
         'appointmentId', 'taskId', 'itemId', 'kind', 'start', 'endExclusive', 'due', 'notifyAttendees', 'status', 'percentComplete',
-        'invitationId', 'component', 'expectedModSequence', 'expectedRevision', 'instance', 'range', 'allowExceptionReset', 'response', 'notifyOrganizer',
+        'invitationId', 'messageId', 'proposerEmail', 'component', 'expectedModSequence', 'expectedRevision', 'instance', 'range', 'allowExceptionReset', 'response', 'notifyOrganizer',
       ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
       if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
       if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
@@ -383,6 +383,9 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       if (operation === 'importICalendar') details.push('import calendar content, including embedded alarms; may update existing items by UID and partially succeed');
       if (operation === 'forwardAppointment') details.push('forward the selected meeting to listed recipients and permit native organizer notification');
       if (operation === 'counterAppointment') details.push('send the organizer a proposed new time/location; does not reschedule the meeting');
+      if (operation === 'forwardInboxInvitation') details.push('forward all appointment components in the message and permit native organizer notification');
+      if (operation === 'replyToInboxInvitation') details.push(input.notifyOrganizer === false ? 'record participation and permit native calendar creation/update including alarms; no organizer reply' : 'reply to organizer and permit native calendar creation/update including alarms');
+      if (operation === 'declineCounterProposal') details.push('send rejection of the selected incoming time proposal to its proposer; does not change the meeting');
       if (operation === 'cancelAppointment' || operation === 'cancelTask') details.push('cancel selected calendar scope and permit native attendee cancellation emails');
       if (operation === 'replyToInvitation') details.push(input.notifyOrganizer === false ? 'record local participation only' : 'reply to the calendar organizer');
       if (['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException'].includes(operation)) details.push(input.notifyAttendees === true ? 'update calendar content and notify affected attendees' : 'patch calendar content without invitation emails; edits requiring cancellation notices are refused');
