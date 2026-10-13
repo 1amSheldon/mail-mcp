@@ -241,12 +241,16 @@ export class EwsClient {
     return messages[0] as EwsMessage;
   }
 
-  async sendMessage(message: MicrosoftMessageContent): Promise<MicrosoftSendResult> {
+  async sendMessage(message: MicrosoftMessageContent, saveToSentItems = true): Promise<MicrosoftSendResult> {
     assertMessageContent(message, 'ews');
+    if (typeof saveToSentItems !== 'boolean') {
+      throw new MicrosoftProviderError('ews', 'validation', 'saveToSentItems must be a boolean');
+    }
     const bodyType = messageBodyType(message.bodyType, 'ews');
     const hasAttachments = Boolean(message.attachments?.length);
-    const operation = `<m:CreateItem MessageDisposition="${hasAttachments ? 'SaveOnly' : 'SendAndSaveCopy'}">`
-      + `<m:SavedItemFolderId><t:DistinguishedFolderId Id="${hasAttachments ? 'drafts' : 'sentitems'}" /></m:SavedItemFolderId>`
+    const operation = `<m:CreateItem MessageDisposition="${hasAttachments ? 'SaveOnly' : saveToSentItems ? 'SendAndSaveCopy' : 'SendOnly'}">`
+      + (hasAttachments || saveToSentItems
+        ? `<m:SavedItemFolderId><t:DistinguishedFolderId Id="${hasAttachments ? 'drafts' : 'sentitems'}" /></m:SavedItemFolderId>` : '')
       + '<m:Items><t:Message>'
       + `<t:Subject>${escapeXml(message.subject)}</t:Subject>`
       + `<t:Body BodyType="${bodyType}">${escapeXml(message.body)}</t:Body>`
@@ -262,9 +266,11 @@ export class EwsClient {
       const draft = parseMessages(body)[0];
       if (!draft) throw new MicrosoftProviderError('ews', 'invalid_response', 'EWS created no identifiable draft; no SendItem request was issued. Inspect Drafts before retrying.');
       draftId = draft.itemId;
-      const send = '<m:SendItem SaveItemToFolder="true"><m:ItemIds>'
+      const send = `<m:SendItem SaveItemToFolder="${saveToSentItems}"><m:ItemIds>`
         + `<t:ItemId Id="${escapeXml(draftId)}"${draft.changeKey ? ` ChangeKey="${escapeXml(draft.changeKey)}"` : ''} />`
-        + '</m:ItemIds><m:SavedItemFolderId><t:DistinguishedFolderId Id="sentitems" /></m:SavedItemFolderId></m:SendItem>';
+        + '</m:ItemIds>'
+        + (saveToSentItems ? '<m:SavedItemFolderId><t:DistinguishedFolderId Id="sentitems" /></m:SavedItemFolderId>' : '')
+        + '</m:SendItem>';
       try {
         ({ response } = await this.soapResponse('SendItem', send, true));
       } catch (error) {

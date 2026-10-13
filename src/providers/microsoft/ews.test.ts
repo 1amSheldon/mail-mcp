@@ -22,6 +22,25 @@ function requestBody(fetchMock: ReturnType<typeof vi.fn<MicrosoftFetch>>): strin
 }
 
 describe('EwsClient', () => {
+  it.each([false, true])('honors disabled Sent copies with attachments=%s', async attachments => {
+    const fetchMock = vi.fn<MicrosoftFetch>();
+    if (attachments) fetchMock.mockResolvedValueOnce(new Response(SOAP_MESSAGES));
+    fetchMock.mockResolvedValueOnce(new Response(SOAP_OK));
+    const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });
+    await client.sendMessage({ subject: 'S', body: 'B', to: ['to@example.com'],
+      ...(attachments ? { attachments: [{ name: 'a.txt', content: 'YQ==' }] } : {}),
+    }, false);
+    const bodies = fetchMock.mock.calls.map(call => String(call[1]?.body));
+    expect(bodies.join('')).not.toContain('sentitems');
+    if (attachments) {
+      expect(bodies[0]).toContain('MessageDisposition="SaveOnly"');
+      expect(bodies[1]).toContain('SaveItemToFolder="false"');
+      expect(bodies[1]).not.toContain('SavedItemFolderId');
+    } else {
+      expect(bodies[0]).toContain('MessageDisposition="SendOnly"');
+      expect(bodies[0]).not.toContain('SavedItemFolderId');
+    }
+  });
   it('does not follow redirects and treats server send failures as ambiguous', async () => {
     const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('', { status: 503 }));
     const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });

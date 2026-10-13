@@ -333,6 +333,16 @@ describe('ProviderRuntime provider dispatch', () => {
     })).rejects.toMatchObject<Partial<ProviderRuntimeError>>({ code: 'OPERATION_NOT_ALLOWED' });
   });
 
+  it('preserves the explicit EWS Sent copy preference', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ provider: 'ews', status: 'accepted' });
+    const runtime = new ProviderRuntime(new MailMCPRuntimeState(), options(
+      [EWS_ACCOUNT], { ews: () => ({ sendMessage }) as unknown as EwsClient },
+    ));
+    const message = { subject: 'S', body: 'B', to: ['to@example.com'] };
+    await runtime.executeMicrosoftWrite('ews', 'sendMessage', { message, saveToSentItems: false });
+    expect(sendMessage).toHaveBeenCalledWith(message, false);
+  });
+
   it('loads one Mailtrap token from keychain and redacts sensitive successful responses', async () => {
     const loadSecret = vi.fn().mockResolvedValue('mailtrap-secret-token');
     const execute = vi.fn().mockResolvedValue({

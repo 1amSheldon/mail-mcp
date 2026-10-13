@@ -437,7 +437,7 @@ export class ProviderRuntime {
         return this.unsupportedOperation(accountId, operation, 'ews');
       }
       const value = input as MicrosoftWriteInputMap['sendMessage'];
-      return this.redactResult(await (await this.ewsClient(account)).sendMessage(value.message));
+      return this.redactResult(await (await this.ewsClient(account)).sendMessage(value.message, value.saveToSentItems));
     }
     return this.backendMismatch(account, 'microsoft-graph or ews');
   }
