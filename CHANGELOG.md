@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 3.3.0 - 2026-10-14
 
 - Fix Zimbra current-time filter attributes and replacing a rule before itself.
 - Flush POSIX send-journal directory entries before dispatch and after replacement;

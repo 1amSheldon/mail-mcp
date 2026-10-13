@@ -44,7 +44,7 @@ remain separate. See [Zimbra setup, operations and limitations](docs/ZIMBRA.md).
 
 ## Install
 
-The current release is `starychenko/mail-mcp` **v3.2.0**. Use a reviewed checkout or the package attached to its [GitHub release](https://github.com/starychenko/mail-mcp/releases/tag/v3.2.0). The upstream npm package is a separate distribution. Keep the checkout at a stable path.
+The current release is `starychenko/mail-mcp` **v3.3.0**. Use a reviewed checkout or the package attached to its [GitHub release](https://github.com/starychenko/mail-mcp/releases/tag/v3.3.0). The upstream npm package is a separate distribution. Keep the checkout at a stable path.
 
 ```bash
 git clone https://github.com/starychenko/mail-mcp.git

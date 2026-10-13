@@ -1,6 +1,6 @@
 {
   "name": "@starychenko/mail-mcp",
-  "version": "3.2.0",
+  "version": "3.3.0",
   "description": "Mail MCP maintained by starychenko: IMAP/SMTP, Zimbra, Apple Mail, Microsoft and Mailtrap for Codex and Claude",
   "keywords": [
     "mcp",
