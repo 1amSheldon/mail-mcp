@@ -847,6 +847,23 @@ describe('MailService forwardEmail', () => {
     mockFetchMessageBody.mockClear();
   });
 
+  it('escapes original text and metadata when forwarding in HTML', async () => {
+    mockFetchMessageBody.mockResolvedValue(makeOriginalMail({
+      subject: '<img src="https://example.test/pixel">',
+      text: '<a href="https://example.test">untrusted</a> & text\nsecond line',
+      from: { text: 'Person <author@example.com>' },
+    }));
+    const service = new MailService(baseAccount, false);
+    await service.forwardEmail('42', 'INBOX', 'friend@example.com', '<b>FYI</b>', true);
+    const html = mockSmtpSend.mock.calls[0][2];
+    expect(html).toContain('<b>FYI</b><pre>');
+    expect(html).toContain('Person &lt;author@example.com&gt;');
+    expect(html).toContain('&lt;a href=&quot;https://example.test&quot;&gt;');
+    expect(html).toContain('&amp; text\nsecond line');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('<a href');
+  });
+
   function makeOriginalMail(overrides: Partial<any> = {}): any {
     const headersMap = new Map<string, string>();
     headersMap.set('message-id', '<orig@example.com>');

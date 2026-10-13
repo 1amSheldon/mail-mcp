@@ -752,7 +752,11 @@ export class MailService {
       originalBody,
     ].join('\n');
 
-    const combinedBody = body + forwardedBlock;
+    // Headers and the original plain-text body are data, even in an HTML forward.
+    const escapedBlock = forwardedBlock.replace(/[&<>"']/g, character => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    })[character]!);
+    const combinedBody = body + (isHtml ? `<pre>${escapedBlock}</pre>` : forwardedBlock);
     const effectiveBody = applySignature(combinedBody, this.account.signature, isHtml, includeSignature);
     const originalAttachments: OutgoingAttachment[] = includeOriginalAttachments
       ? (parsed.attachments ?? []).map(attachment => ({
