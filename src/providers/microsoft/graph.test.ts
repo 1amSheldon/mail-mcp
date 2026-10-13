@@ -23,6 +23,12 @@ function message(attachments: MicrosoftMessageContent['attachments'] = []): Micr
 }
 
 describe('MicrosoftGraphClient', () => {
+  it('rejects oversized message responses without parsing a truncated message', async () => {
+    const client = new MicrosoftGraphClient({ tokenProvider: async () => 'token',
+      fetch: vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('{}', { headers: { 'content-length': String(5 * 1024 * 1024) } })),
+    });
+    await expect(client.getMessage('id')).rejects.toMatchObject({ kind: 'invalid_response' });
+  });
   it('reads body, recipients and attachment metadata without returning attachment bytes', async () => {
     const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(JSON.stringify({
       id: 'one', subject: 'Subject', body: { contentType: 'html', content: '<p>Full body</p>' },

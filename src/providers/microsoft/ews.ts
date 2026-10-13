@@ -107,29 +107,11 @@ export function escapeXml(value: string): string {
     .replace(/'/g, '&apos;');
 }
 
-function unescapeXml(value: string): string {
-  return value
-    .replace(/&apos;/g, "'")
-    .replace(/&quot;/g, '"')
-    .replace(/&gt;/g, '>')
-    .replace(/&lt;/g, '<')
-    .replace(/&amp;/g, '&');
-}
-
 function envelope(operation: string): string {
   return `<?xml version="1.0" encoding="utf-8"?>`
     + `<s:Envelope xmlns:s="${SOAP_NS}" xmlns:m="${MESSAGES_NS}" xmlns:t="${TYPES_NS}">`
     + '<s:Header><t:RequestServerVersion Version="Exchange2013_SP1" /></s:Header>'
     + `<s:Body>${operation}</s:Body></s:Envelope>`;
-}
-
-function childText(xml: string, localName: string): string | undefined {
-  const match = new RegExp(`<[^:>]+:${localName}(?:\\s[^>]*)?>([\\s\\S]*?)<\\/[^:>]+:${localName}>`, 'i').exec(xml);
-  return match ? unescapeXml(match[1].trim()) : undefined;
-}
-
-function responseCode(xml: string): string | undefined {
-  return childText(xml, 'ResponseCode');
 }
 
 function parseMessages(xml: string, detailed = false): Array<EwsMessageSummary | EwsMessage> {
@@ -272,7 +254,7 @@ export class EwsClient {
       + recipients('ReplyTo', message.replyTo)
       + attachmentXml(message.attachments)
       + '</t:Message></m:Items></m:CreateItem>';
-    const response = await this.soapResponse('CreateItem', operation, true);
+    const { response } = await this.soapResponse('CreateItem', operation, true);
     return {
       provider: 'ews',
       status: 'accepted',
@@ -281,10 +263,10 @@ export class EwsClient {
   }
 
   private async soap(action: string, operation: string, mutating: boolean): Promise<string> {
-    return responseText(await this.soapResponse(action, operation, mutating), 4 * 1024 * 1024);
+    return (await this.soapResponse(action, operation, mutating)).body;
   }
 
-  private async soapResponse(action: string, operation: string, mutating: boolean): Promise<Response> {
+  private async soapResponse(action: string, operation: string, mutating: boolean): Promise<{ response: Response; body: string }> {
     let token: string;
     try {
       token = await this.tokenProvider();
@@ -322,27 +304,35 @@ export class EwsClient {
       );
     }
 
-    const body = await response.clone().text();
-    const code = responseCode(body);
-    if (!code) {
+    let body: string;
+    let codes: string[];
+    try {
+      body = await readBoundedResponseText(response, 4 * 1024 * 1024);
+      codes = elements(parseEwsXml(body), 'ResponseCode', EWS_MESSAGES_NS).map(node => node.textContent ?? '');
+    } catch (cause) {
+      throw new MicrosoftProviderError('ews', mutating ? 'outcome_unknown' : 'invalid_response',
+        'EWS response could not be read or parsed within its safety limits', response.status, requestIdFrom(response), { cause });
+    }
+    if (!codes.length) {
       throw new MicrosoftProviderError(
         'ews',
-        'invalid_response',
+        mutating ? 'outcome_unknown' : 'invalid_response',
         'EWS response did not contain a ResponseCode',
         response.status,
         requestIdFrom(response),
       );
     }
-    if (code !== 'NoError') {
-      const message = childText(body, 'MessageText');
+    const code = codes.find(value => value !== 'NoError');
+    if (code !== undefined) {
       throw new MicrosoftProviderError(
         'ews',
         'remote',
-        `EWS returned ${code}${message ? `: ${message}` : ''}`,
+        `EWS returned ${code}`,
         response.status,
         requestIdFrom(response),
       );
     }
-    return response;
+    return { response, body };
   }
 }
+import { readBoundedResponseText } from '../../utils/http-body.js';

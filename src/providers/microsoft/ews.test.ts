@@ -22,6 +22,15 @@ function requestBody(fetchMock: ReturnType<typeof vi.fn<MicrosoftFetch>>): strin
 }
 
 describe('EwsClient', () => {
+  it('reports an oversized send response as unknown and does not retry', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('ignored', {
+      headers: { 'content-length': String(5 * 1024 * 1024) },
+    }));
+    const client = new EwsClient({ endpoint: 'https://exchange.example/EWS/Exchange.asmx', fetch: fetchMock, tokenProvider: async () => 'token' });
+    await expect(client.sendMessage({ subject: 'S', body: 'B', to: ['to@example.com'] }))
+      .rejects.toMatchObject({ kind: 'outcome_unknown' });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
   it('reads full body and metadata with namespaces, CDATA and numeric entities', async () => {
     const xml = SOAP_MESSAGES.replace(/<t:Message>[\s\S]*?<\/t:Message>/, `<Message xmlns="http://schemas.microsoft.com/exchange/services/2006/types">
       <ItemId Id='item-1' ChangeKey='change-1'/><Subject>One &#38; Two</Subject>

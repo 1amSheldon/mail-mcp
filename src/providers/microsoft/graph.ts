@@ -599,9 +599,9 @@ export class MicrosoftGraphClient {
     init: RequestInit = {},
     mutating = false,
   ): Promise<T> {
-    const response = await this.request(path, init, mutating);
+    const response = await this.request(path, init, mutating, false);
     try {
-      return await response.json() as T;
+      return JSON.parse(await readBoundedResponseText(response, 4 * 1024 * 1024)) as T;
     } catch (error) {
       throw new MicrosoftProviderError(
         'graph',
@@ -614,7 +614,7 @@ export class MicrosoftGraphClient {
     }
   }
 
-  private async request(path: string, init: RequestInit = {}, mutating = false): Promise<Response> {
+  private async request(path: string, init: RequestInit = {}, mutating = false, discardBody = true): Promise<Response> {
     let token: string;
     try {
       token = await this.tokenProvider();
@@ -651,6 +651,8 @@ export class MicrosoftGraphClient {
         requestIdFrom(response),
       );
     }
+    if (discardBody) void response.body?.cancel().catch(() => undefined);
     return response;
   }
 }
+import { readBoundedResponseText } from '../../utils/http-body.js';

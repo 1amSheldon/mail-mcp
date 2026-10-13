@@ -155,7 +155,7 @@ export function assertMessageContent(
 
 export async function responseText(response: Response, limit = 16_384): Promise<string> {
   try {
-    return (await response.text()).slice(0, limit);
+    return await readBoundedResponseText(response, limit);
   } catch {
     return '';
   }
@@ -194,3 +194,5 @@ export function transportError(
     { cause: error },
   );
 }
+import { readBoundedResponseText } from '../../utils/http-body.js';
+
