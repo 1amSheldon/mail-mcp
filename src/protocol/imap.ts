@@ -243,7 +243,9 @@ export class ImapClient {
             from: msg.envelope?.from?.[0]?.address || 'Unknown',
             date: msg.envelope?.date || (msg.internalDate ? new Date(msg.internalDate) : undefined),
             snippet: '', threadId: msg.threadId?.toString() || threadId,
-            referenceIds: refs,
+            // Gmail already supplies conversation membership. Do not let the
+            // cross-folder service turn its numeric ID into an RFC header walk.
+            referenceIds: gmail ? [] : refs,
           });
           if (!gmail && options.expand !== false) for (const ref of refs) if (!searched.has(ref) && pending.length < 100) pending.push(ref);
         }
