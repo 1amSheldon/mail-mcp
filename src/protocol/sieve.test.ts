@@ -102,13 +102,13 @@ describe('SieveClient', () => {
     const sock = setupAutoReplySocket('OK\r\n', {});
     const client = new SieveClient('localhost', 4190, 'u', 'p');
     await client.connect();
-    const content = '# Український фільтр\r\nNO not a terminal\r\n';
+    const content = '# \u0420\u0408\u0420\u0454\u0421\u0402\u0420�\u0421�\u0420\u0405\u0421\u0403\u0421\u040a\u0420\u0454\u0420\u0451\u0420� \u0421�\u0421�\u0420�\u0421\u040a\u0421�\u0421\u0402\r\nNO not a terminal\r\n';
     const response = Buffer.from(`{${Buffer.byteLength(content)}}\r\n${content}\r\nOK\r\n`);
     sock.write = () => {
       setImmediate(() => { for (const byte of response) sock.emit('data', Buffer.from([byte])); });
       return true;
     };
-    expect(await client.getScript('фільтр')).toBe(content);
+    expect(await client.getScript('\u0421�\u0421�\u0420�\u0421\u040a\u0421�\u0421\u0402')).toBe(content);
     await expect(client.deleteScript('x\r\nLOGOUT')).rejects.toThrow('Invalid');
   });
 
