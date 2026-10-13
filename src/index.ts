@@ -381,6 +381,8 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       if (operation === 'deleteDocument') details.push('delete the document and its retained revisions');
       if (operation === 'restoreDocumentRevision') details.push('create a new current revision from historical content and description');
       if (operation === 'importICalendar') details.push('import calendar content, including embedded alarms; may update existing items by UID and partially succeed');
+      if (operation === 'forwardAppointment') details.push('forward the selected meeting to listed recipients and permit native organizer notification');
+      if (operation === 'counterAppointment') details.push('send the organizer a proposed new time/location; does not reschedule the meeting');
       if (operation === 'cancelAppointment' || operation === 'cancelTask') details.push('cancel selected calendar scope and permit native attendee cancellation emails');
       if (operation === 'replyToInvitation') details.push(input.notifyOrganizer === false ? 'record local participation only' : 'reply to the calendar organizer');
       if (['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException'].includes(operation)) details.push(input.notifyAttendees === true ? 'update calendar content and notify affected attendees' : 'patch calendar content without invitation emails; edits requiring cancellation notices are refused');

@@ -17,6 +17,40 @@ function fixture(patch: Record<string, unknown> = {}, allowed?: string[]) {
 }
 
 describe('guarded partial calendar edits', () => {
+  it('forwards an explicitly selected occurrence using the calendar item ID', async () => {
+    const f = fixture();
+    await f.service.execute('forwardAppointment', { ...guard, to: ['guest@example.test'], instance: { type: 'local', at: '2026-10-14T09:00:00', timeZone: 'Europe/Kyiv' }, message: 'Join us' });
+    expect(f.request.mock.calls[1]).toEqual(['ForwardAppointment', { id: '257', exceptId: { d: '20261014T090000', tz: 'Europe/Kyiv' }, m: { e: [{ a: 'guest@example.test', t: 't' }], su: { _content: 'Planning' }, mp: { ct: 'text/plain', content: { _content: 'Join us' } } } }, true]);
+    expect(f.raw).not.toHaveBeenCalled();
+  });
+  it('blocks native forwarding with recipient restrictions even when To is permitted', async () => {
+    const f = fixture({}, ['guest@example.test']);
+    await expect(f.service.execute('forwardAppointment', { ...guard, to: ['guest@example.test'] })).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+  it('does not accidentally forward an entire series when an exception was selected', async () => {
+    const f = fixture({ exceptId: { d: '20261014T090000', tz: 'Europe/Kyiv' } });
+    await expect(f.service.execute('forwardAppointment', { ...guard, to: ['guest@example.test'] })).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    expect(f.request).toHaveBeenCalledOnce();
+  });
+  it('sends a counter proposal only to the inspected organizer without copying email alarms', async () => {
+    const f = fixture({ uid: 'meeting-uid', seq: 4, isOrg: false, or: { a: 'allowed@example.test' }, alarm: [{ action: 'EMAIL', at: [{ a: 'outside@example.test' }] }] }, ['allowed@example.test']);
+    await f.service.execute('counterAppointment', { ...guard, start: { type: 'date', date: '2026-10-15' }, endExclusive: { type: 'date', date: '2026-10-16' }, location: 'Room 2', message: 'Would this work?' });
+    expect(f.request.mock.calls[1][0]).toBe('CounterAppointment');
+    expect(f.payload()).toMatchObject({ id: '257-256', comp: 0, ms: '40', rev: '39', m: { e: [{ a: 'allowed@example.test', t: 't' }], inv: { comp: [{ uid: 'meeting-uid', seq: 4, s: { d: '20261015' }, e: { d: '20261015' }, allDay: 1, loc: 'Room 2', at: [{ a: 'me@example.test', ptst: 'TE' }] }] } } });
+    expect(f.payload().m.inv.comp[0]).not.toHaveProperty('alarm');
+    expect(f.raw).not.toHaveBeenCalled();
+  });
+  it('rejects counter proposals from organizers, stale reads and disallowed destinations', async () => {
+    const input = { ...guard, start: { type: 'date', date: '2026-10-15' }, endExclusive: { type: 'date', date: '2026-10-16' } };
+    const organizer = fixture({ uid: 'uid' });
+    await expect(organizer.service.execute('counterAppointment', input)).rejects.toMatchObject({ code: 'INVALID_INPUT' });
+    const restricted = fixture({ uid: 'uid', isOrg: false, or: { a: 'outside@example.test' } }, []);
+    await expect(restricted.service.execute('counterAppointment', input)).rejects.toMatchObject({ code: 'ACCESS_DENIED' });
+    const stale = fixture({ uid: 'uid', isOrg: false }); stale.item.ms++;
+    await expect(stale.service.execute('counterAppointment', input)).rejects.toMatchObject({ code: 'CONFLICT' });
+    for (const f of [organizer, restricted, stale]) expect(f.request).toHaveBeenCalledOnce();
+  });
   it('does not introduce create-time defaults into a partial edit and preserves native metadata', async () => {
     expect(CALENDAR_WRITE_SCHEMAS.updateAppointment.parse({ ...guard, changes: { location: 'Room 2' } }).changes).toEqual({ location: 'Room 2' });
     const f = fixture();

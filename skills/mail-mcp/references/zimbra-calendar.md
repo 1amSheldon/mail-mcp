@@ -7,6 +7,8 @@ their server owner-qualified IDs and permissions.
 
 | Operation | Input | Behavior |
 | --- | --- | --- |
+| `zimbra.forwardAppointment` | Edit guard, `to` (1-100 emails), `instance?`, `message?` | Forwards the series or original occurrence and may additionally notify the native organizer. Unrestricted accounts only. |
+| `zimbra.counterAppointment` | Edit guard, `start`, `endExclusive`, `location?`, `instance?`, `message?` | Attendee sends a proposed time/location to the inspected organizer; does not reschedule or record acceptance. |
 | `zimbra.importICalendar` | `folderId`, `content` | Imports UTF-8 iCalendar text up to 1 MiB through native ImportAppointments. May update existing UIDs; non-atomic and unavailable for recipient-restricted accounts. |
 | `zimbra.exportICalendar` | `folderId`, `window?` (`startsAt`, `endsAt`), `includeAttachments?` (true), `maxBytes?` (10 MiB, max 50 MiB) | REST ICS export of the selected folder; returns a binary `text/calendar` resource. Optional window selects series with occurrences, not a clipped set of individual instances. |
 | `zimbra.searchAppointments` | `query`, `startsAt`, `endsAt`, `limit?`, `cursor?` | Native search with occurrences expanded in the required bounded window. Pages contain calendar items with nested instances, not one row per occurrence. |
@@ -83,6 +85,21 @@ Never automatically retry the whole file. Reconcile destination items and UIDs
 before preparing a targeted retry. Use a disposable folder for migration trials.
 
 ## Editing, exceptions and responses
+
+Forwarding and counter proposals use the same edit guard below. Forwarding is a
+native send with no atomic version guard: preflight can detect an already stale
+read, but cannot freeze the server item afterward. A Zimbra organizer may receive
+an additional notification even when absent from `to`. Recipient-restricted
+accounts therefore cannot use this operation. Select the default invitation to
+forward the series; when an exception is selected, explicitly pass its original
+`instance` to avoid forwarding the whole series accidentally.
+
+A counter proposal carries the inspected UID/sequence and organizer, the
+proposed dates and the sending account as attendee. It does not copy original
+attachments or alarms. Native `ms`/`rev` detect stale versions at the server's
+pre-send check; this is not an atomic reschedule. The organizer must accept the
+proposal and issue an update separately. To change your own meeting, use
+`updateAppointment`. An uncertain send must be reconciled before retrying.
 
 Every edit guard consists of `invitationId`, `component?` (default 0),
 `expectedModSequence` and `expectedRevision` (positive decimal strings).

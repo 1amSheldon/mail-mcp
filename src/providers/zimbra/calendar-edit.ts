@@ -4,7 +4,7 @@ import { CALENDAR_WRITE_SCHEMAS, calendarEdit, calendarTime, compareTimes, sameT
 import { ZimbraError } from './session.js';
 
 type Obj = Record<string, unknown>;
-export const CALENDAR_EDIT_OPERATIONS = ['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException', 'cancelAppointment', 'cancelTask', 'replyToInvitation'] as const;
+export const CALENDAR_EDIT_OPERATIONS = ['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException', 'cancelAppointment', 'cancelTask', 'replyToInvitation', 'forwardAppointment', 'counterAppointment'] as const;
 export type CalendarEditOperation = typeof CALENDAR_EDIT_OPERATIONS[number];
 type Request = (name: string, params: Obj, write?: boolean) => Promise<Obj>;
 type Guard = z.output<z.ZodObject<typeof calendarEdit>>;
@@ -129,6 +129,31 @@ export class ZimbraCalendarEdits {
     const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);
     const task = operation.includes('Task') || operation === 'replyToInvitation' && 'kind' in v && v.kind === 'task';
     const snapshot = await this.snapshot(v, task);
+    if (operation === 'forwardAppointment') {
+      const input = CALENDAR_WRITE_SCHEMAS.forwardAppointment.parse(v);
+      if (this.allowed !== undefined) throw new ZimbraError('ACCESS_DENIED', 'Native forwarding can notify a server-derived organizer without an atomic version guard; it requires an unrestricted account.');
+      if (!input.instance && (snapshot.comp.exceptId || snapshot.invite.recurId)) throw new ZimbraError('INVALID_INPUT', 'Select the default invitation to forward the series, or explicitly select the original instance time.');
+      return this.request('ForwardAppointment', { id: snapshot.itemId, ...(input.instance ? { exceptId: nativeTime(input.instance) } : {}),
+        m: { e: input.to.map(a => ({ a, t: 't' })), su: { _content: String(snapshot.comp.name ?? '') }, mp: { ct: 'text/plain', content: { _content: input.message } } } }, true);
+    }
+    if (operation === 'counterAppointment') {
+      const input = CALENDAR_WRITE_SCHEMAS.counterAppointment.parse(v);
+      if (truth(snapshot.comp.isOrg)) throw new ZimbraError('INVALID_INPUT', 'Organizers change their own meeting with updateAppointment; counter proposals are for attendees.');
+      const organizer = one(snapshot.comp.or).a;
+      if (!z.email().safeParse(organizer).success || typeof snapshot.comp.uid !== 'string' || !snapshot.comp.uid) throw new ZimbraError('PROVIDER_ERROR', 'The invitation lacks an organizer address or UID.');
+      this.check([organizer as string]);
+      const proposal: Obj = {};
+      for (const key of ['uid', 'seq', 'name', 'class', 'priority', 'status', 'loc', 'or', 'exceptId']) if (snapshot.comp[key] !== undefined) proposal[key] = structuredClone(snapshot.comp[key]);
+      proposal.s = nativeTime(input.start);
+      proposal.e = input.endExclusive.type === 'date' ? nativeTime({ type: 'date', date: dayShift(input.endExclusive.date, -1) }) : nativeTime(input.endExclusive);
+      proposal.allDay = input.start.type === 'date' ? 1 : 0;
+      proposal.at = [{ a: this.user, ptst: 'TE', role: 'REQ' }];
+      if (input.location !== undefined) proposal.loc = input.location;
+      if (input.instance) proposal.exceptId = nativeTime(input.instance);
+      return this.request('CounterAppointment', { id: input.invitationId, comp: input.component, ms: input.expectedModSequence, rev: input.expectedRevision,
+        m: { e: [{ a: organizer, t: 't' }], su: { _content: String(proposal.name ?? '') }, mp: { ct: 'text/plain', content: { _content: input.message } },
+          inv: { ...(snapshot.invite.tz ? { tz: snapshot.invite.tz } : {}), comp: [proposal] } } }, true);
+    }
     const allAttendees = snapshot.invites.flatMap(i => list(i.comp).flatMap(c => recipients(obj(c))));
     if (operation === 'cancelAppointment' || operation === 'cancelTask') {
       const v = CALENDAR_WRITE_SCHEMAS[operation].parse(input);
