@@ -338,14 +338,18 @@ function attachmentStatements(variableName: string, attachments: readonly { path
 
 function outgoingBody(input: AppleComposeInput | AppleDraftInput, mode: 'send' | 'draft'): string {
   const account = input.account ? accountSetup(input.account) : '';
-  const sender = input.from
-    ? `set sender of outgoingMessage to ${appleScriptText(input.from)}`
-    : input.account
-      ? 'try\nset sender of outgoingMessage to item 1 of email addresses of selectedAccount\nend try'
-      : '';
+  const senderPreflight = input.account ? `set accountSenders to email addresses of selectedAccount
+  if (count of accountSenders) is 0 then return "{\\\"senderScopeMismatch\\\":true}"
+  set selectedSender to ${input.from ? appleScriptText(input.from) : 'item 1 of accountSenders'}
+  ignoring case
+    if accountSenders does not contain selectedSender then return "{\\\"senderScopeMismatch\\\":true}"
+  end ignoring` : '';
+  const sender = input.account ? 'set sender of outgoingMessage to selectedSender'
+    : input.from ? `set sender of outgoingMessage to ${appleScriptText(input.from)}` : '';
   const visible = mode === 'draft' && 'open' in input && input.open === true;
   return program(`${account}
 tell application "Mail"
+  ${senderPreflight}
   set outgoingMessage to make new outgoing message with properties {subject:${appleScriptText(input.subject)}, content:${appleScriptText(input.body)}, visible:${bool(visible)}}
   ${sender}
   ${recipientStatements('outgoingMessage', 'to', input.to)}

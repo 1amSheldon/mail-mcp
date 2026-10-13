@@ -10,6 +10,25 @@ import { APPLE_MAIL_OPERATION_KINDS } from './types.js';
 import type { AppleScriptRunner } from './runner.js';
 
 describe('AppleMailAdapter', () => {
+  it.each(['compose', 'createDraft'] as const)('binds %s sender before creating any native message', async operation => {
+    const run = vi.fn().mockResolvedValue('{"senderScopeMismatch":true}');
+    const adapter = new AppleMailAdapter({ runner: { run }, platform: 'darwin' });
+    await expect(adapter[operation]({ account: 'Work', from: 'personal@example.com',
+      to: ['to@example.com'], subject: 'S', body: 'B' })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    const script = run.mock.calls[0][0] as string;
+    expect(script).toContain('set accountSenders to email addresses of selectedAccount');
+    expect(script.indexOf('if accountSenders does not contain selectedSender')).toBeLessThan(script.indexOf('make new outgoing message'));
+    expect(script).toContain('set sender of outgoingMessage to selectedSender');
+    expect(script).not.toContain('try\nset sender');
+  });
+
+  it('requires a usable default sender from the selected native account', async () => {
+    const run = vi.fn().mockResolvedValue('{"ok":true}');
+    const adapter = new AppleMailAdapter({ runner: { run }, platform: 'darwin' });
+    await adapter.compose({ account: 'Work', to: ['to@example.com'], subject: 'S', body: 'B' });
+    expect(run.mock.calls[0][0]).toContain('if (count of accountSenders) is 0 then return');
+    expect(run.mock.calls[0][0]).toContain('set selectedSender to item 1 of accountSenders');
+  });
   it.each(['timeout', 'invalid-json'])('preserves send uncertainty after %s', async failure => {
     const run = failure === 'timeout' ? vi.fn().mockRejectedValue(new AppleMailError('TIMEOUT', 'timed out'))
       : vi.fn().mockResolvedValue('{bad json');

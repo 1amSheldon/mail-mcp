@@ -199,9 +199,10 @@ export class AppleMailAdapter {
       );
     }
     return await this.executor.run(async () => {
+      let result: T;
       try {
         const output = await this.runner.run(script, { timeoutMs: this.timeoutMs });
-        return JSON.parse(output) as T;
+        result = JSON.parse(output) as T;
       } catch (error) {
         if (sendsMail && !(error instanceof AppleMailError && error.code === 'PERMISSION_DENIED')) {
           throw new AppleMailSendOutcomeUnknownError(error);
@@ -213,6 +214,10 @@ export class AppleMailAdapter {
           { cause: error },
         );
       }
+      if (result && typeof result === 'object' && 'senderScopeMismatch' in result && result.senderScopeMismatch === true) {
+        throw new AppleMailError('INVALID_ARGUMENT', 'Sender must be an email address of the selected Apple Mail account. No message was created or sent.');
+      }
+      return result;
     });
   }
 
