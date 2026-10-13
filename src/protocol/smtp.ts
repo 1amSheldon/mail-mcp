@@ -1,4 +1,5 @@
 import nodemailer, { type Transporter } from 'nodemailer';
+import { createConnection, type Socket } from 'node:net';
 import type { EmailAccount } from '../config.js';
 import {
   prepareOutgoingMessage,
@@ -130,6 +131,7 @@ export class SmtpClient {
   private connectPromise: Promise<void> | null = null;
   private connectingTransport: Transporter | null = null;
   private generation = 0;
+  private readonly sockets = new Set<Socket>();
   private readonly composer: Transporter;
 
   constructor(
@@ -173,10 +175,13 @@ export class SmtpClient {
         renew: boolean,
         callback: (error: Error | null, token?: string, expires?: number) => void,
       ) => {
+        if (generation !== this.generation) { callback(new Error('SMTP connection was cancelled')); return; }
         void getValidAccessToken(this.account.id, renew).then(
           // Token caching and expiry belong to our credential store. Ask it on
           // every new SMTP connection, including after workstation sleep.
-          token => callback(null, token, Date.now() - 1),
+          token => generation === this.generation
+            ? callback(null, token, Date.now() - 1)
+            : callback(new Error('SMTP connection was cancelled')),
           error => callback(error instanceof Error ? error : new Error('OAuth2 token refresh failed')),
         );
       };
@@ -201,6 +206,23 @@ export class SmtpClient {
       port: smtpPort,
       ...smtpTransportSecurityOptions(securityMode),
       auth: authConfig,
+      // Non-pooled Nodemailer close() does not destroy verify/send sockets.
+      // Own their lifecycle while leaving TLS negotiation and validation to Nodemailer.
+      getSocket: (_options: unknown, callback: (error: Error | null, value?: { connection: Socket }) => void) => {
+        if (generation !== this.generation) { callback(new Error('SMTP connection was cancelled')); return; }
+        const socket = createConnection({ host: smtpHost, port: smtpPort });
+        this.sockets.add(socket);
+        socket.once('close', () => this.sockets.delete(socket));
+        const timeout = setTimeout(() => socket.destroy(new Error('SMTP connection timed out')), 30_000);
+        const failed = (error: Error) => { clearTimeout(timeout); callback(error); };
+        socket.once('error', failed);
+        socket.once('connect', () => {
+          clearTimeout(timeout);
+          socket.removeListener('error', failed);
+          if (generation !== this.generation) { socket.destroy(); callback(new Error('SMTP connection was cancelled')); return; }
+          callback(null, { connection: socket });
+        });
+      },
     });
 
     this.connectingTransport = candidate;
@@ -212,6 +234,7 @@ export class SmtpClient {
       if (typeof (candidate as any).close === 'function') {
         (candidate as any).close();
       }
+      this.assertGeneration(generation);
       throw error;
     } finally {
       if (this.connectingTransport === candidate) this.connectingTransport = null;
@@ -220,6 +243,8 @@ export class SmtpClient {
 
   disconnect(): void {
     this.generation++;
+    for (const socket of this.sockets) socket.destroy(new Error('SMTP connection was cancelled'));
+    this.sockets.clear();
     this.connectPromise = null;
     for (const transport of new Set([this.transporter, this.connectingTransport])) {
       if (transport && typeof (transport as any).close === 'function') transport.close();
