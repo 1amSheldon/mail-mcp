@@ -136,7 +136,7 @@ describe('MailService cursor and locator contracts', () => {
     expect(thread.items[0].locator).toBe(locator());
     expect(thread.folders).toEqual(['INBOX']);
     await expect(service.resolveLocator(page.items[0].locator)).resolves.toMatchObject({ mailbox: 'INBOX', uid: 7 });
-    expect(imap.searchUidPage).toHaveBeenCalledWith('INBOX', '123', { all: true }, 10, undefined);
+    expect(imap.searchUidPage).toHaveBeenCalledWith('INBOX', '123', [{ all: true }], 10, undefined);
     expect(imap.fetchMessagesByUids).toHaveBeenCalledWith([7], 'INBOX', false);
     expect(imap.fetchThreadMessages).toHaveBeenCalledTimes(1);
     expect(imap.fetchThreadMessages).toHaveBeenCalledWith('<thread>', 'INBOX', expect.any(Object));
@@ -174,7 +174,21 @@ describe('MailService cursor and locator contracts', () => {
     expect(first.items[0]?.id).toBe(first.items[0]?.locator);
     expect(first.items[0]?.locator).toMatch(/^imap:v1:/);
     expect(second.items.map(item => item.uid)).toEqual([1]);
-    expect(imap.searchUidPage).toHaveBeenLastCalledWith('INBOX', '123', { all: true }, 2, 2);
+    expect(imap.searchUidPage).toHaveBeenLastCalledWith('INBOX', '123', [{ all: true }], 2, 2);
+    expect(imap.fetchMessagesByUids).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a compound-search cursor reusable after the IMAP search fails', async () => {
+    imap.searchUidPage.mockResolvedValueOnce({ uids: [9], nextBefore: 9 })
+      .mockRejectedValueOnce(new Error('IMAP search failed; results are incomplete'))
+      .mockResolvedValueOnce({ uids: [8], nextBefore: null });
+    imap.fetchMessagesByUids.mockImplementation(async (uids: number[]) => uids.map(uid => ({ id: String(uid), uid })));
+    const service = new MailService(baseAccount);
+    const query = { subject: 'required', keywordsAny: ['red', 'blue'] };
+    const first = await service.searchEmailsPage(query, { limit: 1 });
+    await expect(service.searchEmailsPage(query, { limit: 1, cursor: first.nextCursor! })).rejects.toThrow('results are incomplete');
+    expect(await service.searchEmailsPage(query, { limit: 1, cursor: first.nextCursor! })).toMatchObject({ nextCursor: null });
+    await expect(service.searchEmailsPage(query, { limit: 1, cursor: first.nextCursor! })).rejects.toThrow('unknown');
     expect(imap.fetchMessagesByUids).toHaveBeenCalledTimes(2);
   });
 

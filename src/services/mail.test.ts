@@ -293,11 +293,11 @@ describe('MailService searchable delivery identifiers', () => {
       cc: 'cc@example.com',
       messageId: '<delivery@example.com>',
     }, { folder: 'Sent', limit: 5 });
-    expect(mockSearchUidPage).toHaveBeenCalledWith('Sent', '1', {
+    expect(mockSearchUidPage).toHaveBeenCalledWith('Sent', '1', [{
       to: 'to@example.com',
       cc: 'cc@example.com',
       header: { 'Message-ID': '<delivery@example.com>' },
-    }, 5, undefined);
+    }], 5, undefined);
   });
 
   it('maps bounded keyword groups and status filters without fetching message text', async () => {
@@ -315,19 +315,12 @@ describe('MailService searchable delivery identifiers', () => {
       unread: true,
       flagged: false,
     }, { folder: 'INBOX', limit: 5, headerOnly: true });
-    expect(mockSearchUidPage).toHaveBeenCalledWith('INBOX', '2', {
+    expect(mockSearchUidPage).toHaveBeenCalledWith('INBOX', '2', [{
       body: 'legacy-body-term',
       flagged: false,
-      not: {
-        or: [
-          { not: { text: 'alpha' } },
-          { not: { text: 'beta' } },
-          { text: 'spam' },
-        ],
-      },
-      or: [{ text: 'blue' }, { text: 'red' }],
       seen: false,
-    }, 5, undefined);
+      or: [{ text: 'alpha', or: [{ text: 'beta', or: [{ not: { text: 'spam' } }] }] }],
+    }, { or: [{ text: 'blue' }, { text: 'red' }] }], 5, undefined);
     expect(mockFetchMessagesByUids).toHaveBeenCalledWith([], 'INBOX', true);
   });
 

@@ -7,6 +7,8 @@ export const MAX_SEARCH_KEYWORD_CHARS = 256;
 const MAX_PAGINATION_QUERY_KEY_CHARS = 8_192;
 
 export type SearchKeywordScope = 'body' | 'subject' | 'all';
+/** At most two server searches, intersected within the same bounded UID window. */
+export type ImapSearchCriteria = readonly [SearchObject] | readonly [SearchObject, SearchObject];
 
 export interface SearchEmailsQuery {
   from?: string;
@@ -184,12 +186,12 @@ function textCriterion(scope: SearchKeywordScope, term: string): SearchObject {
 }
 
 /**
- * Build one IMAP SearchObject. ImapFlow exposes implicit AND between object
- * fields, OR through `or`, and NOT through `not`; it has no AND array. The
- * required keyword list therefore uses De Morgan's law so every match remains
- * server-side: A AND B == NOT (NOT A OR NOT B).
+ * Compile positive conjunctions without nested negation. ImapFlow flattens
+ * singleton OR carriers into implicit AND keys, including repeated fields.
+ * Keep genuine OR alternatives in a separate search: some providers mishandle
+ * OR combined with other predicates, even when the serialized grammar is valid.
  */
-export function buildSearchCriteria(query: SearchEmailsQuery): SearchObject {
+export function buildSearchCriteria(query: SearchEmailsQuery): ImapSearchCriteria {
   const normalized = normalizeSearchQuery(query);
   const criteria: SearchObject = {};
 
@@ -209,21 +211,21 @@ export function buildSearchCriteria(query: SearchEmailsQuery): SearchObject {
 
   const scope = normalized.keywordScope ?? 'body';
   const anyTerms = normalized.keywordsAny?.map(term => textCriterion(scope, term)) ?? [];
-  if (anyTerms.length > 0) {
-    criteria.or = anyTerms;
-  }
-
-  const notOperands: SearchObject[] = [
-    ...(normalized.keywordsAll?.map(term => ({ not: textCriterion(scope, term) })) ?? []),
-    ...(normalized.excludeKeywords?.map(term => textCriterion(scope, term)) ?? []),
+  const conjuncts: SearchObject[] = [
+    ...(Object.keys(criteria).length ? [criteria] : []),
+    ...(normalized.keywordsAll?.map(term => textCriterion(scope, term)) ?? []),
+    ...(anyTerms.length === 1 ? anyTerms : []),
+    ...(normalized.excludeKeywords?.map(term => ({ not: textCriterion(scope, term) })) ?? []),
   ];
-  if (notOperands.length === 1) {
-    criteria.not = notOperands[0];
-  } else if (notOperands.length > 1) {
-    criteria.not = { or: notOperands };
+  let conjunction: SearchObject | undefined;
+  for (let index = conjuncts.length - 1; index >= 0; index--) {
+    conjunction = { ...conjuncts[index], ...(conjunction ? { or: [conjunction] } : {}) };
   }
-
-  return criteria;
+  if (anyTerms.length > 1) {
+    const alternatives: SearchObject = { or: anyTerms };
+    return conjunction ? [conjunction, alternatives] : [alternatives];
+  }
+  return [conjunction ?? { all: true }];
 }
 
 /**

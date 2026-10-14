@@ -10,7 +10,7 @@ top-level accountId. See [outcomes](outcomes.md) before sends or uncertain recov
 | --- | --- | --- |
 | `listFolders` | `{}` | Paths and special-use metadata; discover Sent/Drafts/Trash |
 | `listMessages` | `folder?`, `limit?`, `cursor?`, `headerOnly?` | `items`, `nextCursor`, `total: null`; locators on items |
-| `searchMessages` | Page fields above plus filters below | Server-side substring search |
+| `searchMessages` | Page fields above plus filters below | Provider-side text matching |
 | `readMessage` | `locator` | Formatted text; body can be truncated at 200,000 characters |
 | `getRawMessage` | `locator`, `maxBytes?` | Metadata plus embedded base64 `message/rfc822`; default 10 MiB, ceiling 50 MiB |
 | `getThread` | `threadId`, `folder?`, `folders?` | `{ items, folders, partial, warning }`, with item locators |
@@ -27,9 +27,12 @@ top-level accountId. See [outcomes](outcomes.md) before sends or uncertain recov
 Search filters: `from`, `to`, `cc`, `subject`, `messageId`, `since`, `before`,
 `keywords`, `keywordsAll`, `keywordsAny`, `excludeKeywords`, `keywordScope`,
 `unread`, `flagged`. Dates use YYYY-MM-DD: since inclusive, before exclusive.
-Keyword arrays contain at most 20 literal terms/phrases, at most 256 characters
+Keyword arrays contain at most 20 terms/phrases, at most 256 characters
 each. All/any/excluded groups combine with AND. Scope is body (default), subject
-or all. `keywords` is one literal body phrase. No regex or semantic interpretation.
+or all. `keywords` is one body search phrase. Terms are sent unchanged to the
+provider, except that keyword-array entries are trimmed. Matching and linguistic
+variants depend on the IMAP provider; for strict literal subject requirements,
+inspect the returned subjects. The server does not apply regex or AI relevance scoring.
 Search folders separately; do not download entire mailboxes for local filtering.
 
 Use limit 20-50 normally; maximum 500. `headerOnly: true` skips snippets.
