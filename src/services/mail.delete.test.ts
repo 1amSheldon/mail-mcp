@@ -53,13 +53,13 @@ describe('MailService.deleteEmail', () => {
 
   it('moves the message to the special-use Trash folder instead of deleting it', async () => {
     await service.deleteEmail('42', 'INBOX');
-    expect(mockMoveMessage).toHaveBeenCalledWith('42', 'INBOX', 'Deleted Items');
+    expect(mockMoveMessage).toHaveBeenCalledWith('42', 'INBOX', 'Deleted Items', undefined);
     expect(mockDeleteMessage).not.toHaveBeenCalled();
   });
 
   it('defaults the source folder to INBOX', async () => {
     await service.deleteEmail('99');
-    expect(mockMoveMessage).toHaveBeenCalledWith('99', 'INBOX', 'Deleted Items');
+    expect(mockMoveMessage).toHaveBeenCalledWith('99', 'INBOX', 'Deleted Items', undefined);
   });
 
   it('invalidates the source body cache after moving to Trash', async () => {
@@ -70,7 +70,7 @@ describe('MailService.deleteEmail', () => {
 
   it('requires the explicit permanent method for irreversible deletion', async () => {
     await service.permanentlyDeleteEmail('55', 'Deleted Items');
-    expect(mockDeleteMessage).toHaveBeenCalledWith('55', 'Deleted Items');
+    expect(mockDeleteMessage).toHaveBeenCalledWith('55', 'Deleted Items', undefined);
     expect(mockMoveMessage).not.toHaveBeenCalled();
   });
 

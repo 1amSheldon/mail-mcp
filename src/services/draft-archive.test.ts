@@ -23,6 +23,7 @@ describe('draft archive policy and confirmation', () => {
   it('waits for a delayed Tencent copy and verifies a rewritten ID', async () => {
     const service = new MailService(account) as any;
     vi.spyOn(service, 'resolveSentFolder').mockResolvedValue('Sent');
+    vi.spyOn(service.imapClient, 'getMailboxIdentity').mockResolvedValue({ path: 'Sent', uidValidity: '1' });
     const raw = (await new SmtpClient(account).composeMessage({ from: account.user, to: account.user, subject: 'Archive', text: 'Body' })).rawMessage;
     const now = new Date(); const id = '<archive@example.com>';
     const source = replaceHeaders(raw, { 'Message-ID': id, Date: now.toUTCString() });
@@ -36,10 +37,12 @@ describe('draft archive policy and confirmation', () => {
       { header: { 'Message-ID': 'archive@example.com' } }, 'Sent', 20,
     );
     expect(service.imapClient.fetchRawMessage).toHaveBeenCalledTimes(1);
+    expect(service.imapClient.fetchRawMessage).toHaveBeenCalledWith('2', 'Sent', 50 * 1024 * 1024, '1');
   });
   it('does not confirm ambiguous Sent copies', async () => {
     const service = new MailService(account) as any;
     vi.spyOn(service, 'resolveSentFolder').mockResolvedValue('Sent');
+    vi.spyOn(service.imapClient, 'getMailboxIdentity').mockResolvedValue({ path: 'Sent', uidValidity: '1' });
     const composed = await new SmtpClient(account).composeMessage({ from: account.user, to: account.user, subject: 'Archive', text: 'Body' });
     vi.spyOn(service.imapClient, 'searchMessageUids').mockResolvedValue([1, 2]);
     vi.spyOn(service.imapClient, 'fetchRawMessage').mockResolvedValue(composed.rawMessage);

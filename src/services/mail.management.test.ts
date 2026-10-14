@@ -9,6 +9,7 @@ const imap = {
   })),
   listMessages: vi.fn().mockResolvedValue([]),
   searchMessages: vi.fn().mockResolvedValue([]),
+  searchUidPage: vi.fn().mockResolvedValue({ uids: [], nextBefore: null }),
   listMessageUids: vi.fn().mockResolvedValue([]),
   searchMessageUids: vi.fn().mockResolvedValue([]),
   fetchMessagesByUids: vi.fn().mockResolvedValue([]),
@@ -100,6 +101,7 @@ beforeEach(() => {
   }));
   imap.listMessages.mockResolvedValue([]);
   imap.searchMessages.mockResolvedValue([]);
+  imap.searchUidPage.mockResolvedValue({ uids: [], nextBefore: null });
   imap.listMessageUids.mockResolvedValue([]);
   imap.searchMessageUids.mockResolvedValue([]);
   imap.fetchMessagesByUids.mockResolvedValue([]);
@@ -122,8 +124,42 @@ beforeEach(() => {
 });
 
 describe('MailService cursor and locator contracts', () => {
-  it('continues from an immutable snapshot and returns stable message locators', async () => {
-    imap.listMessageUids.mockResolvedValue([3, 2, 1]);
+  it('uses canonical mailbox paths for pages and threads with usable locators', async () => {
+    imap.getMailboxIdentity.mockResolvedValue({ path: 'INBOX', uidValidity: '123' });
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: null });
+    imap.fetchMessagesByUids.mockResolvedValue([{ id: '7', uid: 7 }]);
+    imap.fetchThreadMessages.mockResolvedValue([{ id: '7', uid: 7 }]);
+    const service = new MailService(baseAccount);
+    const page = await service.listEmailsPage({ folder: 'inbox' });
+    const thread = await service.getThread('<thread>', 'inbox', ['inbox', 'INBOX']);
+    expect(page.items[0].locator).toBe(locator());
+    expect(thread.items[0].locator).toBe(locator());
+    expect(thread.folders).toEqual(['INBOX']);
+    await expect(service.resolveLocator(page.items[0].locator)).resolves.toMatchObject({ mailbox: 'INBOX', uid: 7 });
+    expect(imap.searchUidPage).toHaveBeenCalledWith('INBOX', '123', { all: true }, 10, undefined);
+    expect(imap.fetchMessagesByUids).toHaveBeenCalledWith([7], 'INBOX', false);
+    expect(imap.fetchThreadMessages).toHaveBeenCalledTimes(1);
+    expect(imap.fetchThreadMessages).toHaveBeenCalledWith('<thread>', 'INBOX', expect.any(Object));
+  });
+
+  it('keeps unrelated cursors alive across long traversals and failed hydration', async () => {
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: 7 });
+    imap.fetchMessagesByUids.mockResolvedValue([{ id: '7', uid: 7 }]);
+    const service = new MailService(baseAccount);
+    const unrelated = await service.listEmailsPage({ folder: 'Archive' });
+    let page = await service.listEmailsPage({});
+    for (let i = 0; i < 130; i++) page = await service.listEmailsPage({ cursor: page.nextCursor! });
+    const cursor = page.nextCursor!;
+    imap.fetchMessagesByUids.mockRejectedValueOnce(new Error('temporary failure'));
+    await expect(service.listEmailsPage({ cursor })).rejects.toThrow('temporary failure');
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: null });
+    await expect(service.listEmailsPage({ cursor })).resolves.toMatchObject({ nextCursor: null });
+    await expect(service.listEmailsPage({ cursor })).rejects.toThrow('unknown');
+    await expect(service.listEmailsPage({ folder: 'Archive', cursor: unrelated.nextCursor! })).resolves.toMatchObject({ nextCursor: null });
+  });
+
+  it('continues from a UID boundary and returns stable message locators', async () => {
+    imap.searchUidPage.mockResolvedValueOnce({ uids: [3, 2], nextBefore: 2 }).mockResolvedValueOnce({ uids: [1], nextBefore: null });
     imap.fetchMessagesByUids.mockImplementation(async (uids: number[]) => uids.map(uid => ({
       id: String(uid),
       uid,
@@ -138,12 +174,12 @@ describe('MailService cursor and locator contracts', () => {
     expect(first.items[0]?.id).toBe(first.items[0]?.locator);
     expect(first.items[0]?.locator).toMatch(/^imap:v1:/);
     expect(second.items.map(item => item.uid)).toEqual([1]);
-    expect(imap.listMessageUids).toHaveBeenCalledTimes(1);
+    expect(imap.searchUidPage).toHaveBeenLastCalledWith('INBOX', '123', { all: true }, 2, 2);
     expect(imap.fetchMessagesByUids).toHaveBeenCalledTimes(2);
   });
 
   it('rejects a cursor reused for another mailbox', async () => {
-    imap.listMessageUids.mockResolvedValue([2, 1]);
+    imap.searchUidPage.mockResolvedValue({ uids: [2], nextBefore: 2 });
     imap.fetchMessagesByUids.mockImplementation(async (uids: number[]) => (
       uids.map(uid => ({ id: String(uid), uid }))
     ));
@@ -169,13 +205,13 @@ describe('MailService cursor and locator contracts', () => {
       size: raw.length,
       contentBase64: raw.toString('base64'),
     });
-    expect(imap.fetchRawMessage).toHaveBeenCalledWith('7', 'INBOX', 1024);
+    expect(imap.fetchRawMessage).toHaveBeenCalledWith('7', 'INBOX', 1024, '123');
   });
 });
 
 describe('MailService redaction on standard reads', () => {
   it('redacts list and search metadata without changing stable identifiers', async () => {
-    imap.listMessageUids.mockResolvedValue([7]);
+    imap.searchUidPage.mockResolvedValue({ uids: [7], nextBefore: null });
     imap.searchMessageUids.mockResolvedValue([7]);
     imap.fetchMessagesByUids.mockResolvedValue([{
       id: '7',
@@ -213,13 +249,13 @@ describe('MailService redaction on standard reads', () => {
     }]);
     const service = new MailService(baseAccount, true);
 
-    await expect(service.getThread('thread-unchanged')).resolves.toEqual([{
-      id: '8',
+    await expect(service.getThread('thread-unchanged')).resolves.toMatchObject({ partial: true, folders: ['INBOX'], items: [{
+      locator: expect.stringMatching(/^imap:v1:/),
       uid: 8,
       subject: 'password: [REDACTED]',
       snippet: '[REDACTED CC]',
       threadId: 'thread-unchanged',
-    }]);
+    }] });
   });
 });
 
@@ -326,6 +362,7 @@ describe('MailService reply all and batch safety', () => {
       'INBOX',
       ['\\Seen'],
       [],
+      undefined,
     );
   });
 
@@ -345,6 +382,7 @@ describe('MailService reply all and batch safety', () => {
       'INBOX',
       ['\\Flagged'],
       [],
+      '123',
     );
     expect(result).toEqual({
       processed: 2,

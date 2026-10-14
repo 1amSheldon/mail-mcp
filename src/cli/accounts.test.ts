@@ -3,10 +3,11 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 const readline = vi.hoisted(() => ({
   question: vi.fn(),
   close: vi.fn(),
+  once: vi.fn(),
 }));
 
-vi.mock('node:readline/promises', () => ({
-  createInterface: vi.fn(() => readline),
+vi.mock('./prompt.js', () => ({
+  createAccountPrompt: vi.fn(() => ({ ...readline, secret: readline.question })),
 }));
 
 // Mock dependencies before importing the module under test
@@ -17,13 +18,22 @@ vi.mock('../config.js', () => ({
 }));
 
 vi.mock('../security/keychain.js', () => ({
+  loadCredentials: vi.fn(),
   saveCredentials: vi.fn(),
   removeCredentials: vi.fn(),
+  removeZimbraCredentials: vi.fn(),
+}));
+
+// CLI tests exercise removal ordering, not the filesystem lock. Dedicated
+// login-state tests exercise real locks under their own temporary directories.
+vi.mock('../providers/zimbra/login-state.js', async importOriginal => ({
+  ...await importOriginal<typeof import('../providers/zimbra/login-state.js')>(),
+  withZimbraLoginLock: async (_id: string, action: () => Promise<unknown>) => action(),
 }));
 
 import { handleAccountsCommand, inferSmtpHost } from './accounts.js';
 import { getConfiguredAccounts, saveConfiguredAccounts } from '../config.js';
-import { removeCredentials, saveCredentials } from '../security/keychain.js';
+import { removeCredentials, saveCredentials, removeZimbraCredentials } from '../security/keychain.js';
 
 const mockedGetAccounts = vi.mocked(getConfiguredAccounts);
 const mockedSaveAccounts = vi.mocked(saveConfiguredAccounts);
@@ -100,14 +110,14 @@ describe('handleAccountsCommand', () => {
         'process.exit(1)'
       );
       expect(consoleSpy).toHaveBeenCalledWith(
-        'Usage: mail-mcp accounts <add|list|remove>'
+        'Usage: mail-mcp accounts <add|list|remove|login|disable-auto-login>'
       );
     });
 
     it('prints usage and exits when no subcommand is given', async () => {
       await expect(handleAccountsCommand(['accounts'])).rejects.toThrow('process.exit(1)');
       expect(consoleSpy).toHaveBeenCalledWith(
-        'Usage: mail-mcp accounts <add|list|remove>'
+        'Usage: mail-mcp accounts <add|list|remove|login|disable-auto-login>'
       );
     });
   });
@@ -178,6 +188,23 @@ describe('handleAccountsCommand', () => {
   });
 
   describe('accounts remove', () => {
+    const zimbra = { id: 'credential-cleanup-test', name: 'Zimbra', backend: 'zimbra' as const, endpoint: 'https://mail.example.test/service/soap', user: 'test@example.test' };
+    it('retains Zimbra configuration when verified credential removal fails', async () => {
+      const accounts = [zimbra];
+      mockedGetAccounts.mockReturnValue(accounts);
+      vi.mocked(removeZimbraCredentials).mockRejectedValueOnce(new Error('Cannot verify removal'));
+      await expect(handleAccountsCommand(['accounts', 'remove', zimbra.id])).rejects.toThrow('Cannot verify removal');
+      expect(mockedSaveAccounts).not.toHaveBeenCalled();
+      expect(accounts).toEqual([zimbra]);
+      expect(consoleSpy).not.toHaveBeenCalledWith(`Account '${zimbra.id}' removed.`);
+    });
+    it('removes Zimbra configuration only after verified credential cleanup', async () => {
+      mockedGetAccounts.mockReturnValue([zimbra, TEST_ACCOUNT]);
+      vi.mocked(removeZimbraCredentials).mockImplementationOnce(async () => { expect(mockedSaveAccounts).not.toHaveBeenCalled(); });
+      await handleAccountsCommand(['accounts', 'remove', zimbra.id]);
+      expect(mockedSaveAccounts).toHaveBeenCalledWith([TEST_ACCOUNT]);
+      expect(mockedRemoveCredentials).not.toHaveBeenCalled();
+    });
     it('prints usage and exits with code 1 when no id given', async () => {
       await expect(handleAccountsCommand(['accounts', 'remove'])).rejects.toThrow(
         'process.exit(1)'

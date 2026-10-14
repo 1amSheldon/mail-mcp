@@ -1,8 +1,37 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { z } from 'zod';
 
 export const MAX_OUTGOING_ATTACHMENTS = 20;
 export const MAX_OUTGOING_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+const attachmentFields = {
+  filename: z.string().optional(),
+  contentType: z.string().optional(),
+  contentDisposition: z.enum(['attachment', 'inline']).optional(),
+  cid: z.string().optional(),
+};
+const outgoingMessageSchema = z.object({
+  to: z.string(), subject: z.string(),
+  text: z.string().optional(), html: z.string().optional(),
+  cc: z.string().optional(), bcc: z.string().optional(),
+  from: z.string().optional(), replyTo: z.string().optional(),
+  attachments: z.array(z.union([
+    z.object({ ...attachmentFields, path: z.string() }).strict(),
+    z.object({ ...attachmentFields, filename: z.string(), contentBase64: z.string() }).strict(),
+  ])).max(MAX_OUTGOING_ATTACHMENTS, `Outgoing message supports at most ${MAX_OUTGOING_ATTACHMENTS} attachments`).optional(),
+  threading: z.object({
+    inReplyTo: z.string().optional(),
+    references: z.union([z.string(), z.array(z.string())]).optional(),
+  }).optional(),
+  headers: z.record(z.string(), z.string()).optional(),
+});
+
+export function assertOutgoingMessage(message: unknown): asserts message is OutgoingMessage {
+  // Nodemailer also accepts file/URL objects for bodies. Never expose that API to callers.
+  const parsed = outgoingMessageSchema.safeParse(message);
+  if (!parsed.success) throw new Error(`Invalid outgoing message: ${parsed.error.message}`);
+}
 
 export interface OutgoingFileAttachment {
   path: string;
@@ -146,7 +175,7 @@ async function assertAllowedAttachmentPath(
   throw new Error('Attachment path is outside the configured allowedAttachmentRoots');
 }
 
-async function prepareAttachment(
+export async function prepareAttachment(
   attachment: OutgoingAttachment,
   options: OutgoingMessagePreparationOptions,
 ): Promise<NonNullable<PreparedOutgoingMessage['attachments']>[number]> {
@@ -222,6 +251,7 @@ export async function prepareOutgoingMessage(
   defaultFrom: string,
   options: OutgoingMessagePreparationOptions = {},
 ): Promise<PreparedOutgoingMessage> {
+  assertOutgoingMessage(message);
   if (message.text === undefined && message.html === undefined) {
     throw new Error('Outgoing message requires text and/or html content');
   }

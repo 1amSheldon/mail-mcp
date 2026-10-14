@@ -83,6 +83,7 @@ function fakeService() {
       nextAction: 'Do not resend this message.',
     }),
     createDraft: vi.fn().mockResolvedValue(undefined),
+    createReplyDraft: vi.fn().mockResolvedValue({ draftId: 'draft-reply', locator: 'imap:v1:reply-draft' }),
     createDraftMessage: vi.fn().mockResolvedValue({
       folder: 'Localized Drafts',
       uid: 42,
@@ -95,6 +96,72 @@ function fakeService() {
 describe('Recovered MCP dispatch handlers', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it.each(['createReplyDraft', 'createReplyAllDraft'])('%s routes to draft creation and respects confirmation', async operation => {
+    const service = fakeService();
+    const server = new MailMCPServer(false, undefined, undefined, true);
+    const getService = vi.spyOn(server as any, 'getService').mockResolvedValue(service);
+    const attachments = [{ filename: 'new.txt', contentBase64: 'bmV3' }];
+    const args = { accountId: 'test', operation, input: {
+      locator: 'imap:v1:original', body: '<p>Reply</p>', isHtml: true,
+      includeSignature: false, attachments, cc: 'copy@example.com',
+    } };
+    const first = await server.dispatchTool('mail_mutate', false, args);
+    const confirmation = JSON.parse(first.content[0].text as string);
+    expect(confirmation.confirmationRequired).toBe(true);
+    expect(getService).not.toHaveBeenCalled();
+    const result = await server.dispatchTool('mail_mutate', false, { ...args, confirmationId: confirmation.confirmationId });
+    expect(result.isError).not.toBe(true);
+    expect(service.createReplyDraft).toHaveBeenCalledExactlyOnceWith('imap:v1:original', '<p>Reply</p>', {
+      replyAll: operation === 'createReplyAllDraft', isHtml: true, includeSignature: false,
+      includeOriginalAttachments: false, attachments, cc: 'copy@example.com',
+    });
+    expect(service.replyAllEmail).not.toHaveBeenCalled();
+    expect(service.replyLocatedEmail).not.toHaveBeenCalled();
+    expect(JSON.parse(result.content[0].text as string).draftId).toBe('draft-reply');
+    await server.shutdown();
+  });
+
+  it.each(['createReplyDraft', 'createReplyAllDraft'])('%s is blocked by read-only and an unrelated allowlist', async operation => {
+    for (const server of [new MailMCPServer(true), new MailMCPServer(false, new Set(['reply']))]) {
+      const getService = vi.spyOn(server as any, 'getService').mockResolvedValue(fakeService());
+      const result = await server.dispatchTool('mail_mutate', (server as any).readOnly, {
+        accountId: 'test', operation, input: { locator: 'imap:v1:original', body: 'Reply' },
+      });
+      expect(result.isError).toBe(true);
+      expect(getService).not.toHaveBeenCalled();
+      await server.shutdown();
+    }
+  });
+
+  it('replyAll forwards new attachments along with the retain-originals option', async () => {
+    const service = fakeService();
+    const server = new MailMCPServer(false);
+    vi.spyOn(server as any, 'getService').mockResolvedValue(service);
+    const attachments = [{ filename: 'new.txt', contentBase64: 'bmV3' }];
+    const result = await server.dispatchTool('mail_mutate', false, {
+      accountId: 'test', operation: 'replyAll', input: {
+        locator: 'imap:v1:original', body: 'Reply', attachments, includeOriginalAttachments: true,
+      },
+    });
+    expect(result.isError).not.toBe(true);
+    expect(service.replyAllEmail).toHaveBeenCalledWith('imap:v1:original', 'Reply', expect.objectContaining({
+      attachments, includeOriginalAttachments: true,
+    }));
+    await server.shutdown();
+  });
+
+  it.each([
+    { body: 'Reply' }, { locator: 'original' }, { locator: 'original', body: 'Reply', attachments: {} },
+    { locator: 'original', body: 'Reply', isHtml: 'true' },
+  ])('rejects malformed reply drafts before opening the account', async input => {
+    const server = new MailMCPServer(false);
+    const getService = vi.spyOn(server as any, 'getService').mockResolvedValue(fakeService());
+    const result = await server.dispatchTool('mail_mutate', false, { accountId: 'test', operation: 'createReplyDraft', input });
+    expect(result.isError).toBe(true);
+    expect(getService).not.toHaveBeenCalled();
+    await server.shutdown();
   });
 
   it.each([

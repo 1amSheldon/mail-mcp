@@ -1,5 +1,6 @@
-import { copyFile, mkdir, readFile, rm } from 'node:fs/promises';
+import { copyFile, lstat, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { parse } from 'smol-toml';
 import { writeTextFileAtomic } from '../utils/atomic-write.js';
 
@@ -15,6 +16,8 @@ export interface CodexSkillInstallResult {
   skillPath: string;
   backupPath?: string;
   changed: boolean;
+  skipped?: string;
+  rollback?: () => Promise<void>;
 }
 
 export interface CodexHttpServerOptions {
@@ -25,11 +28,15 @@ export interface CodexHttpServerOptions {
 export type CodexBundleServer =
   | {
       transport: 'stdio';
+      skipSkill?: boolean;
+      replaceSkill?: boolean;
       npxArgs: readonly string[];
       serverName?: string;
     }
   | {
       transport: 'http';
+      skipSkill?: boolean;
+      replaceSkill?: boolean;
       options: CodexHttpServerOptions;
       serverName?: string;
     };
@@ -49,18 +56,47 @@ function tomlString(value: string): string {
   return JSON.stringify(value);
 }
 
-function tableName(line: string): string | undefined {
-  const match = line.match(/^\s*\[{1,2}\s*([^\]]+?)\s*\]{1,2}\s*(?:#.*)?$/);
-  return match?.[1].replace(/\s*\.\s*/g, '.');
+function serverTable(line: string, serverName: string): boolean | undefined {
+  if (!/^\s*\[/.test(line)) return undefined;
+  try {
+    // Let the TOML parser interpret quoted keys, escapes and table arrays.
+    const parsed = parse(`${line}\n__mail_mcp_table_marker = true`);
+    return Object.hasOwn((parsed.mcp_servers ?? {}) as object, serverName);
+  } catch {
+    return undefined;
+  }
 }
 
-function isServerTable(name: string, serverName: string): boolean {
-  const roots = [
-    `mcp_servers.${serverName}`,
-    `mcp_servers."${serverName}"`,
-    `mcp_servers.'${serverName}'`,
-  ];
-  return roots.some((root) => name === root || name.startsWith(`${root}.`));
+function advanceStringState(line: string, state: string | undefined): string | undefined {
+  for (let index = 0; index < line.length; index++) {
+    const character = line[index];
+    if (!state) {
+      if (character === '#') break;
+      if (character !== '"' && character !== "'") continue;
+      state = line.slice(index, index + 3) === character.repeat(3) ? character.repeat(3) : character;
+      index += state.length - 1;
+    } else {
+      if (state[0] === '"' && character === '\\') { index++; continue; }
+      if (state.length === 1 && character === state) { state = undefined; continue; }
+      if (state.length === 3 && line.slice(index, index + 3) === state) {
+        // TOML allows one or two literal quote characters immediately before
+        // the closing delimiter (runs of four or five quotes).
+        while (line[index + 1] === state[0]) index++;
+        state = undefined;
+      }
+    }
+  }
+  return state;
+}
+
+function withoutTarget(source: string, serverName: string): unknown {
+  const result = parse(source.replace(/^\uFEFF/, ''));
+  const servers = result.mcp_servers;
+  if (servers && typeof servers === 'object' && !Array.isArray(servers)) {
+    delete (servers as Record<string, unknown>)[serverName];
+    if (Object.keys(servers).length === 0) delete result.mcp_servers;
+  }
+  return result;
 }
 
 export function buildCodexServerSection(
@@ -119,12 +155,15 @@ function upsertCodexServerSection(
   const newline = source.includes('\r\n') ? '\r\n' : '\n';
   const kept: string[] = [];
   let skippingTarget = false;
+  let stringState: string | undefined;
+  const bom = source.startsWith('\uFEFF') ? '\uFEFF' : '';
 
-  for (const line of source.split(/\r?\n/)) {
-    const header = tableName(line);
+  for (const line of source.replace(/^\uFEFF/, '').split(/\r?\n/)) {
+    const header = stringState ? undefined : serverTable(line, serverName);
     if (header !== undefined) {
-      skippingTarget = isServerTable(header, serverName);
+      skippingTarget = header;
     }
+    stringState = advanceStringState(line, stringState);
     if (!skippingTarget) {
       kept.push(line);
     }
@@ -132,7 +171,11 @@ function upsertCodexServerSection(
 
   const base = kept.join(newline).trimEnd();
   const normalizedSection = section.replace(/\n/g, newline);
-  return `${base}${base === '' ? '' : `${newline}${newline}`}${normalizedSection}${newline}`;
+  const updated = `${bom}${base}${base === '' ? '' : `${newline}${newline}`}${normalizedSection}${newline}`;
+  if (!isDeepStrictEqual(withoutTarget(source, serverName), withoutTarget(updated, serverName))) {
+    throw new Error('Refusing to change Codex settings outside the requested MCP server.');
+  }
+  return updated;
 }
 
 export function upsertCodexServer(
@@ -179,7 +222,7 @@ async function installCodexSection(
 
   if (source.trim() !== '') {
     try {
-      parse(source);
+      parse(source.replace(/^\uFEFF/, ''));
     } catch (error) {
       throw new Error(`Invalid existing Codex config at ${configPath}: ${(error as Error).message}`);
     }
@@ -187,7 +230,7 @@ async function installCodexSection(
 
   const updated = upsertCodexServerSection(source, section, serverName);
   try {
-    parse(updated);
+    parse(updated.replace(/^\uFEFF/, ''));
   } catch (error) {
     throw new Error(`Generated Codex config is invalid: ${(error as Error).message}`);
   }
@@ -229,35 +272,74 @@ export async function installCodexHttp(
   );
 }
 
-export async function installCodexSkill(codexHome: string): Promise<CodexSkillInstallResult> {
+export async function installCodexSkill(codexHome: string, options: { skip?: boolean; replaceExisting?: boolean } = {}): Promise<CodexSkillInstallResult> {
   const skillPath = getCodexSkillPath(codexHome);
-  const bundledSkill = await readFile(
-    new URL('../../skills/mail-mcp/SKILL.md', import.meta.url),
-    'utf8'
-  );
-
-  let currentSkill: string | undefined;
-  try {
-    currentSkill = await readFile(skillPath, 'utf8');
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') {
-      throw error;
+  if (options.skip) return { skillPath, changed: false, skipped: 'Skill installation disabled' };
+  // Check every managed path component, including dangling links. Never follow
+  // a junction into a separately managed skill repository during installation.
+  for (const path of [join(codexHome, 'skills'), dirname(skillPath), skillPath]) {
+    try {
+      if ((await lstat(path)).isSymbolicLink()) return { skillPath, changed: false, skipped: 'Externally managed linked skill' };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
     }
   }
-
-  if (currentSkill === bundledSkill) {
+  const source = new URL('../../skills/mail-mcp/', import.meta.url);
+  const references = (await readdir(new URL('references/', source), { withFileTypes: true }))
+    .filter(entry => entry.isFile() && entry.name.endsWith('.md'))
+    .map(entry => `references/${entry.name}`).sort();
+  // Install the entrypoint last, after every linked reference is available.
+  const files = [...references, 'SKILL.md'];
+  const paths = files.map(file => join(dirname(skillPath), file));
+  for (const path of [join(dirname(skillPath), 'references'), ...paths, ...paths.map(path => `${path}.mail-mcp.bak`)]) {
+    try {
+      if ((await lstat(path)).isSymbolicLink()) return { skillPath, changed: false, skipped: 'Externally managed linked skill' };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
+  }
+  const contents = await Promise.all(files.map(file => readFile(new URL(file, source), 'utf8')));
+  const snapshots = await Promise.all(paths.map(snapshotTextFile));
+  if (snapshots.every((snapshot, index) => snapshot.content === contents[index])) {
     return { skillPath, changed: false };
   }
-
-  await mkdir(dirname(skillPath), { recursive: true });
-  let backupPath: string | undefined;
-  if (currentSkill !== undefined) {
-    backupPath = `${skillPath}.mail-mcp.bak`;
-    await copyFile(skillPath, backupPath);
+  if (snapshots.some(snapshot => snapshot.content !== undefined) && !options.replaceExisting) {
+    return { skillPath, changed: false, skipped: 'Existing skill preserved; update it through its source repository or explicitly replace it' };
   }
-  await writeTextFileAtomic(skillPath, bundledSkill);
-
-  return { skillPath, backupPath, changed: true };
+  const written: Array<{ before: TextFileSnapshot; installed: string }> = [];
+  let rolledBack = false;
+  const rollback = async () => {
+    if (rolledBack) return;
+    // Do not erase edits made after installation, or follow a newly linked path.
+    for (const { before, installed } of written) {
+      for (const path of [join(codexHome, 'skills'), dirname(skillPath), dirname(before.path), before.path]) {
+        if ((await lstat(path)).isSymbolicLink()) throw new Error(`Skill rollback preserved a linked path: ${path}`);
+      }
+      if (await readFile(before.path, 'utf8') !== installed) throw new Error(`Skill rollback preserved a changed file: ${before.path}`);
+    }
+    for (const { before } of [...written].reverse()) await restoreTextFile(before);
+    rolledBack = true;
+  };
+  let backupPath: string | undefined;
+  try {
+    for (const [index, snapshot] of snapshots.entries()) {
+      if (snapshot.content === contents[index]) continue;
+      await mkdir(dirname(snapshot.path), { recursive: true });
+      if (snapshot.content !== undefined) {
+        const backup = await snapshotTextFile(`${snapshot.path}.mail-mcp.bak`);
+        await writeTextFileAtomic(backup.path, snapshot.content);
+        written.push({ before: backup, installed: snapshot.content });
+        if (snapshot.path === skillPath) backupPath = backup.path;
+      }
+      await writeTextFileAtomic(snapshot.path, contents[index]);
+      written.push({ before: snapshot, installed: contents[index] });
+    }
+  } catch (error) {
+    try { await rollback(); }
+    catch (rollbackError) { throw new AggregateError([error, rollbackError], 'Skill installation and rollback failed'); }
+    throw error;
+  }
+  return { skillPath, backupPath, changed: true, rollback };
 }
 
 export function getCodexSkillPath(codexHome: string): string {
@@ -302,16 +384,26 @@ export async function installCodexBundle(
   codexHome: string,
   server: CodexBundleServer
 ): Promise<CodexBundleInstallResult> {
-  const skillPath = getCodexSkillPath(codexHome);
   const snapshots = await Promise.all([
     configPath,
     `${configPath}.mail-mcp.bak`,
-    skillPath,
-    `${skillPath}.mail-mcp.bak`,
   ].map(snapshotTextFile));
 
+  let skillRollback: (() => Promise<void>) | undefined;
+  const rollback = async () => {
+    const results = await Promise.allSettled([restoreCodexBundle(snapshots), skillRollback?.()]);
+    const errors = results.filter((result): result is PromiseRejectedResult => result.status === 'rejected');
+    if (errors.length) throw new AggregateError(errors.map(result => result.reason), 'Installation rollback failed');
+  };
+
   try {
-    const skill = await installCodexSkill(codexHome);
+    const skill = await installCodexSkill(codexHome, {
+      skip: server.skipSkill,
+      replaceExisting: server.replaceSkill,
+    });
+    // Default policy creates only absent skills. Existing/linked/skipped files
+    // are never read for rollback or written by it.
+    skillRollback = skill.rollback;
     const config = server.transport === 'http'
       ? await installCodexHttp(configPath, server.options, server.serverName)
       : await installCodex(configPath, server.npxArgs, server.serverName);
@@ -319,11 +411,11 @@ export async function installCodexBundle(
     return {
       config,
       skill,
-      rollback: () => restoreCodexBundle(snapshots),
+      rollback,
     };
   } catch (error) {
     try {
-      await restoreCodexBundle(snapshots);
+      await rollback();
     } catch (rollbackError) {
       throw new AggregateError(
         [error as Error, rollbackError as Error],

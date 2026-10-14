@@ -1,4 +1,5 @@
 import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { simpleParser } from 'mailparser';
 
 const { mockDraftAdopt } = vi.hoisted(() => ({
   mockDraftAdopt: vi.fn().mockResolvedValue('test-draft-id'),
@@ -17,6 +18,7 @@ const mockSmtpSend = vi.fn().mockResolvedValue({
   rawMessage: Buffer.from('Message-ID: <test@example.com>\r\n\r\nBody'),
 });
 const mockFetchAttachmentSize = vi.fn();
+const mockFetchAttachment = vi.fn();
 const mockFetchMessageBody = vi.fn();
 const mockGetMailboxStatus = vi.fn().mockResolvedValue([
   { name: 'INBOX', total: 100, unread: 5, recent: 2 },
@@ -24,11 +26,13 @@ const mockGetMailboxStatus = vi.fn().mockResolvedValue([
 ]);
 const mockListFolders = vi.fn().mockResolvedValue(['INBOX', 'Sent', 'Drafts']);
 const mockScanSenderEnvelopes = vi.fn().mockResolvedValue([]);
+const mockSearchUidPage = vi.fn().mockResolvedValue({ uids: [], nextBefore: null });
 const mockSearchMessageUids = vi.fn().mockResolvedValue([]);
 const mockFetchMessagesByUids = vi.fn().mockResolvedValue([]);
 
 vi.mock('../protocol/imap.js', () => {
   return {
+    AppendNotSavedError: class extends Error {},
     ImapClient: vi.fn(function () {
       return {
         connect: mockImapConnect,
@@ -36,11 +40,13 @@ vi.mock('../protocol/imap.js', () => {
         getMailboxIdentity: mockGetMailboxIdentity,
         findSpecialUseFolder: mockFindSpecialUseFolder,
         fetchAttachmentSize: mockFetchAttachmentSize,
+        fetchAttachment: mockFetchAttachment,
         fetchMessageBody: mockFetchMessageBody,
         getMailboxStatus: mockGetMailboxStatus,
         listFolders: mockListFolders,
         scanSenderEnvelopes: mockScanSenderEnvelopes,
         searchMessageUids: mockSearchMessageUids,
+        searchUidPage: mockSearchUidPage,
         fetchMessagesByUids: mockFetchMessagesByUids,
       };
     }),
@@ -96,6 +102,7 @@ vi.mock('../protocol/smtp.js', () => {
     }),
     SmtpRecipientRejectedError: MockSmtpRecipientRejectedError,
     SmtpSendError: MockSmtpSendError,
+    SmtpPreflightError: class extends Error {},
   };
 });
 
@@ -286,17 +293,17 @@ describe('MailService searchable delivery identifiers', () => {
       cc: 'cc@example.com',
       messageId: '<delivery@example.com>',
     }, { folder: 'Sent', limit: 5 });
-    expect(mockSearchMessageUids).toHaveBeenCalledWith({
+    expect(mockSearchUidPage).toHaveBeenCalledWith('Sent', '1', {
       to: 'to@example.com',
       cc: 'cc@example.com',
       header: { 'Message-ID': '<delivery@example.com>' },
-    }, 'Sent', 10_000);
+    }, 5, undefined);
   });
 
   it('maps bounded keyword groups and status filters without fetching message text', async () => {
     const account = { id: 'test', name: 'Test', user: 'test@example.com' } as any;
     const service = new MailService(account, false);
-    mockGetMailboxIdentity.mockResolvedValueOnce({ path: 'INBOX', uidValidity: '2' });
+    mockGetMailboxIdentity.mockResolvedValueOnce({ path: 'INBOX', uidValidity: '2' }).mockResolvedValueOnce({ path: 'INBOX', uidValidity: '2' });
     mockSearchMessageUids.mockClear();
     mockFetchMessagesByUids.mockClear();
     await service.searchEmailsPage({
@@ -308,7 +315,7 @@ describe('MailService searchable delivery identifiers', () => {
       unread: true,
       flagged: false,
     }, { folder: 'INBOX', limit: 5, headerOnly: true });
-    expect(mockSearchMessageUids).toHaveBeenCalledWith({
+    expect(mockSearchUidPage).toHaveBeenCalledWith('INBOX', '2', {
       body: 'legacy-body-term',
       flagged: false,
       not: {
@@ -320,7 +327,7 @@ describe('MailService searchable delivery identifiers', () => {
       },
       or: [{ text: 'blue' }, { text: 'red' }],
       seen: false,
-    }, 'INBOX', 10_000);
+    }, 5, undefined);
     expect(mockFetchMessagesByUids).toHaveBeenCalledWith([], 'INBOX', true);
   });
 
@@ -335,72 +342,22 @@ describe('MailService searchable delivery identifiers', () => {
   });
 });
 
-describe('MailService attachment size guard', () => {
-  const account = { id: 'test', name: 'Test', user: 'test@example.com', imap: {} as any, smtp: {} as any };
-
-  beforeEach(() => {
-    mockFetchAttachmentSize.mockClear();
+describe('MailService bounded attachment downloads', () => {
+  it('delegates the byte limit and generation without loading the full MIME body', async () => {
     mockFetchMessageBody.mockClear();
-  });
-
-  it('throws ValidationError when fetchAttachmentSize returns size exceeding 50MB', async () => {
-    const SIXTY_MB = 60 * 1024 * 1024;
-    mockFetchAttachmentSize.mockResolvedValue(SIXTY_MB);
-    const service = new MailService(account, false);
-    await service.connect();
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toThrow(
-      expect.objectContaining({
-        message: expect.stringContaining('bigfile.pdf'),
-      })
-    );
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toThrow(
-      expect.objectContaining({
-        message: expect.stringContaining('MB'),
-      })
-    );
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toThrow(
-      expect.objectContaining({
-        message: expect.stringContaining('limit'),
-      })
-    );
+    mockFetchAttachment.mockResolvedValue({ content: Buffer.from('data'), contentType: 'application/pdf' });
+    const service = new MailService({ id: 'test', user: 'test@example.com' } as any);
+    const result = await service.downloadAttachment('1', 'small.pdf', 'INBOX', 8, '123');
+    expect(mockFetchAttachment).toHaveBeenLastCalledWith('1', 'small.pdf', 'INBOX', 8, '123');
     expect(mockFetchMessageBody).not.toHaveBeenCalled();
+    expect(result.content.toString()).toBe('data');
   });
-
-  it('throws ValidationError with code ValidationError when size exceeds limit', async () => {
-    const SIXTY_MB = 60 * 1024 * 1024;
-    mockFetchAttachmentSize.mockResolvedValue(SIXTY_MB);
-    const { ValidationError } = await import('../errors.js');
-    const service = new MailService(account, false);
-    await service.connect();
-    await expect(service.downloadAttachment('1', 'bigfile.pdf')).rejects.toBeInstanceOf(ValidationError);
-  });
-
-  it('proceeds to fetchMessageBody when size <= 50MB', async () => {
-    const TEN_MB = 10 * 1024 * 1024;
-    mockFetchAttachmentSize.mockResolvedValue(TEN_MB);
-    mockFetchMessageBody.mockResolvedValue({
-      attachments: [{ filename: 'small.pdf', content: Buffer.from('data'), contentType: 'application/pdf', size: TEN_MB }],
-    });
-    const service = new MailService(account, false);
-    await service.connect();
-    const result = await service.downloadAttachment('1', 'small.pdf');
-    expect(mockFetchMessageBody).toHaveBeenCalledOnce();
-    expect(result.contentType).toBe('application/pdf');
-  });
-
-  it('proceeds to fetchMessageBody when fetchAttachmentSize returns null (BODYSTRUCTURE unavailable)', async () => {
-    mockFetchAttachmentSize.mockResolvedValue(null);
-    mockFetchMessageBody.mockResolvedValue({
-      attachments: [{ filename: 'file.txt', content: Buffer.from('hello'), contentType: 'text/plain', size: 5 }],
-    });
-    const service = new MailService(account, false);
-    await service.connect();
-    const result = await service.downloadAttachment('1', 'file.txt');
-    expect(mockFetchMessageBody).toHaveBeenCalledOnce();
-    expect(result.contentType).toBe('text/plain');
+  it('propagates an actual-byte-limit rejection', async () => {
+    mockFetchAttachment.mockRejectedValueOnce(new Error('Attachment exceeds the 8 byte limit'));
+    const service = new MailService({ id: 'test', user: 'test@example.com' } as any);
+    await expect(service.downloadAttachment('1', 'file.bin', 'INBOX', 8)).rejects.toThrow('byte limit');
   });
 });
-
 // ---------------------------------------------------------------------------
 // applySignature pure helper tests
 // ---------------------------------------------------------------------------
@@ -609,6 +566,8 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     const firstRead = service.readEmail('shared');
     const secondRead = service.readEmail('shared');
 
+    await vi.waitFor(() => expect(mockFetchMessageBody).toHaveBeenCalledTimes(1));
+
     expect(mockFetchMessageBody).toHaveBeenCalledTimes(1);
     resolveBody(makeParsedMail({}));
     await expect(Promise.all([firstRead, secondRead])).resolves.toHaveLength(2);
@@ -638,6 +597,7 @@ describe('readEmail List-Unsubscribe header extraction', () => {
     await service.connect();
 
     const staleRead = service.readEmail('changed');
+    await vi.waitFor(() => expect(mockFetchMessageBody).toHaveBeenCalledTimes(1));
     service.invalidateBodyCache('INBOX', 'changed');
     await expect(service.readEmail('changed')).resolves.toContain('Current subject');
 
@@ -747,7 +707,7 @@ describe('MailService replyEmail', () => {
     const service = new MailService(baseAccount, false);
     await service.connect();
     await service.replyEmail('42', 'INBOX', 'My reply');
-    expect(mockFetchMessageBody).toHaveBeenCalledWith('42', 'INBOX');
+    expect(mockFetchMessageBody).toHaveBeenCalledWith('42', 'INBOX', '1');
   });
 
   it('sends to the original sender address', async () => {
@@ -791,6 +751,17 @@ describe('MailService replyEmail', () => {
     await service.replyEmail('42', 'INBOX', 'My reply');
     const extraHeaders = mockSmtpSend.mock.calls[0][6];
     expect(extraHeaders['References']).toBe('<original-123@example.com>');
+  });
+
+  it('preserves a parsed multi-message References chain without comma coercion', async () => {
+    mockFetchMessageBody.mockResolvedValue(await simpleParser([
+      'From: author@example.com', 'Message-ID: <third@example.com>',
+      'References: <first@example.com> <second@example.com>', '', 'Original',
+    ].join('\r\n')));
+    const service = new MailService(baseAccount, false);
+    await service.replyEmail('42', 'INBOX', 'Reply');
+    expect(mockSmtpSend.mock.calls[0][6].References)
+      .toBe('<first@example.com> <second@example.com> <third@example.com>');
   });
 
   it('appends original Message-ID to existing references chain', async () => {
@@ -875,6 +846,23 @@ describe('MailService forwardEmail', () => {
     mockSmtpSend.mockClear();
     mockImapAppendMessage.mockClear();
     mockFetchMessageBody.mockClear();
+  });
+
+  it('escapes original text and metadata when forwarding in HTML', async () => {
+    mockFetchMessageBody.mockResolvedValue(makeOriginalMail({
+      subject: '<img src="https://example.test/pixel">',
+      text: '<a href="https://example.test">untrusted</a> & text\nsecond line',
+      from: { text: 'Person <author@example.com>' },
+    }));
+    const service = new MailService(baseAccount, false);
+    await service.forwardEmail('42', 'INBOX', 'friend@example.com', '<b>FYI</b>', true);
+    const html = mockSmtpSend.mock.calls[0][2];
+    expect(html).toContain('<b>FYI</b><pre>');
+    expect(html).toContain('Person &lt;author@example.com&gt;');
+    expect(html).toContain('&lt;a href=&quot;https://example.test&quot;&gt;');
+    expect(html).toContain('&amp; text\nsecond line');
+    expect(html).not.toContain('<img');
+    expect(html).not.toContain('<a href');
   });
 
   function makeOriginalMail(overrides: Partial<any> = {}): any {
@@ -1127,7 +1115,8 @@ describe('MailService createDraft with signature', () => {
     const account = { ...baseAccount, signature: 'Regards' };
     const service = new MailService(account, false);
     await service.connect();
-    await service.createDraft('to@example.com', 'Draft', 'Body text');
+    await expect(service.createDraft('to@example.com', 'Draft', 'Body text'))
+      .resolves.toMatchObject({ status: 'saved', retrySafe: false, messageId: '<draft@example.com>' });
     expect(mockImapAppendMessage).toHaveBeenCalledOnce();
     const rawMessage: string = mockImapAppendMessage.mock.calls[0][1];
     // body ends with \r\n after joining, then effectiveBody appended — check signature present
@@ -1167,6 +1156,13 @@ describe('MailService createDraft with signature', () => {
     });
     expect(result.draftId).toBeUndefined();
     expect(result.warning).toContain('Do not create another copy');
+  });
+
+  it('returns uncertain APPEND status through the legacy draft wrapper', async () => {
+    mockImapAppendMessage.mockRejectedValueOnce(new Error('connection lost after APPEND'));
+    const service = new MailService(baseAccount, false);
+    await expect(service.createDraft('to@example.com', 'Draft', 'Body'))
+      .resolves.toMatchObject({ status: 'append_outcome_unknown', retrySafe: false, messageId: '<draft@example.com>' });
   });
 });
 
@@ -1260,7 +1256,9 @@ describe('MailService.extractAttachmentText', () => {
     const service = serviceReturning(buildPdf('Invoice 39A total 1234.56'), 'application/pdf');
     const text = await service.extractAttachmentText('1', 'invoice.pdf');
     expect(text).toContain('Invoice 39A total 1234.56');
-  });
+  // The first pdf.js import/worker startup exceeds 5s on fresh Windows CI;
+  // keep the real parser assertion and a finite cold-start budget.
+  }, 30_000);
 
   it('returns text/* attachments as UTF-8', async () => {
     const service = serviceReturning(Buffer.from('plain body'), 'text/plain');

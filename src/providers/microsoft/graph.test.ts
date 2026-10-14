@@ -23,6 +23,53 @@ function message(attachments: MicrosoftMessageContent['attachments'] = []): Micr
 }
 
 describe('MicrosoftGraphClient', () => {
+  it.each(['network', 'server-error', 'invalid-json', 'oversized', 'missing-id'])('preserves Graph draft creation uncertainty after %s', async failure => {
+    for (const operation of ['send', 'reply'] as const) {
+      const fetchMock = vi.fn<MicrosoftFetch>();
+      if (failure === 'network') fetchMock.mockRejectedValue(new Error('lost after upload'));
+      else fetchMock.mockResolvedValue(new Response(failure === 'invalid-json' ? '{broken' : '{}', {
+        status: failure === 'server-error' ? 503 : 200,
+        ...(failure === 'oversized' ? { headers: { 'content-length': String(5 * 1024 * 1024) } } : {}),
+      }));
+      const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+      const input = message([{ name: 'attachment.bin', content: Buffer.alloc(operation === 'send' ? GRAPH_SIMPLE_ATTACHMENT_LIMIT : 1) }]);
+      await expect(operation === 'send' ? client.sendMessage(input) : client.reply('original', input))
+        .rejects.toMatchObject({ kind: 'outcome_unknown', operation: 'createDraft' });
+      expect(fetchMock).toHaveBeenCalledOnce();
+    }
+  });
+  it('does not follow redirects and treats server send failures as ambiguous', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('', { status: 503 }));
+    const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+    await expect(client.sendMessage(message())).rejects.toMatchObject({ kind: 'outcome_unknown' });
+    expect(fetchMock.mock.calls[0][1]?.redirect).toBe('error');
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+  it('rejects oversized message responses without parsing a truncated message', async () => {
+    const client = new MicrosoftGraphClient({ tokenProvider: async () => 'token',
+      fetch: vi.fn<MicrosoftFetch>().mockResolvedValue(new Response('{}', { headers: { 'content-length': String(5 * 1024 * 1024) } })),
+    });
+    await expect(client.getMessage('id')).rejects.toMatchObject({ kind: 'invalid_response' });
+  });
+  it('reads body, recipients and attachment metadata without returning attachment bytes', async () => {
+    const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(JSON.stringify({
+      id: 'one', subject: 'Subject', body: { contentType: 'html', content: '<p>Full body</p>' },
+      from: { emailAddress: { name: 'Sender', address: 'from@example.com' } },
+      toRecipients: [{ emailAddress: { address: 'to@example.com' } }],
+      ccRecipients: [{ emailAddress: { address: 'cc@example.com' } }],
+      hasAttachments: true,
+      attachments: [{ id: 'a1', name: 'a.txt', size: 5, contentBytes: 'c2VjcmV0' }],
+    })));
+    const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+    const result = await client.getMessage('one');
+    expect(result).toMatchObject({ body: { contentType: 'html', content: '<p>Full body</p>' },
+      from: { emailAddress: { name: 'Sender', address: 'from@example.com' } },
+      toRecipients: [{ emailAddress: { address: 'to@example.com' } }],
+      attachments: [{ id: 'a1', name: 'a.txt', size: 5 }],
+    });
+    expect(result.attachments[0]).not.toHaveProperty('contentBytes');
+    expect(requestUrl(fetchMock.mock.calls[0][0]).searchParams.get('$select')).toContain('body');
+  });
   it('sends sub-3 MiB inline attachments in one sendMail request', async () => {
     const fetchMock = vi.fn<MicrosoftFetch>().mockResolvedValue(new Response(null, {
       status: 202,
@@ -246,7 +293,24 @@ describe('MicrosoftGraphClient', () => {
     expect(url.pathname).toBe('/v1.0/users/mailbox%2Balias%40example.com/messages');
     expect(url.searchParams.get('$filter'))
       .toBe("internetMessageId eq '<o''hara+tag@example.com>'");
-    expect(found).toEqual([{ id: 'graph-id', internetMessageId: "<o'hara+tag@example.com>" }]);
+    expect(found).toEqual({ messages: [{ id: 'graph-id', internetMessageId: "<o'hara+tag@example.com>" }], partial: false });
+  });
+
+  it.each(['complete', 'loop', 'failure', 'foreign'])('reports Message-ID lookup pagination honestly: %s', async mode => {
+    let page = 0;
+    const fetchMock = vi.fn<MicrosoftFetch>().mockImplementation(async () => {
+      page++;
+      if (page === 2 && mode === 'failure') return new Response('', { status: 503 });
+      return new Response(JSON.stringify({ value: [{ id: String(page) }],
+        ...(page === 1 || mode === 'loop' ? { '@odata.nextLink': mode === 'foreign'
+          ? 'https://attacker.example/messages' : 'https://graph.microsoft.com/v1.0/me/messages?page=2' } : {}),
+      }));
+    });
+    const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+    const result = await client.findByInternetMessageId('<same@example.com>');
+    expect(result.partial).toBe(mode !== 'complete');
+    expect(result.messages.length).toBe(mode === 'failure' || mode === 'foreign' ? 1 : 2);
+    expect(fetchMock).toHaveBeenCalledTimes(mode === 'foreign' ? 1 : 2);
   });
 
   it('returns a structured partial warning instead of pretending an anchor-only result is complete', async () => {
@@ -292,6 +356,23 @@ describe('MicrosoftGraphClient', () => {
     });
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(requestUrl(fetchMock.mock.calls[1][0]).searchParams.get('$skiptoken')).toBe('next');
+  });
+
+  it.each([false, true])('sorts across pages without an invalid filter/orderby combination (partial=%s)', async (failLast) => {
+    let page = 0;
+    const fetchMock = vi.fn<MicrosoftFetch>().mockImplementation(async input => {
+      const url = requestUrl(input);
+      if (url.searchParams.has('$orderby')) return new Response('InefficientFilter', { status: 400 });
+      page++;
+      if (page === 3 && failLast) return new Response('Unavailable', { status: 503 });
+      return new Response(JSON.stringify({ value: [{ id: String(page), receivedDateTime: `2026-01-0${4 - page}T00:00:00Z` }],
+        ...(page < 3 ? { '@odata.nextLink': `https://graph.microsoft.com/v1.0/me/messages?page=${page + 1}` } : {}),
+      }));
+    });
+    const client = new MicrosoftGraphClient({ fetch: fetchMock, tokenProvider: async () => 'token' });
+    const result = await client.getThread({ id: 'anchor', conversationId: 'thread' });
+    expect(result.messages.map(item => item.id)).toEqual(failLast ? ['2', '1'] : ['3', '2', '1']);
+    expect(result.partial).toBe(failLast);
   });
 
   it('returns accumulated messages as partial when a later thread page fails', async () => {

@@ -25,6 +25,7 @@ import type {
 } from './types.js';
 import { redactMailtrapSecrets } from './redaction.js';
 import { assertKnownMailtrapActionInput } from './validation.js';
+import { classifyMailtrapAction } from './classification.js';
 
 const DEFAULT_ENDPOINTS: MailtrapEndpoints = {
   general: 'https://mailtrap.io',
@@ -53,6 +54,16 @@ export class MailtrapHttpError extends Error {
   ) {
     super(message, options);
     this.name = 'MailtrapHttpError';
+  }
+}
+
+export class MailtrapSendOutcomeUnknownError extends MailtrapHttpError {
+  readonly kind = 'outcome_unknown';
+  readonly retrySafe = false;
+  readonly nextAction = 'Do not resend automatically. Inspect Mailtrap email logs, sandbox messages or campaign state before deciding whether to retry.';
+  constructor(status: number | undefined, cause: unknown) {
+    super('Mailtrap send outcome is unknown; the request may already have been accepted.', status, null, { cause });
+    this.name = 'MailtrapSendOutcomeUnknownError';
   }
 }
 
@@ -183,8 +194,11 @@ export class MailtrapClient {
     input: MailtrapActionInputMap[A],
   ): Promise<MailtrapResult> {
     const spec = this.buildRequest(action, input);
+    const sendsMail = classifyMailtrapAction(action, input).sendsMail;
+    const body = spec.body === undefined ? undefined : JSON.stringify(spec.body);
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let responseStatus: number | undefined;
 
     try {
       const response = await this.fetchImpl(spec.url, {
@@ -194,10 +208,11 @@ export class MailtrapClient {
           Authorization: `Bearer ${this.token}`,
           ...(spec.body === undefined ? {} : { 'Content-Type': 'application/json' }),
         },
-        body: spec.body === undefined ? undefined : JSON.stringify(spec.body),
+        body,
         redirect: 'error',
         signal: controller.signal,
       });
+      responseStatus = response.status;
       const result = await this.readResponse(response);
       if (!response.ok) {
         const safeDetails = typeof result === 'string' || result === null
@@ -213,6 +228,11 @@ export class MailtrapClient {
       }
       return result;
     } catch (error) {
+      // A positive client-error response is a rejection. Transport loss, server
+      // failure, or an unreadable success response cannot prove non-delivery.
+      if (sendsMail && !(responseStatus !== undefined && responseStatus >= 400 && responseStatus < 500)) {
+        throw new MailtrapSendOutcomeUnknownError(responseStatus, error);
+      }
       if (error instanceof MailtrapHttpError) throw error;
       if (controller.signal.aborted) {
         throw new MailtrapHttpError(`Mailtrap request timed out after ${this.timeoutMs}ms`, undefined, null, { cause: error });
@@ -563,6 +583,7 @@ export class MailtrapClient {
   private async readResponse(response: Response): Promise<MailtrapResult> {
     const declaredLength = Number(response.headers.get('content-length'));
     if (Number.isFinite(declaredLength) && declaredLength > this.maxResponseBytes) {
+      await response.body?.cancel();
       throw new MailtrapHttpError(
         `Mailtrap response exceeds the ${this.maxResponseBytes}-byte limit`,
         response.status,

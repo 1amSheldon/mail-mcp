@@ -40,6 +40,32 @@ function executeUnchecked(
 }
 
 describe('MailtrapClient send actions', () => {
+  it.each(['network', 'server', 'invalid-json', 'body-limit'])('marks a dispatched send as uncertain on %s', async failure => {
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      if (failure === 'network') throw new Error('socket reset');
+      if (failure === 'server') return jsonResponse({}, 503);
+      if (failure === 'invalid-json') return new Response('{', { headers: { 'content-type': 'application/json' } });
+      return new Response('large', { headers: { 'content-length': String(20 * 1024 * 1024) } });
+    });
+    await expect(clientWith(fetchMock).execute('send', { operation: 'transactional', message: { text: 'hello' } }))
+      .rejects.toMatchObject({ kind: 'outcome_unknown', retrySafe: false, nextAction: expect.stringContaining('Do not resend') });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it('keeps read transport errors separate from send uncertainty', async () => {
+    const fetchMock = vi.fn().mockRejectedValue(new Error('socket reset'));
+    await expect(clientWith(fetchMock).execute('accounts', { operation: 'list' })).rejects.toMatchObject({ name: 'MailtrapHttpError' });
+  });
+
+  it('reports an expired send timeout as unknown without retrying', async () => {
+    const fetchMock = vi.fn().mockImplementation((_url, init) => new Promise((_resolve, reject) => {
+      init.signal.addEventListener('abort', () => reject(new Error('abort')));
+    }));
+    const client = new MailtrapClient({ token: 'token', fetch: fetchMock as any, requestTimeoutMs: 10 });
+    await expect(client.execute('send', { operation: 'transactional', message: { text: 'hello' } }))
+      .rejects.toMatchObject({ kind: 'outcome_unknown', retrySafe: false });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
   it('routes transactional send with bearer authentication and the exact payload', async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(jsonResponse({ success: true })));
     const client = clientWith(fetchMock);
@@ -89,7 +115,7 @@ describe('MailtrapClient send actions', () => {
       error: 'invalid',
       api_token: 'response-secret',
       nested: { signing_secret: 'webhook-secret' },
-    }, 500));
+    }, 400));
     const client = clientWith(fetchMock);
 
     const failure = client.execute('send', {
@@ -98,7 +124,7 @@ describe('MailtrapClient send actions', () => {
     });
     await expect(failure).rejects.toMatchObject({
       name: 'MailtrapHttpError',
-      status: 500,
+      status: 400,
       details: {
         api_token: '[REDACTED]',
         nested: { signing_secret: '[REDACTED]' },

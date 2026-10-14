@@ -135,6 +135,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
   let shuttingDown = false;
   let closePromise: Promise<void> | undefined;
   let activeRecoveryRequests = 0;
+  let pendingInitializations = 0;
 
   const closeSession = (record: ActiveSession): Promise<void> => {
     if (record.closePromise) return record.closePromise;
@@ -169,7 +170,6 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
     });
-    activeRecoveryRequests++;
     try {
       await mcpServer.connect(transport);
       await transport.handleRequest(req, res, body);
@@ -178,12 +178,21 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         mcpServer.shutdown(),
         transport.close(),
       ]);
-      activeRecoveryRequests--;
     }
   };
 
   const httpServer = createServer(async (req, res) => {
-    const pathname = new URL(req.url ?? '/', `http://${urlHost}`).pathname;
+    try {
+    let pathname: string;
+    try {
+      // Accept origin-form only. Never let a network-path target replace the host.
+      const target = req.url ?? '/';
+      if (!target.startsWith('/') || target.startsWith('//') || target.includes('\\')) throw new Error('Invalid target');
+      pathname = new URL(target, `http://${urlHost}`).pathname;
+    } catch {
+      rpcError(res, 400, 'Invalid request target');
+      return;
+    }
 
     if (pathname === '/health' && req.method === 'GET') {
       json(res, shuttingDown ? 503 : 200, {
@@ -212,63 +221,75 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
       return;
     }
 
-    try {
       const id = sessionIdFrom(req);
       let record = id ? sessions.get(id) : undefined;
 
       if (!record && req.method === 'POST' && !id) {
-        let body: unknown;
+        if (pendingInitializations >= maxSessions) {
+          rpcError(res, 503, 'Too many active MCP sessions');
+          return;
+        }
+        pendingInitializations++;
         try {
-          body = await readJsonBody(req);
-        } catch (error) {
-          respondToBodyError(res, error);
-          return;
-        }
-
-        if (!isInitializeRequest(body)) {
-          rpcError(res, 400, 'Missing MCP session or initialize request');
-          return;
-        }
-
-        if (sessions.size >= maxSessions) {
-          const oldestIdle = Array.from(sessions.values())
-            .filter(session => session.activeRequests === 0)
-            .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
-          if (!oldestIdle) {
-            rpcError(res, 503, 'Too many active MCP sessions');
+          let body: unknown;
+          try {
+            body = await readJsonBody(req);
+          } catch (error) {
+            respondToBodyError(res, error);
             return;
           }
-          await closeSession(oldestIdle);
-        }
 
-        const mcpServer = options.createSession();
-        const sessionId = randomUUID();
-        const transport = new StreamableHTTPServerTransport({
-          sessionIdGenerator: () => sessionId,
-        });
-        record = {
-          id: sessionId,
-          transport,
-          server: mcpServer,
-          activeRequests: 1,
-          lastUsedAt: Date.now(),
-        };
-        sessions.set(sessionId, record);
-        transport.onclose = () => {
-          void closeSession(record!);
-        };
+          if (!isInitializeRequest(body)) {
+            rpcError(res, 400, 'Missing MCP session or initialize request');
+            return;
+          }
 
-        try {
-          await mcpServer.connect(transport);
-          await transport.handleRequest(req, res, body);
-        } catch (error) {
-          await closeSession(record);
-          throw error;
+          let evicted: Promise<void> | undefined;
+          if (sessions.size >= maxSessions) {
+            const oldestIdle = Array.from(sessions.values())
+              .filter(session => session.activeRequests === 0)
+              .sort((a, b) => a.lastUsedAt - b.lastUsedAt)[0];
+            if (!oldestIdle) {
+              rpcError(res, 503, 'Too many active MCP sessions');
+              return;
+            }
+            evicted = closeSession(oldestIdle);
+          }
+
+          const mcpServer = options.createSession();
+          const sessionId = randomUUID();
+          const transport = new StreamableHTTPServerTransport({
+            sessionIdGenerator: () => sessionId,
+          });
+          record = {
+            id: sessionId,
+            transport,
+            server: mcpServer,
+            activeRequests: 1,
+            lastUsedAt: Date.now(),
+          };
+          sessions.set(sessionId, record);
+          transport.onclose = () => {
+            void closeSession(record!);
+          };
+
+          try {
+            // Reserve the replacement before awaiting cleanup of the evicted
+            // session; another initializer must not take that same free slot.
+            await evicted;
+            await mcpServer.connect(transport);
+            await transport.handleRequest(req, res, body);
+          } catch (error) {
+            await closeSession(record);
+            throw error;
+          } finally {
+            record.activeRequests--;
+            record.lastUsedAt = Date.now();
+          }
+          return;
         } finally {
-          record.activeRequests--;
-          record.lastUsedAt = Date.now();
+          pendingInitializations--;
         }
-        return;
       }
 
       if (!record && id && options.recoverUnknownSessions) {
@@ -282,14 +303,20 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
             rpcError(res, 503, 'Too many active recovered MCP requests');
             return;
           }
-          let body: unknown;
+          // Admission must be synchronous, before a slow request body yields.
+          activeRecoveryRequests++;
           try {
-            body = await readJsonBody(req);
-          } catch (error) {
-            respondToBodyError(res, error);
-            return;
+            let body: unknown;
+            try {
+              body = await readJsonBody(req);
+            } catch (error) {
+              respondToBodyError(res, error);
+              return;
+            }
+            await handleRecoveredPost(req, res, body);
+          } finally {
+            activeRecoveryRequests--;
           }
-          await handleRecoveredPost(req, res, body);
           return;
         }
       }
@@ -362,6 +389,7 @@ export async function startHttpHost(options: HttpHostOptions): Promise<HttpHostC
         (
           Array.from(sessions.values()).some(session => session.activeRequests > 0)
           || activeRecoveryRequests > 0
+          || pendingInitializations > 0
         ) &&
         Date.now() < drainDeadline
       ) {

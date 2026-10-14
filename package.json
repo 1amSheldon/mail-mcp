@@ -1,7 +1,7 @@
 {
   "name": "@1amsheldon/mail-mcp",
-  "version": "3.0.0",
-  "description": "Email MCP server for Codex and Claude with IMAP, SMTP, Apple Mail, Microsoft, and Mailtrap",
+  "version": "3.1.0",
+  "description": "Mail MCP: IMAP/SMTP, Zimbra, Apple Mail, Microsoft and Mailtrap for Codex and Claude",
   "keywords": [
     "mcp",
     "mcp-server",
@@ -22,7 +22,8 @@
     "mailtrap",
     "codex",
     "claude",
-    "email-automation"
+    "email-automation",
+    "zimbra"
   ],
   "author": "1amSheldon",
   "license": "MIT",
@@ -46,11 +47,13 @@
   },
   "files": [
     "dist/**/*.js",
-    "skills/mail-mcp/SKILL.md"
+    "skills/mail-mcp/**/*.md"
   ],
   "scripts": {
     "clean": "node scripts/clean.mjs",
-    "build": "npm run clean && tsc",
+    "build": "npm run docs:check && npm run clean && tsc && node scripts/prepare-bin.mjs",
+    "docs:generate": "node scripts/generate-agent-guide.mjs",
+    "docs:check": "node scripts/generate-agent-guide.mjs --check",
     "start": "node dist/index.js",
     "test": "vitest run",
     "check:english": "node scripts/check-english.mjs",
@@ -60,13 +63,15 @@
     "probe:mail-read": "node scripts/probe-mail-read.mjs",
     "probe:draft-workflow": "node scripts/probe-draft-workflow.mjs",
     "backup:windows-service": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/backup-windows-service.ps1",
-    "smoke:import": "node -e \"import('./dist/index.js')\"",
-    "release:check": "npm run build && npm run check:english && npm test && npm run test:integration && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm audit",
+    "smoke:import": "node scripts/smoke-import.mjs",
+    "release:check": "npm run build && npm run check:english && npm test && npm run test:integration && npm run smoke:stdio && npm run smoke:http && npm run smoke:import && npm run smoke:installed && npm audit",
     "prepack": "npm run build",
-    "prepublishOnly": "npm run release:check"
+    "prepublishOnly": "npm run release:check",
+    "smoke:installed": "node scripts/smoke-installed.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
+    "@xmldom/xmldom": "^0.9.12",
     "cross-keychain": "^1.1.0",
     "imapflow": "^1.6.5",
     "mailparser": "^3.9.15",
@@ -90,5 +95,11 @@
   },
   "overrides": {
     "deepmerge-ts": "^8.0.0"
-  }
+  },
+  "contributors": [
+    "starychenko",
+    "honest-magic",
+    "wiederholung",
+    "Patrick Freyer"
+  ]
 }

@@ -1,11 +1,49 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { isVersionNewer, startAutoUpdateMonitor } from './auto-update.js';
+import { fetchLatestPackageVersion, isVersionNewer, startAutoUpdateMonitor } from './auto-update.js';
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
 });
 
 describe('automatic package updates', () => {
+  it('checks the public package registry by default', async () => {
+    vi.useFakeTimers();
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"version":"3.1.1"}'));
+    const onUpdateAvailable = vi.fn();
+    const monitor = startAutoUpdateMonitor({ currentVersion: '3.1.0', intervalMs: 60000, onUpdateAvailable });
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(fetchSpy).toHaveBeenCalledWith('https://registry.npmjs.org/@1amsheldon%2fmail-mcp/latest', {
+      headers: { accept: 'application/json' }, signal: expect.any(AbortSignal),
+    });
+    expect(onUpdateAvailable).toHaveBeenCalledWith('3.1.1');
+    monitor.stop();
+  });
+
+  it.each(['{}', '{"version":42}', '{"version":"invalid"}'])('rejects malformed registry responses: %s', async body => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(body));
+    await expect(fetchLatestPackageVersion()).rejects.toThrow('invalid package version');
+  });
+
+  it('reports registry HTTP failures', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 503 }));
+    await expect(fetchLatestPackageVersion()).rejects.toThrow('HTTP 503');
+  });
+
+  it('does not restart after stopping during an in-flight check', async () => {
+    vi.useFakeTimers();
+    let complete!: (version: string) => void;
+    const onUpdateAvailable = vi.fn();
+    const monitor = startAutoUpdateMonitor({
+      currentVersion: '3.1.0', intervalMs: 60000, onUpdateAvailable,
+      fetchLatestVersion: () => new Promise(resolve => { complete = resolve; }),
+    });
+    await vi.advanceTimersByTimeAsync(60000);
+    monitor.stop();
+    complete('3.1.1');
+    await Promise.resolve();
+    expect(onUpdateAvailable).not.toHaveBeenCalled();
+  });
   it('compares stable semantic versions without downgrading', () => {
     expect(isVersionNewer('1.6.0', '1.5.5')).toBe(true);
     expect(isVersionNewer('2.0.0', '1.99.99')).toBe(true);

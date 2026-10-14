@@ -15,6 +15,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.repository == '1amSheldon/mail-mcp'
     name: Publish package
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -46,4 +47,4 @@ jobs:
         run: npm ci
 
       - name: Publish package
-        run: npm publish
+        run: npm publish --access public --provenance

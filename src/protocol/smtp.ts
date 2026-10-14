@@ -1,4 +1,5 @@
 import nodemailer, { type Transporter } from 'nodemailer';
+import { createConnection, type Socket } from 'node:net';
 import type { EmailAccount } from '../config.js';
 import {
   prepareOutgoingMessage,
@@ -118,9 +119,19 @@ export class SmtpRecipientRejectedError extends Error {
   }
 }
 
+export class SmtpPreflightError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : 'Unable to compose outgoing message', { cause });
+    this.name = 'SmtpPreflightError';
+  }
+}
+
 export class SmtpClient {
   private transporter: Transporter | null = null;
   private connectPromise: Promise<void> | null = null;
+  private connectingTransport: Transporter | null = null;
+  private generation = 0;
+  private readonly sockets = new Set<Socket>();
   private readonly composer: Transporter;
 
   constructor(
@@ -131,6 +142,9 @@ export class SmtpClient {
       streamTransport: true,
       buffer: true,
       newline: 'windows',
+      // All allowed attachment sources have already been resolved to checked bytes.
+      disableFileAccess: true,
+      disableUrlAccess: true,
     } as any);
   }
 
@@ -138,21 +152,39 @@ export class SmtpClient {
     if (this.transporter) return;
     if (this.connectPromise) return this.connectPromise;
 
-    this.connectPromise = this.createVerifiedTransport();
+    const pending = this.createVerifiedTransport(this.generation);
+    this.connectPromise = pending;
     try {
-      await this.connectPromise;
+      await pending;
     } finally {
-      this.connectPromise = null;
+      if (this.connectPromise === pending) this.connectPromise = null;
     }
   }
 
-  private async createVerifiedTransport(): Promise<void> {
+  private assertGeneration(generation: number): void {
+    if (generation !== this.generation) throw new Error('SMTP connection was cancelled');
+  }
+
+  private async createVerifiedTransport(generation: number): Promise<void> {
     const authConfig: Record<string, unknown> = { user: this.account.user };
 
     if (this.account.authType === 'oauth2') {
-      const accessToken = await getValidAccessToken(this.account.id);
       authConfig.type = 'OAuth2';
-      authConfig.accessToken = accessToken;
+      authConfig.provisionCallback = (
+        _user: string,
+        renew: boolean,
+        callback: (error: Error | null, token?: string, expires?: number) => void,
+      ) => {
+        if (generation !== this.generation) { callback(new Error('SMTP connection was cancelled')); return; }
+        void getValidAccessToken(this.account.id, renew).then(
+          // Token caching and expiry belong to our credential store. Ask it on
+          // every new SMTP connection, including after workstation sleep.
+          token => generation === this.generation
+            ? callback(null, token, Date.now() - 1)
+            : callback(new Error('SMTP connection was cancelled')),
+          error => callback(error instanceof Error ? error : new Error('OAuth2 token refresh failed')),
+        );
+      };
     } else {
       const password = await loadCredentials(this.account.id);
       if (!password) {
@@ -160,6 +192,7 @@ export class SmtpClient {
       }
       authConfig.pass = password;
     }
+    this.assertGeneration(generation);
 
     const smtpPort = this.account.smtpPort || 465;
     const smtpHost = this.account.smtpHost || this.account.host;
@@ -173,24 +206,51 @@ export class SmtpClient {
       port: smtpPort,
       ...smtpTransportSecurityOptions(securityMode),
       auth: authConfig,
+      // Non-pooled Nodemailer close() does not destroy verify/send sockets.
+      // Own their lifecycle while leaving TLS negotiation and validation to Nodemailer.
+      getSocket: (_options: unknown, callback: (error: Error | null, value?: { connection: Socket }) => void) => {
+        if (generation !== this.generation) { callback(new Error('SMTP connection was cancelled')); return; }
+        const socket = createConnection({ host: smtpHost, port: smtpPort });
+        this.sockets.add(socket);
+        socket.once('close', () => this.sockets.delete(socket));
+        const timeout = setTimeout(() => socket.destroy(new Error('SMTP connection timed out')), 30_000);
+        const failed = (error: Error) => { clearTimeout(timeout); callback(error); };
+        socket.once('error', failed);
+        socket.once('connect', () => {
+          clearTimeout(timeout);
+          socket.removeListener('error', failed);
+          if (generation !== this.generation) { socket.destroy(); callback(new Error('SMTP connection was cancelled')); return; }
+          callback(null, { connection: socket });
+        });
+      },
     });
 
+    this.connectingTransport = candidate;
     try {
       await candidate.verify();
+      this.assertGeneration(generation);
       this.transporter = candidate;
     } catch (error) {
       if (typeof (candidate as any).close === 'function') {
         (candidate as any).close();
       }
+      this.assertGeneration(generation);
       throw error;
+    } finally {
+      if (this.connectingTransport === candidate) this.connectingTransport = null;
     }
   }
 
   disconnect(): void {
-    if (this.transporter && typeof (this.transporter as any).close === 'function') {
-      (this.transporter as any).close();
+    this.generation++;
+    for (const socket of this.sockets) socket.destroy(new Error('SMTP connection was cancelled'));
+    this.sockets.clear();
+    this.connectPromise = null;
+    for (const transport of new Set([this.transporter, this.connectingTransport])) {
+      if (transport && typeof (transport as any).close === 'function') transport.close();
     }
     this.transporter = null;
+    this.connectingTransport = null;
   }
 
   async send(
@@ -239,16 +299,24 @@ export class SmtpClient {
       throw new Error('SMTP client not connected');
     }
 
-    const { rawMessage, messageId, envelope } = await this.composeMessage(message);
-
-    return this.sendRawMessage({ rawMessage, messageId, envelope });
+    let composed: SmtpComposedMessage;
+    const generation = this.generation;
+    try {
+      composed = await this.composeMessage(message);
+      this.assertGeneration(generation);
+    } catch (error) {
+      // No SMTP transaction has started; callers can correct this without delivery ambiguity.
+      throw new SmtpPreflightError(error);
+    }
+    return this.sendRawMessage(composed);
   }
 
   async sendRawMessage({ rawMessage, messageId, envelope }: SmtpComposedMessage): Promise<SmtpSendResult> {
     if (!this.transporter) throw new Error('SMTP client not connected');
+    const transport = this.transporter;
 
     try {
-      const info = await this.transporter.sendMail({
+      const info = await transport.sendMail({
         raw: rawMessage,
         envelope: {
           ...envelope,
@@ -263,7 +331,7 @@ export class SmtpClient {
         rawMessage,
       };
     } catch (error) {
-      this.disconnect();
+      if (this.transporter === transport) this.disconnect();
       const reason = error instanceof Error ? error.message : String(error);
       const smtpError = error && typeof error === 'object'
         ? error as { code?: unknown; command?: unknown; rejected?: unknown }
