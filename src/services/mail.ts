@@ -38,6 +38,7 @@ import {
   normalizeSearchQuery,
   searchPaginationKey,
   type SearchEmailsQuery,
+  type ImapSearchCriteria,
 } from '../domain/mail-search.js';
 
 export type { SearchEmailsQuery } from '../domain/mail-search.js';
@@ -223,7 +224,7 @@ export class MailService {
   }
 
   async listEmailsPage(options: ListEmailsPageOptions = {}) {
-    return this.uidPage({ all: true }, options, JSON.stringify({ kind: 'list', headerOnly: options.headerOnly ?? false }));
+    return this.uidPage([{ all: true }], options, JSON.stringify({ kind: 'list', headerOnly: options.headerOnly ?? false }));
   }
 
   async searchEmailsPage(query: SearchEmailsQuery, options: SearchEmailsPageOptions = {}) {
@@ -231,7 +232,7 @@ export class MailService {
     return this.uidPage(buildSearchCriteria(normalizedQuery), options, searchPaginationKey(normalizedQuery, options.headerOnly ?? false));
   }
 
-  private async uidPage(criteria: object, options: ListEmailsPageOptions, queryKey: string) {
+  private async uidPage(criteria: ImapSearchCriteria, options: ListEmailsPageOptions, queryKey: string) {
     const folder = options.folder ?? 'INBOX';
     const limit = options.limit ?? 10;
     if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new ValidationError('Pagination limit must be between 1 and 500');

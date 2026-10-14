@@ -8,15 +8,55 @@ import {
 } from './mail-search.js';
 
 const require = createRequire(import.meta.url);
+type Attribute = { value: string } | Attribute[];
 const { searchCompiler } = require('imapflow/lib/search-compiler.js') as {
-  searchCompiler: (connection: unknown, query: unknown) => Array<{ value?: string }>;
+  searchCompiler: (connection: unknown, query: unknown) => Attribute[];
 };
+const serialize = require('imapflow/lib/handler/imap-compiler.js') as (command: unknown) => Promise<Buffer[]>;
+const parse = require('imapflow/lib/handler/imap-parser.js') as (command: Buffer) => Promise<{ attributes: Attribute[] }>;
 
-function compile(query: SearchEmailsQuery): Array<{ value?: string }> {
-  return searchCompiler(
-    { capabilities: new Map(), enabled: new Set(), mailbox: { flags: new Set() } },
-    buildSearchCriteria(query),
-  );
+async function compile(query: SearchEmailsQuery) {
+  return Promise.all(buildSearchCriteria(query).map(async criteria => {
+    const attributes = searchCompiler(
+      { capabilities: new Map(), enabled: new Set(), mailbox: { flags: new Set() } },
+      { ...criteria, uid: '10:30' },
+    );
+    const wire = Buffer.concat(await serialize({ tag: 'T', command: 'UID SEARCH', attributes }));
+    return { wire: wire.toString(), attributes: (await parse(wire)).attributes };
+  }));
+}
+
+interface Fixture { uid: number; subject: string; body: string; seen: boolean; flagged: boolean }
+/** Evaluate the serialized prefix grammar, rather than counting compiler tokens. */
+function matches(attributes: Attribute[], message: Fixture): boolean {
+  let position = 0;
+  const value = () => {
+    const token = attributes[position++];
+    if (!token || Array.isArray(token)) throw new Error('Missing search value');
+    return token.value;
+  };
+  const key = (): boolean => {
+    const token = attributes[position++];
+    if (Array.isArray(token)) return matches(token, message);
+    if (!token) throw new Error('Missing search key');
+    switch (token.value.toUpperCase()) {
+      case 'ALL': return true;
+      case 'NOT': return !key();
+      case 'OR': { const left = key(); const right = key(); return left || right; }
+      case 'SUBJECT': return message.subject.includes(value());
+      case 'BODY': return message.body.includes(value());
+      case 'TEXT': return (message.subject + ' ' + message.body).includes(value());
+      case 'SEEN': return message.seen;
+      case 'UNSEEN': return !message.seen;
+      case 'FLAGGED': return message.flagged;
+      case 'UNFLAGGED': return !message.flagged;
+      case 'UID': { const [low, high] = value().split(':').map(Number); return message.uid >= low && message.uid <= high; }
+      default: throw new Error('Unexpected search key ' + token.value);
+    }
+  };
+  const results: boolean[] = [];
+  while (position < attributes.length) results.push(key());
+  return results.every(Boolean);
 }
 
 describe('mail search query normalization', () => {
@@ -39,9 +79,9 @@ describe('mail search query normalization', () => {
   });
 
   it('preserves legacy keywords as a BODY substring even with a new scope', () => {
-    expect(buildSearchCriteria({ keywords: 'invoice', keywordScope: 'subject' })).toEqual({
+    expect(buildSearchCriteria({ keywords: 'invoice', keywordScope: 'subject' })).toEqual([{
       body: 'invoice',
-    });
+    }]);
   });
 
   it('rejects malformed and over-bounded keyword arrays', () => {
@@ -81,54 +121,72 @@ describe('mail search query normalization', () => {
 });
 
 describe('IMAP search criteria composition', () => {
-  it('uses server-side OR, De Morgan AND, NOT, and status filters', () => {
-    const criteria = buildSearchCriteria({
+  it('serializes required terms and individual exclusions without nested NOT or a mixed OR command', async () => {
+    const compiled = await compile({
       keywordsAll: ['alpha', 'beta'],
       keywordsAny: ['red', 'blue'],
-      excludeKeywords: ['spam'],
+      excludeKeywords: ['spam', 'junk'],
       keywordScope: 'all',
       unread: true,
       flagged: false,
     });
-    expect(criteria).toEqual({
-      flagged: false,
-      not: {
-        or: [
-          { not: { text: 'alpha' } },
-          { not: { text: 'beta' } },
-          { text: 'spam' },
-        ],
-      },
-      or: [{ text: 'blue' }, { text: 'red' }],
-      seen: false,
-    });
-
-    const compiled = compile({
-      keywordsAll: ['alpha', 'beta'],
-      keywordsAny: ['red', 'blue'],
-      excludeKeywords: ['spam'],
-      keywordScope: 'all',
-      unread: true,
-      flagged: false,
-    });
-    const values = compiled.map(attribute => attribute.value);
-    expect(values).toContain('UNSEEN');
-    expect(values).toContain('UNFLAGGED');
-    expect(values.filter(value => value === 'OR').length).toBe(3);
-    expect(values).toEqual(expect.arrayContaining(['TEXT', 'alpha', 'beta', 'red', 'blue', 'spam']));
+    expect(compiled.map(command => command.wire)).toEqual([
+      'T UID SEARCH UNSEEN UNFLAGGED TEXT alpha TEXT beta NOT TEXT junk NOT TEXT spam UID 10:30',
+      'T UID SEARCH OR TEXT blue TEXT red UID 10:30',
+    ]);
+    expect((await compile({ keywordsAll: ['alpha'], keywordScope: 'subject' }))[0].wire)
+      .toBe('T UID SEARCH SUBJECT alpha UID 10:30');
   });
 
-  it('uses BODY or SUBJECT criteria for scoped any/excluded terms', () => {
-    expect(buildSearchCriteria({
-      keywordsAny: ['alpha'],
-      excludeKeywords: ['spam'],
-      keywordScope: 'subject',
-    })).toEqual({
-      not: { subject: 'spam' },
-      or: [{ subject: 'alpha' }],
-    });
-    expect(buildSearchCriteria({ keywordsAll: ['alpha', 'beta'] })).toEqual({
-      not: { or: [{ not: { body: 'alpha' } }, { not: { body: 'beta' } }] },
-    });
+  it.each(['body', 'subject', 'all'] as const)('preserves the complete serialized predicate truth table for %s scope', async keywordScope => {
+    const queries: SearchEmailsQuery[] = [
+      { keywordsAll: ['alpha'] },
+      { keywordsAll: ['alpha', 'beta'] },
+      { keywordsAny: ['red', 'blue'] },
+      { subject: 'ordinary', keywordsAny: ['red', 'blue'] },
+      { keywordsAll: ['alpha', 'beta'], keywordsAny: ['red', 'blue'], excludeKeywords: ['spam', 'junk'], unread: true, flagged: false },
+      { keywords: 'legacy', subject: 'ordinary', keywordsAll: ['alpha', 'beta'], keywordsAny: ['red', 'blue'], excludeKeywords: ['spam', 'junk'] },
+      { keywordsAny: ['alpha'], excludeKeywords: ['spam', 'junk'] },
+      { excludeKeywords: ['spam', 'junk'] },
+    ];
+    const terms = ['alpha', 'beta', 'red', 'blue', 'spam', 'junk'];
+    for (const query of queries) {
+      const commands = await compile({ ...query, keywordScope });
+      expect(commands.length).toBeLessThanOrEqual(2);
+      for (let mask = 0; mask < 64; mask++) {
+        const text = terms.filter((_term, index) => mask & (1 << index)).join(' ');
+        const bodyMask = ((mask << 1) | (mask >> 5)) & 63;
+        const bodyText = terms.filter((_term, index) => bodyMask & (1 << index)).join(' ');
+        for (const uid of [9, 20, 31]) {
+          for (const [seen, flagged] of [[false, false], [true, false], [false, true], [true, true]]) {
+            const message: Fixture = { uid, subject: (mask % 3 ? 'ordinary ' : 'other ') + text, body: (mask % 5 ? 'legacy ' : 'other ') + bodyText, seen, flagged };
+            const scoped = keywordScope === 'subject' ? message.subject : keywordScope === 'body' ? message.body : message.subject + ' ' + message.body;
+            const expected = uid === 20
+              && (query.keywordsAll ?? []).every(term => scoped.includes(term))
+              && (!query.keywordsAny?.length || query.keywordsAny.some(term => scoped.includes(term)))
+              && (query.excludeKeywords ?? []).every(term => !scoped.includes(term))
+              && (query.unread === undefined || !message.seen === query.unread)
+              && (query.flagged === undefined || message.flagged === query.flagged)
+              && (!query.keywords || message.body.includes(query.keywords))
+              && (!query.subject || message.subject.includes(query.subject));
+            expect(commands.every(command => matches(command.attributes, message)), JSON.stringify({ query, keywordScope, message })).toBe(expected);
+          }
+        }
+      }
+    }
+  });
+
+  it('keeps ordinary and unconstrained Any searches to one command, including twenty alternatives', async () => {
+    expect(buildSearchCriteria({ subject: 'ordinary' })).toEqual([{ subject: 'ordinary' }]);
+    expect(buildSearchCriteria({})).toEqual([{ all: true }]);
+    const query = { keywordsAny: ['alpha', ...Array.from({ length: 19 }, (_item, index) => 'term' + index)] };
+    const criteria = buildSearchCriteria(query);
+    expect(criteria).toHaveLength(1);
+    expect(criteria[0].or).toHaveLength(20);
+    const commands = await compile(query);
+    expect(commands).toHaveLength(1);
+    const message = { uid: 20, subject: '', body: 'alpha', seen: false, flagged: false };
+    expect(matches(commands[0].attributes, message)).toBe(true);
+    expect(matches(commands[0].attributes, { ...message, body: 'other' })).toBe(false);
   });
 });
