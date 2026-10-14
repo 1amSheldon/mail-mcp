@@ -21,6 +21,25 @@ function fakeChild(): FakeChild {
 }
 
 describe('OsascriptRunner', () => {
+  it('bounds combined stdout and stderr and stops a broken input pipe', async () => {
+    const child = fakeChild();
+    const runner = new OsascriptRunner({ platform: 'darwin', maxOutputBytes: 8,
+      spawnProcess: () => child as unknown as ChildProcessWithoutNullStreams });
+    const result = runner.run('return "[]"');
+    child.stdout.write('1234');
+    child.stderr.write('56789');
+    await expect(result).rejects.toMatchObject({ code: 'OUTPUT_LIMIT' });
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    child.emit('close', 1, null);
+
+    const broken = fakeChild();
+    const brokenRunner = new OsascriptRunner({ platform: 'darwin', spawnProcess: () => broken as unknown as ChildProcessWithoutNullStreams });
+    const failure = brokenRunner.run('script');
+    broken.stdin.emit('error', new Error('EPIPE'));
+    await expect(failure).rejects.toMatchObject({ code: 'EXECUTION_FAILED' });
+    expect(broken.kill).toHaveBeenCalledWith('SIGTERM');
+    broken.emit('close', 1, null);
+  });
   it('writes the program to stdin and captures stdout', async () => {
     const child = fakeChild();
     const input: Buffer[] = [];

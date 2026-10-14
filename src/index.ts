@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { realpathSync } from 'node:fs';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
@@ -17,6 +18,7 @@ import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { getAccounts, getConfiguredAccounts } from './config.js';
 import { handleAccountsCommand } from './cli/accounts.js';
+import { handleDraftStateCommand } from './cli/draft-state.js';
 import { getClaudeConfigPath, installClaude } from './cli/install-claude.js';
 import { installClaudeCode } from './cli/install-claude-code.js';
 import { installCodexBundle } from './cli/install-codex.js';
@@ -65,15 +67,17 @@ import {
 } from './providers/runtime.js';
 import type { MailtrapAction } from './providers/mailtrap/types.js';
 import { AppleMailError } from './providers/apple-mail/errors.js';
-import { MailtrapHttpError } from './providers/mailtrap/client.js';
+import { MailtrapHttpError, MailtrapSendOutcomeUnknownError } from './providers/mailtrap/client.js';
 import { MicrosoftProviderError } from './providers/microsoft/common.js';
+import { ZimbraError } from './providers/zimbra/session.js';
+import type { ZimbraReadOperation, ZimbraWriteOperation } from './providers/zimbra/operations.js';
 import type { OutgoingAttachment } from './domain/outgoing-message.js';
 import { validateOAuth2TokenEndpoint } from './security/oauth2.js';
 import {
   getMailAgentGuidePrompt,
   MAIL_SERVER_INSTRUCTIONS,
-  MAIL_AGENT_GUIDE_PROMPT,
-  MAIL_AGENT_GUIDE_RESOURCE,
+  MAIL_DOCUMENTATION_PROMPTS,
+  MAIL_DOCUMENTATION_RESOURCES,
   readMailAgentGuideResource,
 } from './mcp/agent-guide.js';
 
@@ -98,6 +102,8 @@ export function parseCliArgs(args: string[]) {
       'install-claude-code': { type: 'boolean', default: false },
       'install-codex': { type: 'boolean', default: false },
       'install-codex-local': { type: 'boolean', default: false },
+      'skip-skill': { type: 'boolean', default: false },
+      'replace-skill': { type: 'boolean', default: false },
       'install-codex-stdio': { type: 'boolean', default: false },
       'auto-update-seconds': { type: 'string' },
       'version': { type: 'boolean', default: false },
@@ -123,6 +129,7 @@ export function parseAllowedTools(raw: string | undefined): Set<string> | undefi
 function formatDeliveryResult(result: { status?: unknown }) {
   const isError = result.status === 'smtp_rejected' ||
     result.status === 'smtp_connection_failed' ||
+    result.status === 'smtp_preflight_failed' ||
     result.status === 'smtp_outcome_unknown';
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(result, null, 2) }],
@@ -138,6 +145,19 @@ function requireObject(value: unknown, field: string): Record<string, unknown> {
 }
 
 function outgoingMessageFromArgs(args: Record<string, unknown>): MailSendMessage {
+  for (const field of ['to', 'subject', 'body', 'textBody', 'htmlBody', 'cc', 'bcc', 'replyTo', 'from']) {
+    if (args[field] !== undefined && typeof args[field] !== 'string') {
+      throw new Error(`${field} must be a string`);
+    }
+  }
+  for (const field of ['isHtml', 'includeSignature']) {
+    if (args[field] !== undefined && typeof args[field] !== 'boolean') {
+      throw new Error(`${field} must be a boolean`);
+    }
+  }
+  if (args.attachments !== undefined && !Array.isArray(args.attachments)) {
+    throw new Error('attachments must be an array');
+  }
   const body = args.body as string | undefined;
   const isHtml = args.isHtml === true;
   const text = (args.textBody as string | undefined) ?? (!isHtml ? body : undefined);
@@ -166,19 +186,19 @@ function usesExtendedOutgoingArgs(args: Record<string, unknown>): boolean {
     || args.attachments !== undefined;
 }
 
-function formatProviderResult(result: unknown, uri: string) {
+function formatProviderResult(result: unknown, uri: string, mediaType = 'application/octet-stream') {
   if (result instanceof Uint8Array) {
     return {
       content: [
         {
           type: 'text' as const,
-          text: JSON.stringify({ bytes: result.byteLength, mediaType: 'application/octet-stream' }, null, 2),
+          text: JSON.stringify({ bytes: result.byteLength, mediaType }, null, 2),
         },
         {
           type: 'resource' as const,
           resource: {
             uri,
-            mimeType: 'application/octet-stream',
+            mimeType: mediaType,
             blob: Buffer.from(result).toString('base64'),
           },
         },
@@ -194,19 +214,38 @@ function formatProviderResult(result: unknown, uri: string) {
 }
 
 function providerErrorMessage(error: unknown): string {
+  if (error instanceof ZimbraError) return JSON.stringify({ provider: 'zimbra', status: error.code.toLowerCase(),
+    retrySafe: ['INVALID_INPUT', 'AUTH_REQUIRED', 'AUTH_FAILED', 'TWO_FACTOR_REQUIRED'].includes(error.code), message: error.message,
+    nextAction: ['AUTH_REQUIRED', 'AUTH_FAILED', 'TWO_FACTOR_REQUIRED'].includes(error.code) ? 'Run accounts login ACCOUNT_ID locally. Never paste credentials or OTPs into chat.'
+      : error.code === 'OUTCOME_UNKNOWN' ? 'Inspect the current server state. Never retry this write automatically.'
+        : error.code === 'ACCESS_DENIED' ? 'Review account permissions and server access policy before retrying.' : 'Review the input and server policy.' });
   if (error instanceof ProviderRuntimeError) {
     return `[${error.code}] ${error.message}`;
   }
   if (error instanceof AppleMailError) {
+    if (error.code === 'OUTCOME_UNKNOWN') {
+      return JSON.stringify({ provider: 'apple-mail', status: 'outcome_unknown', retrySafe: false,
+        nextAction: 'Do not resend automatically. Check Outbox and Sent in Mail.app before deciding whether to retry.' });
+    }
     const safeMessage = error.code === 'EXECUTION_FAILED'
       ? 'Apple Mail automation failed. Check Mail.app state and macOS Automation permissions.'
       : error.message;
     return `[${error.code}] ${safeMessage}`;
   }
   if (error instanceof MicrosoftProviderError) {
+    if (error.kind === 'outcome_unknown') {
+      return JSON.stringify({ provider: error.provider, status: 'outcome_unknown', retrySafe: false,
+        ...(error.requestId ? { requestId: error.requestId } : {}),
+        ...(error.draftId ? { draftId: error.draftId } : {}),
+        ...(error.operation === 'createDraft' ? { operation: 'createDraft', deliveryAttempted: false } : {}),
+        nextAction: error.operation === 'createDraft'
+          ? 'Do not create another draft automatically. Delivery was not attempted. Inspect Drafts for the saved copy before deciding whether to retry.'
+          : 'Do not resend automatically. Inspect Sent items and provider delivery logs before deciding whether to retry.' });
+    }
     const metadata = [
       error.status !== undefined ? `HTTP ${error.status}` : undefined,
       error.requestId ? `request ${error.requestId}` : undefined,
+      error.draftId ? `draft ${error.draftId}` : undefined,
     ].filter(Boolean).join(', ');
     if (error.kind === 'validation' || error.kind === 'invalid_response') {
       return `[${error.provider}:${error.kind}] ${error.message}`;
@@ -214,6 +253,10 @@ function providerErrorMessage(error: unknown): string {
     return `[${error.provider}:${error.kind}] Provider request failed${metadata ? ` (${metadata})` : ''}.`;
   }
   if (error instanceof MailtrapHttpError) {
+    if (error instanceof MailtrapSendOutcomeUnknownError) {
+      return JSON.stringify({ provider: 'mailtrap', status: error.kind, retrySafe: false,
+        ...(error.status ? { httpStatus: error.status } : {}), nextAction: error.nextAction });
+    }
     return `[mailtrap${error.status ? `:${error.status}` : ''}] ${error.message}`;
   }
   return error instanceof Error ? error.message : String(error);
@@ -234,6 +277,9 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
       return `Send email to ${args.to as string} with subject '${args.subject as string}'`;
     case 'create_draft':
       return `Save draft to ${args.to as string} with subject '${args.subject as string}'`;
+    case 'create_reply_draft':
+    case 'create_reply_all_draft':
+      return `Save ${toolName === 'create_reply_all_draft' ? 'reply-all' : 'reply'} draft for ${args.locator as string} without sending`;
     case 'update_draft':
       return `Update server draft ${args.draftId ?? args.locator}`;
     case 'send_draft':
@@ -301,8 +347,63 @@ function buildConfirmationDescription(toolName: string, args: Record<string, unk
     case 'delete_filter':
       return `Delete SIEVE filter '${args.name as string}' on account ${args.accountId as string}`;
     case 'apple_mail_mutate':
+      if (['createRule', 'updateRule', 'deleteRule'].includes(args.operation as string)) {
+        return `Execute ${args.operation as string} on GLOBAL Apple Mail rules affecting ALL Mail.app accounts (configured access: ${args.accountId as string})`;
+      }
+      return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
     case 'microsoft_mail_send':
       return `Execute ${args.operation as string} for provider account ${args.accountId as string}`;
+    case 'zimbra_mail_mutate': {
+      const input = args.input && typeof args.input === 'object' && !Array.isArray(args.input)
+        ? args.input as Record<string, unknown>
+        : {};
+      const operation = String(args.operation);
+      // Only describe action metadata, never message bodies or authentication material.
+      const details = [
+        'draftId', 'sendAt', 'messageIds', 'folderId', 'tagId', 'tagName', 'name', 'color',
+        'to', 'cc', 'bcc', 'subject', 'originalMessageId', 'replyType', 'attachOriginal', 'quoteOriginal',
+        'parentFolderId', 'contactId', 'contactIds', 'signatureId', 'view', 'recursive', 'flagged', 'spam',
+        'mountpointId', 'remoteFolderId', 'owner', 'permissions', 'granteeId', 'expiresAt',
+        'documentId', 'expectedVersion', 'restoreVersion', 'locked', 'enabled',
+        'appointmentId', 'taskId', 'itemId', 'kind', 'start', 'endExclusive', 'due', 'notifyAttendees', 'status', 'percentComplete',
+        'invitationId', 'messageId', 'proposerEmail', 'component', 'expectedModSequence', 'expectedRevision', 'instance', 'range', 'allowExceptionReset', 'response', 'notifyOrganizer',
+      ].flatMap(key => input[key] === undefined ? [] : [`${key}=${JSON.stringify(input[key])}`]);
+      if (operation === 'markRead') details.push(input.read === false ? 'mark as unread' : 'mark as read');
+      if (operation === 'sendDraft') details.push('send the latest server draft, including its current recipients and content');
+      if (operation === 'scheduleDraft') details.push('schedule native delivery of this server draft; later webmail edits can change what is sent');
+      if (operation === 'cancelScheduledDraft') details.push('clear scheduled delivery while preserving draft MIME; cannot recall a send already started');
+      if (operation === 'updateDraft') details.push(input.changes ? 'patch supplied draft fields; preserve omitted fields and attachments' : 'replace draft contents with the supplied recipients and body; preserve omitted attachments');
+      if (operation === 'moveToTrash') details.push('move messages to Trash');
+      if (operation === 'deleteFolder') details.push('delete the folder, its descendants and contents');
+      if (operation === 'emptyFolder') details.push('delete folder contents');
+      if (operation === 'grantFolderAccess' || operation === 'grantDocumentAccess') {
+        const target = input.grantee as Record<string, unknown> | undefined;
+        details.push('change sharing permissions', `grantee=${JSON.stringify({ type: target?.type, id: target?.id, name: target?.name, email: target?.email })}`);
+      }
+      if (operation === 'removeMountpoint') details.push('remove local link to the shared folder');
+      if (operation === 'sendShareNotification') details.push('send a sharing email to the listed recipients');
+      if (operation === 'deleteDocument') details.push('delete the document and its retained revisions');
+      if (operation === 'restoreDocumentRevision') details.push('create a new current revision from historical content and description');
+      if (operation === 'importICalendar') details.push('import calendar content, including embedded alarms; may update existing items by UID and partially succeed');
+      if (operation === 'forwardAppointment') details.push('forward the selected meeting to listed recipients and permit native organizer notification');
+      if (operation === 'counterAppointment') details.push('send the organizer a proposed new time/location; does not reschedule the meeting');
+      if (operation === 'forwardInboxInvitation') details.push('forward all appointment components in the message and permit native organizer notification');
+      if (operation === 'replyToInboxInvitation') details.push(input.notifyOrganizer === false ? 'record participation and permit native calendar creation/update including alarms; no organizer reply' : 'reply to organizer and permit native calendar creation/update including alarms');
+      if (operation === 'declineCounterProposal') details.push('send rejection of the selected incoming time proposal to its proposer; does not change the meeting');
+      if (Array.isArray(input.attachments)) details.push(`newAttachmentCount=${input.attachments.length}`);
+      const calendarChanges = input.changes as Record<string, unknown> | undefined;
+      if (calendarChanges && Array.isArray(calendarChanges.attachments)) details.push(`replace attachments with ${calendarChanges.attachments.length} supplied files`);
+      if (operation === 'cancelAppointment' || operation === 'cancelTask') details.push('cancel selected calendar scope and permit native attendee cancellation emails');
+      if (operation === 'replyToInvitation') details.push(input.notifyOrganizer === false ? 'record local participation only' : 'reply to the calendar organizer');
+      if (['updateAppointment', 'updateTask', 'createAppointmentException', 'createTaskException'].includes(operation)) details.push(input.notifyAttendees === true ? 'update calendar content and notify affected attendees' : 'patch calendar content without invitation emails; edits requiring cancellation notices are refused');
+      if (operation === 'createAppointment' || operation === 'createTask') {
+        details.push(input.notifyAttendees === true ? 'send invitations to supplied attendees' : 'save without invitation emails');
+        if (Array.isArray(input.attendees)) details.push(`attendeeEmails=${JSON.stringify(input.attendees.map(a => (a as Record<string, unknown>).email))}`);
+        if (Array.isArray(input.alarms)) details.push(`emailAlarmRecipients=${JSON.stringify(input.alarms.filter(a => (a as Record<string, unknown>).type === 'email').map(a => (a as Record<string, unknown>).to))}`);
+      }
+      if (operation === 'deleteMessages' || operation === 'deleteContacts') details.push('delete selected items; recovery depends on server retention');
+      return `Execute Zimbra ${operation} for account ${args.accountId as string}${details.length ? ` (${details.join(', ')})` : ''}`;
+    }
     case 'mailtrap_mutate': {
       const input = args.input && typeof args.input === 'object' && !Array.isArray(args.input)
         ? args.input as Record<string, unknown>
@@ -440,6 +541,10 @@ export class MailMCPServer {
       await service.connect();
       if (closed) throw new Error('IMAP closed during connection');
       if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
+      const current = (await getAccounts()).find(candidate => candidate.id === accountId);
+      if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
+      if (JSON.stringify(current) !== JSON.stringify(account)) throw new Error('Account configuration changed during connection');
+      this.runtimeState.serviceConfigurations.set(accountId, JSON.stringify(account));
       this.services.set(accountId, service);
       return service;
     } catch (error) {
@@ -451,9 +556,17 @@ export class MailMCPServer {
 
   private async getService(accountId: string): Promise<MailService> {
     if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
-    if (this.services.has(accountId)) {
-      return this.services.get(accountId)!;
+    const account = (await getAccounts()).find(candidate => candidate.id === accountId);
+    if (this.runtimeState.isShuttingDown) throw new Error('Mail service is shutting down');
+    const cached = this.services.get(accountId);
+    if (cached && (!account || this.runtimeState.serviceConfigurations.get(accountId) !== JSON.stringify(account))) {
+      // Revoke the cached policy before awaiting disconnect so concurrent calls cannot reuse it.
+      this.services.delete(accountId);
+      this.runtimeState.serviceConfigurations.delete(accountId);
+      await cached.disconnect();
     }
+    if (!account) throw new Error(`Account ${accountId} not found in configuration.`);
+    if (this.services.has(accountId)) return this.services.get(accountId)!;
     const existingCreation = this.serviceCreations.get(accountId);
     if (existingCreation) return existingCreation;
 
@@ -644,6 +757,18 @@ export class MailMCPServer {
         }
       }
 
+      if (name === 'zimbra_mail_query' || name === 'zimbra_mail_mutate') {
+        try {
+          const input = requireObject(args.input, 'input');
+          const result = name === 'zimbra_mail_query'
+            ? await this.providerRuntime.executeZimbraRead(args.accountId as string, args.operation as ZimbraReadOperation, input)
+            : await this.providerRuntime.executeZimbraWrite(args.accountId as string, args.operation as ZimbraWriteOperation, input);
+          return formatProviderResult(result,
+            `zimbra-result://${encodeURIComponent(args.accountId as string)}/${encodeURIComponent(String(args.operation))}`,
+            args.operation === 'exportICalendar' ? 'text/calendar' : undefined);
+        } catch (error) { throw new Error(providerErrorMessage(error), { cause: error }); }
+      }
+
       if (name === 'microsoft_mail_query' || name === 'microsoft_mail_send') {
         const accountId = args.accountId as string;
         const input = requireObject(args.input, 'input');
@@ -789,6 +914,7 @@ export class MailMCPServer {
             ...(args.bcc ? { bcc: args.bcc as string } : {}),
             includeSignature: args.includeSignature !== false,
             includeOriginalAttachments: args.includeOriginalAttachments === true,
+            ...(args.attachments !== undefined ? { attachments: args.attachments as OutgoingAttachment[] } : {}),
           },
         );
         return trackResult(formatDeliveryResult(result));
@@ -923,7 +1049,8 @@ export class MailMCPServer {
         const service = await this.getService(args.accountId as string);
         const messages = await service.getThread(
           args.threadId as string,
-          (args.folder as string | undefined) ?? 'INBOX'
+          (args.folder as string | undefined) ?? 'INBOX',
+          args.folders as string[] | undefined
         );
         return {
           content: [{ type: 'text', text: JSON.stringify(messages, null, 2) }],
@@ -997,26 +1124,44 @@ export class MailMCPServer {
         }
         const service = await this.getService(args.accountId as string);
         const sentFolder = await service.resolveSentFolder(args.sentFolder as string | undefined);
-        const page = await service.searchEmailsPage(
+        let page = await service.searchEmailsPage(
           { messageId },
           {
             folder: sentFolder,
             limit: Math.min((args.count as number | undefined) ?? 10, 100),
           },
         );
+        // A bounded UID search can return an empty window with more mail to
+        // inspect. Only report absence after the continuation is exhausted.
+        let pagesScanned = 1;
+        const maxPages = 10;
+        while (page.items.length === 0 && page.nextCursor && pagesScanned < maxPages) {
+          page = await service.searchEmailsPage({ messageId }, {
+            folder: sentFolder,
+            limit: Math.min((args.count as number | undefined) ?? 10, 100),
+            cursor: page.nextCursor,
+          });
+          pagesScanned++;
+        }
         const matches = page.items;
         return {
           content: [{
             type: 'text',
             text: JSON.stringify({
-              status: matches.length > 0 ? 'found_in_sent' : 'not_found_in_sent',
+              status: matches.length > 0 ? 'found_in_sent'
+                : page.nextCursor ? 'indeterminate' : 'not_found_in_sent',
               messageId,
               sentFolder,
               count: matches.length,
               matches,
+              pagesScanned,
+              partial: Boolean(page.nextCursor),
+              nextCursor: page.nextCursor,
               caution: matches.length > 0
                 ? 'The IMAP Sent copy exists. Do not resend.'
-                : 'Absence from Sent does not prove SMTP non-delivery. Do not retry automatically.',
+                : page.nextCursor
+                  ? 'The Sent search is incomplete. Continue searchMessages with this Message-ID, Sent folder and nextCursor. Do not resend or retry automatically.'
+                  : 'Absence from Sent does not prove SMTP non-delivery. Do not retry automatically.',
             }, null, 2),
           }],
         };
@@ -1052,9 +1197,34 @@ export class MailMCPServer {
         return trackResult(formatDeliveryResult(result));
       }
 
-      if (name === 'create_draft') {
+      if (name === 'create_reply_draft' || name === 'create_reply_all_draft') {
+        if (typeof args.locator !== 'string' || !args.locator.trim()) throw new Error('locator is required');
+        if (typeof args.body !== 'string') throw new Error('body must be a string');
+        for (const field of ['isHtml', 'includeSignature', 'includeOriginalAttachments']) {
+          if (args[field] !== undefined && typeof args[field] !== 'boolean') throw new Error(`${field} must be a boolean`);
+        }
+        for (const field of ['cc', 'bcc']) {
+          if (args[field] !== undefined && typeof args[field] !== 'string') throw new Error(`${field} must be a string`);
+        }
+        if (args.attachments !== undefined && !Array.isArray(args.attachments)) throw new Error('attachments must be an array');
+        validateEmailAddresses('placeholder@example.com', args.cc as string | undefined, args.bcc as string | undefined);
         const service = await this.getService(args.accountId as string);
-        const draft = await service.createDraftMessage(outgoingMessageFromArgs(args));
+        const draft = await service.createReplyDraft(args.locator, args.body, {
+          replyAll: name === 'create_reply_all_draft',
+          isHtml: args.isHtml === true,
+          includeSignature: args.includeSignature !== false,
+          includeOriginalAttachments: args.includeOriginalAttachments === true,
+          ...(args.cc !== undefined ? { cc: args.cc as string } : {}),
+          ...(args.bcc !== undefined ? { bcc: args.bcc as string } : {}),
+          ...(args.attachments !== undefined ? { attachments: args.attachments as OutgoingAttachment[] } : {}),
+        });
+        return trackResult({ content: [{ type: 'text', text: JSON.stringify(draft, null, 2) }] });
+      }
+
+      if (name === 'create_draft') {
+        const message = outgoingMessageFromArgs(args);
+        const service = await this.getService(args.accountId as string);
+        const draft = await service.createDraftMessage(message);
         return {
           content: [{ type: 'text', text: JSON.stringify(draft, null, 2) }],
         };
@@ -1349,6 +1519,9 @@ export class MailMCPServer {
         if (!account) {
           throw new Error(`Account ${accountId} not found in configuration.`);
         }
+        if (account.authType !== 'login') {
+          throw new Error('ManageSieve currently supports login credentials only; OAuth2 accounts cannot use filter operations.');
+        }
         const { loadCredentials } = await import('./security/keychain.js');
         const password = await loadCredentials(accountId);
         if (!password) {
@@ -1449,7 +1622,7 @@ export class MailMCPServer {
     });
 
     this.server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-      resources: [MAIL_AGENT_GUIDE_RESOURCE],
+      resources: MAIL_DOCUMENTATION_RESOURCES,
     }));
 
     this.server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
@@ -1461,7 +1634,7 @@ export class MailMCPServer {
     });
 
     this.server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-      prompts: [MAIL_AGENT_GUIDE_PROMPT],
+      prompts: MAIL_DOCUMENTATION_PROMPTS,
     }));
 
     this.server.setRequestHandler(GetPromptRequestSchema, async (request) => {
@@ -1536,6 +1709,7 @@ async function main() {
   const args = process.argv.slice(2);
 
   // Check for CLI subcommands before starting MCP server
+  if (await handleDraftStateCommand(args)) process.exit(0);
   const handled = await handleAccountsCommand(args);
   if (handled) {
     process.exit(0);
@@ -1550,7 +1724,7 @@ async function main() {
   }
 
   if (values['help']) {
-    console.log(`mail-mcp v${PACKAGE_VERSION} - MCP server for IMAP/SMTP email access
+    console.log(`mail-mcp v${PACKAGE_VERSION} - MCP email server for IMAP/SMTP, Zimbra, Apple Mail, Microsoft and Mailtrap
 
 Usage: mail-mcp [options] [command]
 
@@ -1558,6 +1732,10 @@ Commands:
   accounts add        Add a new email account (interactive)
   accounts list       List configured accounts
   accounts remove ID  Remove an account
+  accounts login ID [--trusted-device]   Authenticate Zimbra locally; optionally trust this device
+  accounts disable-auto-login ID        Remove the saved Zimbra main password
+  draft-state migrate --account ID --previous-accounts PATH [--dry-run]
+                    Bind legacy draft state using a verified prior account snapshot
 
 Options:
   --read-only                 Start in read-only mode (no send/move/label tools)
@@ -1570,12 +1748,14 @@ Options:
   --port PORT                 HTTP port (default: 8765; use 0 for an ephemeral port)
   --bearer-token-env NAME     Environment variable containing the HTTP bearer token
   --validate-accounts         Probe IMAP/SMTP connections and exit
-  --install-claude            Write an auto-updating npm command to Claude Desktop config and exit
-  --install-claude-code       Register an auto-updating user-scoped MCP server in Claude Code
+  --install-claude            Write the public npm command to Claude Desktop config and exit
+  --install-claude-code       Register the public npm package at user scope in Claude Code
   --install-codex             Install one shared HTTP service for Codex on Windows; use stdio elsewhere
+  --skip-skill                Preserve skills without installing the bundled skill
+  --replace-skill             Back up and replace an existing unlinked Codex/Claude Code skill
   --install-codex-local       Install this local build as the Windows service without npm auto-updates
-  --install-codex-stdio       Write an auto-updating per-client stdio command to Codex config
-  --auto-update-seconds N     Managed HTTP service update check interval (minimum: 60)
+  --install-codex-stdio       Write the public npm stdio command to Codex config
+  --auto-update-seconds N     Check npm for a newer release (HTTP service only)
   --version                   Show version number
   -h, --help                  Show this help message`);
     process.exit(0);
@@ -1624,6 +1804,8 @@ Options:
       if (process.platform === 'win32') {
         const expectedUrl = `http://${SHARED_HTTP_HOST}:${SHARED_HTTP_PORT}/mcp`;
         const bundle = await installCodexBundle(configPath, codexHome, {
+          skipSkill: values['skip-skill'],
+          replaceSkill: values['replace-skill'],
           transport: 'http',
           options: {
             url: expectedUrl,
@@ -1651,7 +1833,7 @@ Options:
         }
         console.log(`Service task: ${service.taskName}`);
         console.log(`Health check: ${service.healthUrl}`);
-        console.log(`Codex skill: ${bundle.skill.skillPath}`);
+        console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
         console.log('Service status: healthy');
         console.log(bundle.config.changed || !service.reusedBearerToken
           ? 'Restart Codex to load the connection settings and bearer token.'
@@ -1661,6 +1843,8 @@ Options:
 
       await prepareMailMcpNpxRuntime();
       const bundle = await installCodexBundle(configPath, codexHome, {
+        skipSkill: values['skip-skill'],
+        replaceSkill: values['replace-skill'],
         transport: 'stdio',
         npxArgs,
       });
@@ -1671,7 +1855,7 @@ Options:
         console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
-      console.log(`Codex skill: ${bundle.skill.skillPath}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1687,6 +1871,8 @@ Options:
     const configPath = join(codexHome, 'config.toml');
     try {
       const bundle = await installCodexBundle(configPath, codexHome, {
+        skipSkill: values['skip-skill'],
+        replaceSkill: values['replace-skill'],
         transport: 'stdio',
         npxArgs,
       });
@@ -1697,7 +1883,7 @@ Options:
         console.log(`Previous config backed up to: ${bundle.config.backupPath}`);
       }
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
-      console.log(`Codex skill: ${bundle.skill.skillPath}`);
+      console.log(`Codex skill: ${bundle.skill.skillPath}${bundle.skill.skipped ? ' (' + bundle.skill.skipped + ')' : ''}`);
       console.log('Restart Codex to load the server.');
     } catch (err) {
       console.error(`Error: ${(err as Error).message}`);
@@ -1730,7 +1916,7 @@ Options:
 
   if (values['install-claude-code']) {
     try {
-      const result = await installClaudeCode(npxArgs);
+      const result = await installClaudeCode(npxArgs, { skipSkill: values['skip-skill'], replaceSkill: values['replace-skill'] });
       console.log('mail-mcp configured in Claude Code user scope.');
       if (result.stdout) console.log(result.stdout);
       console.log(`Server command: npx ${npxArgs.join(' ')}`);
@@ -1846,7 +2032,12 @@ Options:
 }
 
 // Importing the module must not start a stdio server.
-const isDirectRun = Boolean(process.argv[1]) && pathToFileURL(process.argv[1]).href === import.meta.url;
+let isDirectRun = false;
+try {
+  isDirectRun = Boolean(process.argv[1]) && pathToFileURL(realpathSync(process.argv[1])).href === import.meta.url;
+} catch {
+  // Imported from stdin/eval or an embedder with a non-file argv[1].
+}
 if (isDirectRun) {
   main().catch((err) => {
     console.error(`Error: ${err instanceof Error ? err.message : String(err)}`);

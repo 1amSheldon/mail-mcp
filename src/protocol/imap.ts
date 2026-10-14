@@ -1,4 +1,4 @@
-import { ImapFlow } from 'imapflow';
+import { ImapFlow, type MessageStructureObject } from 'imapflow';
 import type { EmailAccount } from '../config.js';
 import { loadCredentials } from '../security/keychain.js';
 import { getValidAccessToken } from '../security/oauth2.js';
@@ -48,6 +48,7 @@ export interface MessageMetadata {
   date?: Date;
   snippet?: string;
   threadId?: string;
+  referenceIds?: string[];
 }
 
 export interface SenderEnvelope {
@@ -58,9 +59,20 @@ export interface SenderEnvelope {
 
 export interface AppendMessageResult {
   uid?: number;
+  uidValidity?: string;
+}
+
+/** Positive evidence that APPEND did not store the message; safe to correct and retry. */
+export class AppendNotSavedError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = 'AppendNotSavedError';
+  }
 }
 
 const MAX_MAILBOX_STATUS_CONCURRENCY = 8;
+export const MAX_SNIPPET_BYTES = 4096;
+export const MAX_PARSED_MESSAGE_BYTES = 32 * 1024 * 1024;
 const MAX_IMAP_UID = 4_294_967_295n;
 
 function assertValidUid(uid: string): void {
@@ -102,6 +114,8 @@ export class ImapClient {
       host: this.account.host,
       port: this.account.port,
       secure: this.account.useTLS,
+      // Explicit TLS is mandatory when implicit TLS is disabled; never fall back to LOGIN in cleartext.
+      ...(!this.account.useTLS ? { doSTARTTLS: true } : {}),
       auth: authConfig,
       logger: false
     });
@@ -165,7 +179,7 @@ export class ImapClient {
     }
   }
 
-  async fetchMessageBody(uid: string, folder: string = 'INBOX'): Promise<ParsedMail> {
+  async fetchMessageBody(uid: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<ParsedMail> {
     if (!this.client) {
       throw new Error('Not connected');
     }
@@ -173,67 +187,70 @@ export class ImapClient {
 
     const lock = await this.client.getMailboxLock(folder);
     try {
-      const msg = await this.client.fetchOne(uid, { source: true, internalDate: true }, { uid: true });
-      if (!msg || !msg.source) {
-        throw new Error(`Message with UID ${uid} not found`);
+      if (expectedUidValidity !== undefined) {
+        const mailbox = this.client.mailbox;
+        if (!mailbox || mailbox.uidValidity.toString() !== expectedUidValidity) {
+          throw new Error('Mailbox identity changed before body fetch');
+        }
       }
-      return await simpleParser(msg.source);
+      const source = await this.fetchBoundedSource(uid, MAX_PARSED_MESSAGE_BYTES);
+      return await simpleParser(source);
     } finally {
       lock.release();
     }
   }
 
-  async fetchThreadMessages(threadId: string, folder: string = 'INBOX'): Promise<MessageMetadata[]> {
-    if (!this.client) {
-      throw new Error('Not connected');
-    }
-
+  async fetchThreadMessages(threadId: string, folder: string = 'INBOX', options: { expand?: boolean; budget?: { remaining: number } } = {}): Promise<MessageMetadata[]> {
+    if (!this.client) throw new Error('Not connected');
+    if (!threadId || threadId.length > 998 || /[\r\n\0]/.test(threadId)) throw new Error('Invalid thread ID');
     const lock = await this.client.getMailboxLock(folder);
     try {
-      // Use GM-THRID for Gmail, fall back to References/Message-ID header search
-      let uids: number[] = [];
-      try {
-        uids = await this.client.search({ 'x-gm-thrid': threadId } as any, { uid: true }) as number[];
-      } catch (e) {
-        // x-gm-thrid not supported — fall through to header search below
-      }
-
-      if (!uids || uids.length === 0) {
-        try {
-          const refUids = await this.client.search(
-            { header: { References: threadId } },
-            { uid: true },
-          ) as number[];
-          const replyUids = await this.client.search(
-            { header: { 'In-Reply-To': threadId } },
-            { uid: true },
-          ) as number[];
-          const rootUids = await this.client.search(
-            { header: { 'Message-ID': threadId } },
-            { uid: true },
-          ) as number[];
-          uids = [...new Set([...(refUids || []), ...(replyUids || []), ...(rootUids || [])])];
-        } catch (e2) {
-          // header search not supported — return empty
-          return [];
+      const budget = options.budget ?? { remaining: 100 };
+      const messages = new Map<number, MessageMetadata>();
+      const pending = [threadId];
+      const searched = new Set<string>();
+      const gmail = /^\d+$/.test(threadId) && this.client.capabilities?.has('X-GM-EXT-1');
+      while (pending.length && budget.remaining > 0 && searched.size < 100 && messages.size < 500) {
+        const id = pending.shift()!;
+        if (searched.has(id)) continue;
+        searched.add(id);
+        let uids: number[] = [];
+        if (gmail) {
+          budget.remaining--;
+          const found = await this.client.search({ threadId: id }, { uid: true });
+          uids = found || [];
+        } else {
+          for (const header of ['References', 'In-Reply-To', 'Message-ID']) {
+            if (budget.remaining <= 0) break;
+            budget.remaining--;
+            const found = await this.client.search({ header: { [header]: id } }, { uid: true });
+            if (found) uids.push(...found);
+          }
+        }
+        uids = [...new Set(uids)].filter(uid => !messages.has(uid)).slice(0, 500 - messages.size);
+        if (!uids.length) continue;
+        for await (const msg of this.client.fetch(uids.join(','), {
+          envelope: true, flags: true, internalDate: true, threadId: true,
+          headers: ['Message-ID', 'References', 'In-Reply-To'],
+        }, { uid: true })) {
+          const parsed = msg.headers ? await simpleParser(msg.headers) : undefined;
+          const refs = [parsed?.messageId, parsed?.inReplyTo, ...(Array.isArray(parsed?.references) ? parsed.references : [parsed?.references])]
+            .flatMap(value => value?.match(/<[^<>\s]+>/g) ?? []);
+          // HEADER search is substring-based; retain only exact graph edges.
+          if (!gmail && parsed && !refs.includes(id)) continue;
+          messages.set(msg.uid, {
+            id: String(msg.uid), uid: msg.uid, subject: msg.envelope?.subject,
+            from: msg.envelope?.from?.[0]?.address || 'Unknown',
+            date: msg.envelope?.date || (msg.internalDate ? new Date(msg.internalDate) : undefined),
+            snippet: '', threadId: msg.threadId?.toString() || threadId,
+            // Gmail already supplies conversation membership. Do not let the
+            // cross-folder service turn its numeric ID into an RFC header walk.
+            referenceIds: gmail ? [] : refs,
+          });
+          if (!gmail && options.expand !== false) for (const ref of refs) if (!searched.has(ref) && pending.length < 100) pending.push(ref);
         }
       }
-
-      if (!uids || uids.length === 0) return [];
-
-      const messages: MessageMetadata[] = [];
-      for await (const msg of this.client.fetch(uids.join(','), { envelope: true, flags: true, internalDate: true }, { uid: true })) {
-        messages.push({
-          id: msg.uid.toString(),
-          uid: msg.uid,
-          subject: msg.envelope?.subject,
-          from: msg.envelope?.from?.[0]?.address || 'Unknown',
-          date: msg.envelope?.date || (msg.internalDate instanceof Date ? msg.internalDate : (msg.internalDate ? new Date(msg.internalDate) : undefined)),
-          snippet: '',
-          threadId: (msg as any).threadId?.toString() || threadId,
-        });
-      }
-      return messages.sort((a, b) => (a.date?.getTime() || 0) - (b.date?.getTime() || 0));
+      return [...messages.values()].sort((a, b) => (a.date?.getTime() || 0) - (b.date?.getTime() || 0));
     } finally {
       lock.release();
     }
@@ -241,16 +258,32 @@ export class ImapClient {
 
   async appendMessage(folder: string, rawMessage: string | Buffer, flags: string[] = []): Promise<AppendMessageResult> {
     if (!this.client) {
-      throw new Error('Not connected');
+      throw new AppendNotSavedError('Draft was not saved: IMAP is not connected.');
     }
 
-    const lock = await this.client.getMailboxLock(folder);
+    const lock = await this.client.getMailboxLock(folder).catch(cause => {
+      throw new AppendNotSavedError('Draft was not saved: the destination mailbox could not be opened.', cause);
+    });
     try {
-      const response = await this.client.append(folder, rawMessage, flags);
+      const response = await this.client.append(folder, rawMessage, flags).catch((cause: unknown) => {
+        const error = cause as { responseStatus?: string; executedCommand?: string; serverResponseCode?: string; rejectedFrom?: string; command?: string } | null;
+        // Require the rejected command to be APPEND: ImapFlow can fail a UID
+        // SEARCH after a successful APPEND, which remains an uncertain outcome.
+        const appendRejected = ['NO', 'BAD'].includes(error?.responseStatus ?? '')
+          && /^\S+\s+APPEND(?:\s|$)/i.test(error?.executedCommand ?? '');
+        const preflight = (!error?.executedCommand && error?.serverResponseCode === 'APPENDLIMIT')
+          || (error?.rejectedFrom === 'noSocket' && error?.command === 'APPEND');
+        if (appendRejected || preflight) {
+          throw new AppendNotSavedError('Draft was not saved: IMAP rejected APPEND before storing the message.', cause);
+        }
+        throw cause;
+      });
       if (!response) {
-        throw new Error(`IMAP APPEND to ${folder} returned no confirmation`);
+        // ImapFlow returns false only when its command/state preconditions fail;
+        // transport failures reject, and a confirmed append always returns a map.
+        throw new AppendNotSavedError('Draft was not saved: IMAP APPEND was not attempted.');
       }
-      return { uid: response.uid };
+      return { uid: response.uid, ...(response.uidValidity !== undefined ? { uidValidity: response.uidValidity.toString() } : {}) };
     } finally {
       lock.release();
     }
@@ -277,6 +310,33 @@ export class ImapClient {
         uids.push(message.uid);
       }
       return uids.sort((left, right) => right - left);
+    } finally {
+      lock.release();
+    }
+  }
+
+  async searchUidPage(folder: string, uidValidity: string, criteria: object, limit: number, before?: number): Promise<{ uids: number[]; nextBefore: number | null }> {
+    if (!this.client) throw new Error('Not connected');
+    if (!Number.isInteger(limit) || limit < 1 || limit > 500) throw new Error('Pagination limit must be between 1 and 500');
+    const lock = await this.client.getMailboxLock(folder);
+    try {
+      const mailbox = this.client.mailbox;
+      if (!mailbox || mailbox.uidValidity.toString() !== uidValidity) throw new Error('Mailbox identity changed during pagination');
+      let high = Math.min(before === undefined ? 4_294_967_295 : before - 1, mailbox.uidNext - 1);
+      const uids: number[] = [];
+      // At most 10 bounded SEARCH replies, even for sparse UID spaces. A page
+      // may be empty with a continuation: callers must follow nextCursor.
+      for (let window = 0; high > 0 && window < 10; window++) {
+        const low = Math.max(1, high - 9_999);
+        const found = await this.client.search({ ...criteria, uid: `${low}:${high}` }, { uid: true });
+        const matches = (found || []).filter(uid => uid >= low && uid <= high).sort((a, b) => b - a);
+        for (const uid of matches) {
+          uids.push(uid);
+          if (uids.length === limit) return { uids, nextBefore: uid > 1 ? uid : null };
+        }
+        high = low - 1;
+      }
+      return { uids, nextBefore: high > 0 ? high + 1 : null };
     } finally {
       lock.release();
     }
@@ -310,11 +370,23 @@ export class ImapClient {
     if (uids.length === 0) return [];
     const lock = await this.client.getMailboxLock(folder);
     try {
-      const fetchOptions: any = { envelope: true, flags: true, internalDate: true };
-      if (!headerOnly) fetchOptions.bodyParts = ['TEXT'];
+      const fetchOptions: any = { envelope: true, flags: true, internalDate: true, threadId: true };
+      if (!headerOnly) {
+        // A preview must never download the full MIME body or its attachments.
+        fetchOptions.bodyParts = [{ key: 'TEXT', start: 0, maxLength: MAX_SNIPPET_BYTES }];
+        fetchOptions.headers = ['Content-Type', 'Content-Transfer-Encoding'];
+      }
       const byUid = new Map<number, MessageMetadata>();
       for await (const msg of this.client.fetch(uids.join(','), fetchOptions, { uid: true })) {
         const textBuffer = headerOnly ? undefined : (msg as any).bodyParts?.get('TEXT');
+        let snippet = '';
+        if (textBuffer) {
+          const preview = await simpleParser(Buffer.concat([
+            msg.headers ?? Buffer.from('Content-Type: text/plain; charset=utf-8\r\n'),
+            Buffer.from('\r\n'), textBuffer.subarray(0, MAX_SNIPPET_BYTES),
+          ]), { skipHtmlToText: false, skipTextToHtml: true });
+          snippet = (preview.text ?? '').replace(/\s+/g, ' ').slice(0, 200).trim();
+        }
         byUid.set(msg.uid, {
           id: msg.uid.toString(),
           uid: msg.uid,
@@ -323,9 +395,7 @@ export class ImapClient {
           date: msg.envelope?.date || (msg.internalDate instanceof Date
             ? msg.internalDate
             : msg.internalDate ? new Date(msg.internalDate) : undefined),
-          snippet: textBuffer
-            ? textBuffer.toString('utf-8').replace(/\s+/g, ' ').slice(0, 200).trim()
-            : '',
+          snippet,
           threadId: (msg as any).threadId?.toString(),
         });
       }
@@ -415,30 +485,32 @@ export class ImapClient {
     return folders.find(folder => folder.specialUse?.toLowerCase() === normalized)?.path;
   }
 
-  async moveMessage(uid: string, sourceFolder: string, targetFolder: string): Promise<void> {
+  async moveMessage(uid: string, sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(sourceFolder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageMove(uid, targetFolder, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async copyMessage(uid: string, sourceFolder: string, targetFolder: string): Promise<CopyMessagesResult> {
-    return await this.copyMessages([uid], sourceFolder, targetFolder);
+  async copyMessage(uid: string, sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<CopyMessagesResult> {
+    return await this.copyMessages([uid], sourceFolder, targetFolder, expectedUidValidity);
   }
 
-  async batchCopyMessages(uids: string[], sourceFolder: string, targetFolder: string): Promise<CopyMessagesResult> {
-    return await this.copyMessages(uids, sourceFolder, targetFolder);
+  async batchCopyMessages(uids: string[], sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<CopyMessagesResult> {
+    return await this.copyMessages(uids, sourceFolder, targetFolder, expectedUidValidity);
   }
 
-  async modifyLabels(uid: string, folder: string, addLabels: string[], removeLabels: string[]): Promise<void> {
+  async modifyLabels(uid: string, folder: string, addLabels: string[], removeLabels: string[], expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       if (addLabels.length > 0) {
         await this.client.messageFlagsAdd(uid, addLabels, { uid: true });
       }
@@ -450,44 +522,48 @@ export class ImapClient {
     }
   }
 
-  async batchMoveMessages(uids: string[], sourceFolder: string, targetFolder: string): Promise<void> {
+  async batchMoveMessages(uids: string[], sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     const lock = await this.client.getMailboxLock(sourceFolder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageMove(sequence, targetFolder, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async deleteMessage(uid: string, folder: string): Promise<void> {
+  async deleteMessage(uid: string, folder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageDelete(uid, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async batchDeleteMessages(uids: string[], folder: string): Promise<void> {
+  async batchDeleteMessages(uids: string[], folder: string, expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       await this.client.messageDelete(sequence, { uid: true });
     } finally {
       lock.release();
     }
   }
 
-  async batchModifyLabels(uids: string[], folder: string, addLabels: string[], removeLabels: string[]): Promise<void> {
+  async batchModifyLabels(uids: string[], folder: string, addLabels: string[], removeLabels: string[], expectedUidValidity?: string): Promise<void> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       if (addLabels.length > 0) {
         await this.client.messageFlagsAdd(sequence, addLabels, { uid: true });
       }
@@ -499,11 +575,12 @@ export class ImapClient {
     }
   }
 
-  async fetchAttachmentSize(uid: string, filename: string, folder: string = 'INBOX'): Promise<number | null> {
+  async fetchAttachmentSize(uid: string, filename: string, folder: string = 'INBOX', expectedUidValidity?: string): Promise<number | null> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
     const lock = await this.client.getMailboxLock(folder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       const msg = await this.client.fetchOne(uid, { bodyStructure: true }, { uid: true });
       if (!msg || !(msg as any).bodyStructure) return null;
       const bodyStructure = (msg as any).bodyStructure;
@@ -528,32 +605,78 @@ export class ImapClient {
     }
   }
 
-  async fetchRawMessage(uid: string, folder: string = 'INBOX', maxBytes: number = 10 * 1024 * 1024): Promise<Buffer> {
+  async fetchRawMessage(uid: string, folder: string = 'INBOX', maxBytes: number = 10 * 1024 * 1024, expectedUidValidity?: string): Promise<Buffer> {
     if (!this.client) throw new Error('Not connected');
     assertValidUid(uid);
-    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) {
-      throw new Error('maxBytes must be a positive integer');
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 50 * 1024 * 1024) {
+      throw new Error('maxBytes must be a positive integer no greater than 50 MiB');
     }
 
     const lock = await this.client.getMailboxLock(folder);
     try {
-      const metadata = await this.client.fetchOne(uid, { size: true }, { uid: true });
-      if (!metadata) {
-        throw new Error(`Message with UID ${uid} not found`);
-      }
-      if (typeof metadata.size === 'number' && metadata.size > maxBytes) {
-        throw new Error(`Message with UID ${uid} exceeds the ${maxBytes} byte limit`);
-      }
+      this.assertUidValidity(expectedUidValidity);
+      return await this.fetchBoundedSource(uid, maxBytes);
+    } finally {
+      lock.release();
+    }
+  }
 
-      const message = await this.client.fetchOne(uid, { source: true }, { uid: true });
-      if (!message || !message.source) {
-        throw new Error(`Message with UID ${uid} not found`);
+  private async fetchBoundedSource(uid: string, maxBytes: number): Promise<Buffer> {
+    if (!this.client) throw new Error('Not connected');
+    const metadata = await this.client.fetchOne(uid, { size: true }, { uid: true });
+    if (!metadata) {
+      throw new Error(`Message with UID ${uid} not found`);
+    }
+    if (typeof metadata.size === 'number' && metadata.size > maxBytes) {
+      throw new Error(`Message with UID ${uid} exceeds the ${maxBytes} byte limit`);
+    }
+
+    // Ask for one extra byte so a truncated response can never pass as a complete message.
+    const message = await this.client.fetchOne(uid, { source: { start: 0, maxLength: maxBytes + 1 } }, { uid: true });
+    if (!message || !message.source) {
+      throw new Error(`Message with UID ${uid} not found`);
+    }
+    const source = Buffer.isBuffer(message.source) ? message.source : Buffer.from(message.source);
+    if (source.length > maxBytes) {
+      throw new Error(`Message with UID ${uid} exceeds the ${maxBytes} byte limit`);
+    }
+    return source;
+  }
+
+  async fetchAttachment(uid: string, filename: string, folder: string, maxBytes: number, expectedUidValidity?: string): Promise<{ content: Buffer; contentType: string }> {
+    if (!this.client) throw new Error('Not connected');
+    assertValidUid(uid);
+    if (!Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 50 * 1024 * 1024) throw new Error('Invalid attachment byte limit');
+    const lock = await this.client.getMailboxLock(folder);
+    try {
+      this.assertUidValidity(expectedUidValidity);
+      const metadata = await this.client.fetchOne(uid, { bodyStructure: true }, { uid: true });
+      if (!metadata) throw new Error(`Message with UID ${uid} not found`);
+      const find = (node?: MessageStructureObject): MessageStructureObject | undefined => {
+        if (!node) return undefined;
+        if ((node.dispositionParameters?.filename ?? node.parameters?.name) === filename) return node;
+        for (const child of node.childNodes ?? []) { const match = find(child); if (match) return match; }
+        return undefined;
+      };
+      const part = find(metadata.bodyStructure);
+      // ImapFlow may normalize inline text charsets. Preserve those bytes through the MIME parser instead.
+      if (part?.part && !(part.type.startsWith('text/') && part.disposition !== 'attachment')) {
+        const { content, meta } = await this.client.download(uid, part.part, { uid: true, maxBytes: maxBytes + 1, chunkSize: 64 * 1024 });
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of content) {
+          const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          size += bytes.length;
+          if (size > maxBytes) { content.destroy(); throw new Error(`Attachment exceeds the ${maxBytes} byte limit`); }
+          chunks.push(bytes);
+        }
+        return { content: Buffer.concat(chunks, size), contentType: meta.contentType };
       }
-      const source = Buffer.isBuffer(message.source) ? message.source : Buffer.from(message.source);
-      if (source.length > maxBytes) {
-        throw new Error(`Message with UID ${uid} exceeds the ${maxBytes} byte limit`);
-      }
-      return source;
+      const parsed = await simpleParser(await this.fetchBoundedSource(uid, MAX_PARSED_MESSAGE_BYTES));
+      const attachment = parsed.attachments.find(item => item.filename === filename);
+      if (!attachment) throw new Error(`Attachment "${filename}" not found`);
+      if (attachment.content.length > maxBytes) throw new Error(`Attachment exceeds the ${maxBytes} byte limit`);
+      return { content: attachment.content, contentType: attachment.contentType };
     } finally {
       lock.release();
     }
@@ -599,7 +722,7 @@ export class ImapClient {
     return results;
   }
 
-  private async copyMessages(uids: string[], sourceFolder: string, targetFolder: string): Promise<CopyMessagesResult> {
+  private async copyMessages(uids: string[], sourceFolder: string, targetFolder: string, expectedUidValidity?: string): Promise<CopyMessagesResult> {
     if (!this.client) throw new Error('Not connected');
     const sequence = encodeUidSet(uids);
     this.validateMailboxPath(sourceFolder);
@@ -607,6 +730,7 @@ export class ImapClient {
 
     const lock = await this.client.getMailboxLock(sourceFolder);
     try {
+      this.assertUidValidity(expectedUidValidity);
       const result = await this.client.messageCopy(sequence, targetFolder, { uid: true });
       if (!result) {
         throw new Error(`IMAP COPY to ${targetFolder} returned no confirmation`);
@@ -621,6 +745,13 @@ export class ImapClient {
       };
     } finally {
       lock.release();
+    }
+  }
+
+  private assertUidValidity(expected?: string): void {
+    // Check the selected generation while holding the same lock as the UID operation.
+    if (expected !== undefined && (!this.client?.mailbox || this.client.mailbox.uidValidity?.toString() !== expected)) {
+      throw new Error('Mailbox identity changed before UID operation');
     }
   }
 

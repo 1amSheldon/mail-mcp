@@ -23,6 +23,24 @@ const APPLE_ACCOUNT: AppleMailConfiguredAccount = {
   backend: 'apple-mail',
 };
 
+describe('Apple Mail global rule boundary', () => {
+  it('enforces the configured permission before a custom adapter is constructed', async () => {
+    const factory = vi.fn();
+    const runtime = new ProviderRuntime(new MailMCPRuntimeState(), options([APPLE_ACCOUNT], { appleMail: factory }));
+    await expect(runtime.executeAppleRead('apple', 'listRules', { account: 'Personal' })).rejects.toMatchObject({ code: 'OPERATION_NOT_ALLOWED' });
+    await expect(runtime.executeAppleWrite('apple', 'deleteRule', { account: 'Personal', name: 'Rule' })).rejects.toMatchObject({ code: 'OPERATION_NOT_ALLOWED' });
+    expect(factory).not.toHaveBeenCalled();
+  });
+
+  it('labels an explicitly enabled rule listing as application-global', async () => {
+    const runtime = new ProviderRuntime(new MailMCPRuntimeState(), options([{ ...APPLE_ACCOUNT, nativeAccountName: 'Personal', allowGlobalRules: true }], {
+      appleMail: () => ({ listRules: async () => [{ name: 'All accounts' }] }) as unknown as AppleMailAdapter,
+    }));
+    expect(await runtime.executeAppleRead('apple', 'listRules', { account: 'Personal' }))
+      .toEqual({ scope: 'application-global', rules: [{ name: 'All accounts' }] });
+  });
+});
+
 const GRAPH_ACCOUNT: MicrosoftGraphConfiguredAccount = {
   id: 'graph',
   name: 'Graph',
@@ -79,6 +97,25 @@ function options(
 }
 
 describe('ProviderRuntime account and client lifecycle', () => {
+  it('replaces cached provider clients after account configuration changes and evicts removed accounts', async () => {
+    const state = new MailMCPRuntimeState();
+    const first = { listAccounts: vi.fn(async () => []), disconnect: vi.fn(async () => {}) };
+    const second = { listAccounts: vi.fn(async () => []), disconnect: vi.fn(async () => {}) };
+    const factory = vi.fn().mockReturnValueOnce(first).mockReturnValueOnce(second);
+    const runtimeOptions = options([APPLE_ACCOUNT], { appleMail: factory });
+    const runtime = new ProviderRuntime(state, runtimeOptions);
+    await runtime.executeAppleRead('apple', 'listAccounts', {});
+    vi.mocked(runtimeOptions.getAccounts!).mockResolvedValue([{ ...APPLE_ACCOUNT, nativeAccountName: 'Changed' }]);
+    await runtime.executeAppleRead('apple', 'listAccounts', {});
+    expect(factory).toHaveBeenCalledTimes(2);
+    expect(first.disconnect).toHaveBeenCalledOnce();
+    expect(second.listAccounts).toHaveBeenCalledOnce();
+    vi.mocked(runtimeOptions.getAccounts!).mockResolvedValue([]);
+    await expect(runtime.executeAppleRead('apple', 'listAccounts', {})).rejects.toMatchObject({ code: 'ACCOUNT_NOT_FOUND' });
+    expect(second.disconnect).toHaveBeenCalledOnce();
+    expect(state.appleMailAdapters.size).toBe(0);
+  });
+
   it('shares one lazily-created Apple Mail adapter across HTTP session runtimes', async () => {
     const state = new MailMCPRuntimeState();
     const listAccounts = vi.fn().mockResolvedValue([]);
@@ -104,7 +141,7 @@ describe('ProviderRuntime account and client lifecycle', () => {
     expect(state.providerCreations.size).toBe(0);
   });
 
-  it('waits for a provider creation during shutdown and clears the created client', async () => {
+  it('disconnects a provider created during shutdown without dispatching queued work', async () => {
     const state = new MailMCPRuntimeState();
     let finishCreation!: () => void;
     const disconnect = vi.fn().mockResolvedValue(undefined);
@@ -117,12 +154,15 @@ describe('ProviderRuntime account and client lifecycle', () => {
     }));
 
     const operation = runtime.executeAppleRead('apple', 'listAccounts', {});
+    const result = operation.catch(error => error);
     await vi.waitFor(() => expect(state.providerCreations.size).toBe(1));
     const shutdown = state.shutdown();
     finishCreation();
 
-    await Promise.all([operation, shutdown]);
+    expect(await result).toMatchObject({ code: 'RUNTIME_SHUTTING_DOWN' });
+    await shutdown;
     expect(disconnect).toHaveBeenCalledOnce();
+    expect(adapter.listAccounts).not.toHaveBeenCalled();
     expect(state.appleMailAdapters.size).toBe(0);
   });
 
@@ -294,6 +334,16 @@ describe('ProviderRuntime provider dispatch', () => {
     await expect(runtime.executeMicrosoftRead('ews', 'getThread', {
       anchor: { id: 'graph-1' },
     })).rejects.toMatchObject<Partial<ProviderRuntimeError>>({ code: 'OPERATION_NOT_ALLOWED' });
+  });
+
+  it('preserves the explicit EWS Sent copy preference', async () => {
+    const sendMessage = vi.fn().mockResolvedValue({ provider: 'ews', status: 'accepted' });
+    const runtime = new ProviderRuntime(new MailMCPRuntimeState(), options(
+      [EWS_ACCOUNT], { ews: () => ({ sendMessage }) as unknown as EwsClient },
+    ));
+    const message = { subject: 'S', body: 'B', to: ['to@example.com'] };
+    await runtime.executeMicrosoftWrite('ews', 'sendMessage', { message, saveToSentItems: false });
+    expect(sendMessage).toHaveBeenCalledWith(message, false);
   });
 
   it('loads one Mailtrap token from keychain and redacts sensitive successful responses', async () => {

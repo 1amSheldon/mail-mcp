@@ -1,16 +1,18 @@
-# mail-mcp
+# Mail MCP
 
-[![npm](https://img.shields.io/npm/v/@1amsheldon/mail-mcp)](https://www.npmjs.com/package/@1amsheldon/mail-mcp)
 [![CI](https://github.com/1amSheldon/mail-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/1amSheldon/mail-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-111111.svg)](LICENSE)
 
-An email MCP server for Codex, Claude Code, Claude Desktop, and other MCP clients. It connects to IMAP, SMTP, ManageSieve, Apple Mail, Microsoft Graph, Exchange Web Services, and Mailtrap without putting mail credentials in client configuration.
+Mail MCP connects Codex, Claude Code, Claude Desktop and other MCP clients to IMAP, SMTP, Zimbra SOAP, ManageSieve, Apple Mail, Microsoft Graph, Exchange Web Services and Mailtrap without putting mail credentials in client configuration.
+
+[npm package](https://www.npmjs.com/package/@1amsheldon/mail-mcp) · [Releases](https://github.com/1amSheldon/mail-mcp/releases) · [Agent skill](skills/mail-mcp/SKILL.md)
 
 ## Backends
 
 | Backend | What it supports | Runtime requirement |
 | --- | --- | --- |
 | IMAP + SMTP | Cursor-based listing and search, stable message locators, raw RFC 822, folders, copy/move/trash/permanent delete, flags, threads, contacts, MIME drafts and sends, reply-all, attachments, delivery verification | Any provider exposing IMAP and SMTP |
+| Zimbra SOAP/REST | Mail/MIME attachments and durable sends, native scheduling, folders/tags, contacts/groups/GAL, filters/settings, sharing, calendars/tasks/invitations and Briefcase | Zimbra HTTPS user endpoint and locally authenticated session; server permissions/features apply |
 | ManageSieve | List, read, create, update, and delete server-side filters | A ManageSieve endpoint on the IMAP account |
 | Apple Mail | Accounts, mailboxes, messages, raw source, drafts, compose, reply, reply-all, forward, flags, move, trash, and rule management | macOS with Mail.app and Automation permission |
 | Microsoft Graph | Read by ID, Internet Message-ID lookup, thread lookup, send, reply, inline attachments, and large attachment upload sessions | Pre-provisioned Microsoft OAuth2 credentials |
@@ -19,7 +21,36 @@ An email MCP server for Codex, Claude Code, Claude Desktop, and other MCP client
 
 Gmail, Google Workspace, Mail.ru, iCloud, Fastmail, Yahoo, Zoho, and other standards-based providers use the IMAP + SMTP backend. POP3 and JMAP are not implemented.
 
+## Zimbra SOAP and 2FA
+
+Zimbra is an optional provider for an existing Zimbra mailbox; Mail MCP does not
+install or configure a Zimbra server. Codex and Claude clients use the same native
+contracts: 132 operations (42 reads and 90 writes) cover mail with MIME attachments
+and guarded draft edits, contacts/groups, filters, user settings, sharing,
+calendars/tasks, invitations, Briefcase and scheduled delivery. Recipient
+restrictions and native concurrency limits are explicit in the operation references.
+Authenticate locally with `npx -y @1amsheldon/mail-mcp@latest accounts login ACCOUNT_ID`;
+by default only the completed session is stored, not the password or OTP.
+Optional `--trusted-device` login supports server-approved device trust and asks
+separately before storing the main password for automatic reauthentication.
+Trust expiry or a failed automatic attempt requires local login. Existing IMAP/SMTP app-password accounts
+remain separate. See [Zimbra setup, operations and limitations](docs/ZIMBRA.md).
+
+Compatibility depends on the server edition, enabled features, authentication
+extensions and mailbox permissions. SAML/SSO, email OTP and 2FA enrollment are not
+implemented. Automated tests do not certify a corporate server; verify login,
+reads and any intended writes on that deployment before relying on them.
+
 ## Install
+
+Install the public package with npm, or run it with npx:
+
+```bash
+npm install -g @1amsheldon/mail-mcp
+mail-mcp --version
+# Without a global install:
+npx -y @1amsheldon/mail-mcp@latest --version
+```
 
 Requirements:
 
@@ -30,32 +61,34 @@ Requirements:
 Add an account with the interactive backend wizard:
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest accounts add
+npx -y @1amsheldon/mail-mcp@latest accounts add
 ```
 
-The wizard supports IMAP/SMTP, Apple Mail, Microsoft Graph, EWS, and Mailtrap. List or remove configured accounts with:
+The wizard supports IMAP/SMTP, Zimbra, Apple Mail, Microsoft Graph, EWS, and Mailtrap. List or remove configured accounts with:
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest accounts list
-npx -y --prefer-online @1amsheldon/mail-mcp@latest accounts remove ACCOUNT_ID
+npx -y @1amsheldon/mail-mcp@latest accounts list
+npx -y @1amsheldon/mail-mcp@latest accounts remove ACCOUNT_ID
 ```
+
+Apple Mail rules are global to Mail.app and may affect every native account. Rule reads and mutations are disabled by default. An administrator may explicitly set `allowGlobalRules: true` on an Apple Mail account in the local account configuration to grant this broader access. The account selector then identifies access and destination mailboxes; it does not restrict which messages a rule matches. Rule listings report `scope: "application-global"`, and mutation confirmations name the global scope. Duplicate rule names must be resolved in Mail.app before updating or deleting them through MCP.
 
 Account definitions are stored in `~/.config/mail-mcp/accounts.json`. Passwords, OAuth2 credentials, and API tokens are stored in the operating-system credential store under `com.1amsheldon.mail-mcp`.
 
 ### Codex
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex
+npx -y @1amsheldon/mail-mcp@latest --install-codex
 ```
 
-The installer updates only `[mcp_servers.mail]`, backs up an existing config, and installs the bundled `mail-mcp` skill in `~/.codex/skills/mail-mcp`.
+The installer updates only `[mcp_servers.mail]`, backs up an existing config, and installs the bundled `mail-mcp` skill only when absent in `~/.codex/skills/mail-mcp`.
 
-On Windows, it installs one authenticated Streamable HTTP service at `http://127.0.0.1:8765/mcp`. Every Codex conversation shares the same process and cached per-account connections, so opening more conversations does not create more mail sessions. A supervised task starts it at sign-in, checks health, and applies later npm releases after a graceful restart.
+On Windows, it installs one authenticated Streamable HTTP service at `http://127.0.0.1:8765/mcp`. Every Codex conversation shares the same process and cached per-account connections, so opening more conversations does not create more mail sessions. A windowless supervised task starts it at sign-in and checks health. It installs the public package into an isolated npm prefix and launches its entrypoint directly with Node, with hidden child processes and no command shell.
 
-On macOS and Linux, the installer writes an auto-updating stdio entry. To select stdio explicitly on any platform:
+On macOS and Linux, the installer writes a stdio entry that resolves the public package through npx. To select stdio explicitly on any platform:
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex-stdio
+npx -y @1amsheldon/mail-mcp@latest --install-codex-stdio
 ```
 
 Add `--read-only` to either installer command to expose only read tools. Restart Codex after installation.
@@ -63,15 +96,15 @@ Add `--read-only` to either installer command to expose only read tools. Restart
 ### Claude Desktop
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-claude
+npx -y @1amsheldon/mail-mcp@latest --install-claude
 ```
 
-The installer preserves other MCP servers, creates `claude_desktop_config.json.mail-mcp.bak` when replacing an existing file, and writes an `npx` command that checks for the latest release when Claude starts the server. Add `--read-only` for read-only access, then restart Claude Desktop.
+The installer preserves other MCP servers, creates `claude_desktop_config.json.mail-mcp.bak` when replacing an existing file, and writes an `npx` command that resolves the public package when Claude starts the server. Add `--read-only` for read-only access, then restart Claude Desktop.
 
 ### Claude Code
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-claude-code
+npx -y @1amsheldon/mail-mcp@latest --install-claude-code
 ```
 
 The installer delegates configuration to the official [`claude mcp` CLI](https://code.claude.com/docs/en/mcp), registers `mail` at user scope, and installs the bundled workflow in `~/.claude/skills/mail-mcp`. Replacing an existing `mail` registration is transactional: the installer backs up `~/.claude.json` and restores it byte-for-byte if registration or skill installation fails. Native Windows uses the required `cmd /c npx` wrapper; macOS, Linux, and WSL use `npx` directly. Add `--read-only` for read-only access, then restart Claude Code.
@@ -81,7 +114,7 @@ The installer delegates configuration to the official [`claude mcp` CLI](https:/
 Run the server over stdio:
 
 ```text
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
+npx -y @1amsheldon/mail-mcp@latest --confirm --audit-log --redact
 ```
 
 Example Codex-compatible TOML:
@@ -89,7 +122,7 @@ Example Codex-compatible TOML:
 ```toml
 [mcp_servers.mail]
 command = "npx"
-args = ["-y", "--prefer-online", "@1amsheldon/mail-mcp@latest", "--confirm", "--audit-log", "--redact"]
+args = ["-y", "--prefer-online", "--package=@1amsheldon/mail-mcp@latest", "mail-mcp", "--confirm", "--audit-log", "--redact"]
 enabled = true
 startup_timeout_sec = 30.0
 tool_timeout_sec = 300.0
@@ -99,19 +132,21 @@ Do not put passwords, refresh tokens, client secrets, API tokens, or HTTP bearer
 
 ## Agent workflow
 
-The server publishes the `mail://agent-guide` resource and the `mail_agent_workflow` prompt. The Codex installer also installs the same workflow as a skill.
+The server publishes the core workflow as the `mail://agent-guide` resource and the `mail_agent_workflow` prompt, generated from the [portable skill](skills/mail-mcp/SKILL.md). Backend contracts are loaded on demand through `mail://reference/<topic>` resources and `mail_reference_<topic_with_underscores>` prompts. New Codex and Claude Code skill installations include every reference; existing and linked skills remain protected.
+
+Choose the relevant contract: [IMAP/SMTP](skills/mail-mcp/references/imap-smtp.md), [Zimbra](skills/mail-mcp/references/zimbra.md), [Apple Mail](skills/mail-mcp/references/apple-mail.md), [Microsoft](skills/mail-mcp/references/microsoft.md), [Mailtrap](skills/mail-mcp/references/mailtrap.md), [outcomes and recovery](skills/mail-mcp/references/outcomes.md), or [operations and production acceptance](skills/mail-mcp/references/operations.md). These document public input shapes, backend differences and result verification; a router capability flag alone is not an input schema.
 
 The important rules are short:
 
 1. Call `list_accounts` and inspect backend capabilities before choosing an operation.
 2. For IMAP/SMTP, call `listFolders` before assuming mailbox names. For Apple Mail, use `apple.listMailboxes`. Microsoft and Mailtrap expose provider resources instead of a universal folder list.
-3. For IMAP/SMTP, start `listMessages` or `searchMessages` without a cursor, then pass `nextCursor` back unchanged. Use the matching provider-prefixed operation for other backends. Offset pagination is rejected.
+3. For IMAP/SMTP, start `listMessages` or `searchMessages` without a cursor, then pass `nextCursor` back unchanged. Use the matching provider-prefixed operation for other backends. IMAP offset pagination is rejected.
 4. Keep the returned locator. It binds the account, mailbox, UIDVALIDITY, and UID so mailbox changes cannot silently retarget an operation.
 5. Read a message before replying, forwarding, moving, deleting, changing flags, or fetching attachments.
 6. Prefer a draft when recipients or wording are not final.
 7. Never retry `smtp_outcome_unknown` automatically. Use `verifySentMessage` with the returned Message-ID first.
 
-IMAP cursor snapshots are capped at 10,000 UIDs and hydrate only the requested page. Page size is capped at 100.
+IMAP listing/search scan bounded UID windows and hydrate only the requested page. Page size is capped at 500; total is unknown. Follow nextCursor even when a sparse search returns an empty page.
 
 ### Keyword search
 
@@ -183,6 +218,10 @@ Provider operations use a prefix, for example `apple.listMessages`, `microsoft.s
 
 `microsoft.searchMessages` is available through EWS. Microsoft Graph supports ID lookup, Internet Message-ID lookup, and thread lookup instead.
 
+Microsoft lookup/search results use `{ messages, partial }`. Graph Internet Message-ID lookup follows all validated pages up to 100 pages or 10,000 messages; failures or limits return `partial: true` with a warning. EWS search returns one page (default 50, maximum 1,000). When `nextOffset` is present, pass it as `offset` with the same search options to continue until `partial: false`. EWS offsets refer to a live mailbox, not a snapshot; concurrent changes can affect paging. Missing paging metadata is reported as incomplete.
+
+`microsoft.getMessage` returns the full text or HTML body with its content type, sender, recipients, dates and attachment metadata. Search and thread operations return compact summaries. Attachment bytes are not embedded in message reads. Returned HTML is email content and must be treated as untrusted by clients; the server's configured text redaction also applies to provider message bodies.
+
 Moving to Trash and permanent deletion remain separate operations: `moveToTrash` and `permanentlyDelete`.
 
 ## Account configuration
@@ -203,6 +242,10 @@ Apple Mail accounts also accept `allowedAttachmentRoots`. Path-based attachments
 Mail.app automation is useful for native rules and accounts that do not expose server credentials, but AppleScript scans can be slow on large mailboxes. Configure the same mailbox through the IMAP + SMTP backend when fast server-side listing and search are required; use the Apple Mail backend only for Mail.app-specific operations.
 
 IMAP/SMTP OAuth2 uses pre-provisioned XOAUTH2 credentials and refreshes them at runtime. The package does not create provider applications or run browser consent flows.
+
+IMAP `useTLS: true` uses implicit TLS (normally port 993). `useTLS: false` requires a successful STARTTLS upgrade (normally port 143); servers without STARTTLS are rejected before authentication. Plaintext IMAP authentication is not supported.
+
+IMAP listing previews fetch at most 4 KiB of each MIME body. Full parsed-message reads are limited to 32 MiB before parsing. Attachment downloads fetch the selected MIME part with a decoded-byte limit (up to 50 MiB); missing part metadata uses a bounded 32 MiB full-message fallback. Oversized messages are rejected rather than silently truncated. Parsed-body caches have a 64 MiB payload budget per account, at most 100 entries, and a five-minute expiry that releases entries without another read.
 
 For Gmail, the shortest personal setup is usually a Google app password with 2-Step Verification enabled:
 
@@ -229,7 +272,7 @@ mail-mcp --confirm --audit-log --redact
 - `--allow-tools` narrows `mail_mutate` to named operations. Version 1 internal names remain accepted as CLI selectors during upgrades, but they are not advertised as MCP tools.
 - `--confirm` requires a short-lived confirmation ID bound to the exact tool arguments.
 - `--audit-log` writes JSONL diagnostics to `~/.config/mail-mcp/audit.log`.
-- `--redact` masks selected sensitive values before content reaches the client.
+- `--redact` masks selected sensitive text values before content reaches the client. Raw RFC 822 and binary attachment downloads remain byte-for-byte originals and are not sanitized.
 
 Nested audit fields are sanitized. Provider errors are reduced to safe codes and request metadata instead of returning raw response bodies or process stderr.
 
@@ -238,6 +281,22 @@ Nested audit fields are sanitized. Provider errors are reduced to safe codes and
 ### Server drafts
 
 For IMAP/SMTP accounts, `createDraft` returns a stable `draftId`. Keep it to edit or send the same draft later:
+
+This project exposes `createReplyDraft` and `createReplyAllDraft`. Call either through
+`mail_mutate` with `{ accountId, operation, input: { locator, body } }` after reading the source.
+They save to Drafts without sending and derive `In-Reply-To`, the `References` chain, the subject
+and recipients from that source. A missing source Message-ID is an error. Optional input fields:
+`isHtml`, `cc`, `bcc`, `includeSignature`, `includeOriginalAttachments`, and `attachments`.
+Explicit `cc` replaces inferred CC; `""` clears it. Use `updateDraft` to edit To/CC further.
+Reply-all removes the account, aliases and duplicate recipients. The body is saved as supplied,
+without automatically quoting the original. Inspect the returned draft, keep its `draftId`, and
+call `sendDraft` only when sending is authorized. Existing read-only, allowlist, confirmation,
+recipient and attachment restrictions apply.
+
+`replyAll` also accepts new attachments through the MCP router. Set
+`includeOriginalAttachments: true` to retain the source attachments alongside new ones.
+Attachments use `{ path }` or `{ filename, contentBase64 }`; normal size and path limits apply.
+The `reply` and `replyAll` operations send after confirmation; they do not create drafts.
 
 ```json
 {"accountId":"work","operation":"updateDraft","input":{"draftId":"returned-id","changes":{"subject":"Revised subject","textBody":"Ready for review."}}}
@@ -267,6 +326,7 @@ SMTP acceptance and the Sent-folder copy are independent. Send, reply, and forwa
 | `smtp_partially_accepted_sent_not_confirmed` | Partial SMTP acceptance without a confirmed Sent copy |
 | `smtp_rejected` | SMTP rejected every recipient |
 | `smtp_connection_failed` | The connection failed before a confirmed delivery attempt |
+| `smtp_preflight_failed` | Local validation or MIME composition failed; no SMTP message was attempted |
 | `smtp_outcome_unknown` | Delivery may have happened; do not retry automatically |
 
 Use `retrySafe`, `messageId`, and the `verifySentMessage` query operation. Absence from Sent is not proof that SMTP delivery failed.
@@ -277,7 +337,7 @@ Manual loopback start:
 
 ```powershell
 $env:MAIL_MCP_BEARER_TOKEN = '<random-token>'
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
+node dist/index.js --http --host 127.0.0.1 --port 8765 --confirm --audit-log --redact
 ```
 
 `GET /health` reports version, start time, and active session count. `POST /mcp` requires the bearer token. Keep the bind address on loopback unless an authenticated reverse proxy protects the server.
@@ -286,29 +346,53 @@ If the managed service restarts after sleep or an automatic update, requests car
 
 ## Updates
 
-Managed Codex and Claude installations run `@1amsheldon/mail-mcp@latest`. Updates replace package code only; account JSON and keychain credentials remain in their existing user directories.
+Public stdio installations resolve `@1amsheldon/mail-mcp@latest` when the client starts the server. The Windows HTTP service checks the public registry every six hours, exits for a newer version, and lets its supervisor refresh the package and restart it. The supervisor keeps an installed runtime available if registry refresh fails. To update a global CLI, run `npm install -g @1amsheldon/mail-mcp@latest`. Credentials remain in their existing store.
 
-Version 2 changes the MCP tool surface from individual operation names to `mail_query` and `mail_mutate`. Restart the MCP client after upgrading so it refreshes the tool list. Stored accounts and credentials do not need migration.
+Codex preserves existing customized skills and linked/junction-managed skills. Use `--skip-skill` to skip skill installation entirely. Update shared skills in their own source repository. The installer rollback does not write skipped skills.
 
-Version 3 keeps the same three-tool interface and adds server draft editing/sending and keyword filters. Accounts and credentials stay in place; draft delivery records are created on first use. Refresh the client's tool catalog or restart the client to discover the new operations.
+To replace an older bundled skill with the new workflow and all backend references,
+rerun `npx -y @1amsheldon/mail-mcp@latest --install-codex --replace-skill`
+or `npx -y @1amsheldon/mail-mcp@latest --install-claude-code --replace-skill`.
+Review local customizations first. Replacement saves changed files as
+`*.mail-mcp.bak` and still preserves linked/junction-managed skills.
 
-The Windows service checks npm every six hours. It stops accepting new requests, gives in-flight requests up to eight seconds to finish, and then restarts on the new package. Stdio clients update when the MCP process next starts.
+### Upgrading IMAP/SMTP draft state from 3.0
 
-Windows logon and watchdog tasks use a windowless launcher. Managed services created by older versions migrate their scheduled-task action when the updated service next starts; the previous task definition is saved as `~/.config/mail-mcp/service/task-before-windowless.xml`.
+Before replacing 3.0, retain a separate copy of `~/.config/mail-mcp/accounts.json`
+and the entire `~/.config/mail-mcp/draft-state` directory. Close the mail-mcp
+processes before migration. Do not edit or repoint an account during this upgrade.
+For example, on Windows, capture the account definition before updating:
 
-If a Windows installation predates 2.1.3, run `npx -y --prefer-online @1amsheldon/mail-mcp@latest --install-codex` once from outside a source checkout to replace the old supervisor as well. The new supervisor installs package updates without lifecycle scripts and launches Node directly, avoiding the `npx`/`cmd.exe` process chain that can open Windows Terminal. Accounts and credentials are preserved.
+```powershell
+Copy-Item -LiteralPath "$env:USERPROFILE\.config\mail-mcp\accounts.json" -Destination "$env:USERPROFILE\mail-mcp-accounts-before-3.1.json"
+```
 
-If an older installation pins an exact version, run its installer command again.
+After installing 3.1, run the local migration for each retained IMAP/SMTP account:
 
-Re-running `--install-codex` on an existing Windows HTTP installation preserves its bearer token. When the connection settings are unchanged, existing chats can continue after the service updates without restarting Codex.
+```powershell
+mail-mcp draft-state migrate --account ACCOUNT_ID --previous-accounts "$env:USERPROFILE\mail-mcp-accounts-before-3.1.json" --dry-run
+# Inspect the result, then apply:
+mail-mcp draft-state migrate --account ACCOUNT_ID --previous-accounts "$env:USERPROFILE\mail-mcp-accounts-before-3.1.json"
+```
+
+Use `npx -y @1amsheldon/mail-mcp@latest` in place of `mail-mcp` if the CLI is not
+installed globally. The migration requires the previous and current account ID,
+IMAP host, port and username to match. It backs up the exact legacy state bytes
+as `*.json.legacy-<sha256>.bak` and binds the records to that mailbox identity,
+preserving saved draft IDs and completed or uncertain send results. It does not
+access credentials or mailboxes. Restart the client/service after migration.
+Without a verified pre-upgrade account definition, keep the records and recover
+that definition; deleting state can remove protection against duplicate sends.
+
+`getThread` now returns `{ items, folders, partial, warning }` with message locators. Listing/search use descending UID windows rather than full-folder snapshots: `total` is `null`, newly arriving higher UIDs are excluded from continuation pages, and deleted messages may disappear. Follow `nextCursor` even after an empty page. Restart clients to refresh these contracts.
 
 ## Connection diagnostics
 
 ```bash
-npx -y --prefer-online @1amsheldon/mail-mcp@latest --validate-accounts
+npx -y @1amsheldon/mail-mcp@latest --validate-accounts
 ```
 
-Checks configured IMAP connections and SMTP hosts without sending mail. Prints a result for each connection and a total of passed, failed, and skipped probes. Exits with code `1` if a probe fails or no IMAP accounts are configured; otherwise exits with `0`. This command does not validate Apple Mail, Microsoft API, or Mailtrap accounts.
+Checks configured IMAP connections and SMTP hosts without sending mail. Prints a result for each connection and a total of passed, failed, and skipped probes. Exits with code `1` if a probe fails or no IMAP accounts are configured; otherwise exits with `0`. This command does not validate Zimbra, Apple Mail, Microsoft API, or Mailtrap accounts.
 
 ## Develop
 
@@ -322,19 +406,33 @@ npm pack --dry-run
 
 `release:check` builds the package, enforces English repository text, runs the complete test suite, exercises stdio and HTTP transports, checks importability, and runs `npm audit`.
 
+After changing the skill or its references, run `npm run docs:generate` and review the generated `src/mcp/agent-guide-content.ts`. Build runs `docs:check` and fails on drift. Documentation tests check public operation coverage, SMTP status coverage, local links and JSON examples; installer tests check reference delivery, backups, linked-skill preservation and rollback. These checks do not certify live mailbox/provider behavior. Follow the production acceptance reference and report untested accounts, devices and write scenarios explicitly.
+
 The default suite uses protocol and provider mocks. It does not access a real mailbox, send mail, call Microsoft or Mailtrap, or automate Mail.app. `--validate-accounts` opens configured IMAP and SMTP connections without sending a message.
 
 ### Local Windows build
 
 
-After building and testing, `node dist/index.js --install-codex-local` runs that checkout as the shared Windows service. This disables npm refresh and runtime auto-update for that installation. Rebuild and rerun the installer to update it. Use `--install-codex` to return to the published npm package. Account definitions and credentials are reused.
+After building and testing, `node dist/index.js --install-codex-local` runs that checkout as the shared Windows service. This disables npm refresh and runtime auto-update for that installation. Keep the checkout at a stable path; rebuild and rerun the installer to update it. Account definitions and credentials are reused.
 
 `npm run backup:windows-service` backs up the task, service files, and Codex configuration under the local mail-mcp configuration directory. Keep these backups private. `npm run probe:draft-workflow -- --check` checks the draft operation catalog and lists folders without writing mail. It requires `MAIL_MCP_ACCOUNT_ID` and `MAIL_MCP_BEARER_TOKEN`. The separate `--prepare` mode creates and updates a test draft and must be explicitly requested; it never sends.
 
 ## Release
 
-Publishing is handled by `.github/workflows/publish.yml`. Publish a GitHub Release whose tag is `v` followed by the exact version in `package.json`. GitHub Actions verifies the tag and publishes to npm through OIDC trusted publishing; the workflow contains no npm token.
+Publishing a GitHub release with a tag matching `package.json` (for example `v3.1.0`) runs the npm publishing workflow. It runs the release checks and publishes with public access and provenance using npm trusted publishing. The npm package must authorize `1amSheldon/mail-mcp` and workflow `publish.yml` as a trusted publisher. This repository does not embed a publishing token. See [npm trusted publishing](https://docs.npmjs.com/trusted-publishers/).
 
-## License
+## Review hardening contracts
 
-MIT. See [LICENSE](LICENSE).
+- `getThread` accepts `threadId`, `folder` (default INBOX) or an explicit `folders` array (at most 10, e.g. INBOX and the discovered Sent path). It walks reference ancestors and uses Gmail `threadId` when supported. Results always report `partial: true`: deleted, unreferenced or out-of-scope mail cannot be ruled out.
+- Draft creation returns `status: saved` or `append_outcome_unknown`, `retrySafe: false`, Message-ID and recovery instructions. Do not create another copy after an ambiguous APPEND or a local post-save failure. Find the saved draft by its Message-ID.
+- ManageSieve currently uses implicit TLS and verifies certificates. For a private CA, configure Node's `NODE_EXTRA_CA_CERTS` before launch or supply the client CA option. STARTTLS-only endpoints are not supported by this client; authentication is never sent in plaintext.
+
+## Acknowledgements and license
+
+Maintained by [1amSheldon](https://github.com/1amSheldon). Thanks to
+[honest-magic](https://github.com/honest-magic/mail-mcp), wiederholung,
+Patrick Freyer and [starychenko](https://github.com/starychenko/mail-mcp)
+for the original project and subsequent contributions, including the Zimbra backend.
+
+MIT. All existing copyright notices are preserved in [LICENSE](LICENSE);
+contributors remain credited in the Git history and package metadata.

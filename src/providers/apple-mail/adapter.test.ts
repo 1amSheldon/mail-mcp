@@ -10,6 +10,56 @@ import { APPLE_MAIL_OPERATION_KINDS } from './types.js';
 import type { AppleScriptRunner } from './runner.js';
 
 describe('AppleMailAdapter', () => {
+  it.each(['compose', 'createDraft'] as const)('binds %s sender before creating any native message', async operation => {
+    const run = vi.fn().mockResolvedValue('{"senderScopeMismatch":true}');
+    const adapter = new AppleMailAdapter({ runner: { run }, platform: 'darwin' });
+    await expect(adapter[operation]({ account: 'Work', from: 'personal@example.com',
+      to: ['to@example.com'], subject: 'S', body: 'B' })).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    const script = run.mock.calls[0][0] as string;
+    expect(script).toContain('set accountSenders to email addresses of selectedAccount');
+    expect(script.indexOf('if accountSenders does not contain selectedSender')).toBeLessThan(script.indexOf('make new outgoing message'));
+    expect(script).toContain('set sender of outgoingMessage to selectedSender');
+    expect(script).not.toContain('try\nset sender');
+  });
+
+  it('requires a usable default sender from the selected native account', async () => {
+    const run = vi.fn().mockResolvedValue('{"ok":true}');
+    const adapter = new AppleMailAdapter({ runner: { run }, platform: 'darwin' });
+    await adapter.compose({ account: 'Work', to: ['to@example.com'], subject: 'S', body: 'B' });
+    expect(run.mock.calls[0][0]).toContain('if (count of accountSenders) is 0 then return');
+    expect(run.mock.calls[0][0]).toContain('set selectedSender to item 1 of accountSenders');
+  });
+  it.each(['timeout', 'invalid-json'])('preserves send uncertainty after %s', async failure => {
+    const run = failure === 'timeout' ? vi.fn().mockRejectedValue(new AppleMailError('TIMEOUT', 'timed out'))
+      : vi.fn().mockResolvedValue('{bad json');
+    const adapter = new AppleMailAdapter({ platform: 'darwin', runner: { run } });
+    await expect(adapter.compose({ account: 'Personal', to: ['to@example.com'], subject: 'S', body: 'B' }))
+      .rejects.toMatchObject({ code: 'OUTCOME_UNKNOWN', retrySafe: false });
+    expect(run).toHaveBeenCalledOnce();
+  });
+
+  it('keeps definite permission denial and draft-only timeouts separate from sending', async () => {
+    const run = vi.fn().mockRejectedValueOnce(new AppleMailError('PERMISSION_DENIED', 'denied'))
+      .mockRejectedValueOnce(new AppleMailError('TIMEOUT', 'timed out'));
+    const adapter = new AppleMailAdapter({ platform: 'darwin', runner: { run } });
+    await expect(adapter.compose({ to: ['to@example.com'], subject: 'S', body: 'B' })).rejects.toMatchObject({ code: 'PERMISSION_DENIED' });
+    await expect(adapter.reply({ account: 'Personal', messageId: '1', body: 'B', send: false }))
+      .rejects.toMatchObject({ code: 'TIMEOUT' });
+  });
+  it('blocks global rule access by default before invoking Mail.app', async () => {
+    const runner: AppleScriptRunner = { run: vi.fn() };
+    const adapter = new AppleMailAdapter({ runner, platform: 'darwin' });
+    await expect(adapter.listRules({ account: 'Personal' })).rejects.toThrow('application-global');
+    await expect(adapter.deleteRule({ account: 'Personal', name: 'Other account rule' })).rejects.toThrow('application-global');
+    expect(runner.run).not.toHaveBeenCalled();
+  });
+
+  it('allows explicitly enabled global rules and rejects ambiguous names in scripts', async () => {
+    const runner: AppleScriptRunner = { run: vi.fn().mockResolvedValue('{"ok":true}') };
+    const adapter = new AppleMailAdapter({ runner, platform: 'darwin', allowGlobalRules: true });
+    await adapter.deleteRule({ account: 'Personal', name: 'Shared name' });
+    expect(runner.run).toHaveBeenCalledWith(expect.stringContaining('if (count of matches) is not 1'), expect.anything());
+  });
   it('fails without invoking osascript on non-macOS platforms', async () => {
     const runner: AppleScriptRunner = { run: vi.fn() };
     const adapter = new AppleMailAdapter({ runner, platform: 'win32' });

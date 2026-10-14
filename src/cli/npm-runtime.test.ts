@@ -24,7 +24,7 @@ describe('mail-mcp npm runtime command', () => {
       '--prefer-online',
       '--prefix',
       getMailMcpNpxPrefix(home),
-      '--package=@1amsheldon/mail-mcp@latest',
+      `--package=${MAIL_MCP_LATEST_SPEC}`,
       'mail-mcp',
       '--confirm',
       '--audit-log',
@@ -34,6 +34,13 @@ describe('mail-mcp npm runtime command', () => {
   it('keeps the exported update contract stable', () => {
     expect(MAIL_MCP_LATEST_SPEC).toBe('@1amsheldon/mail-mcp@latest');
     expect(NPX_RESOLUTION_ARGS).toEqual(['-y', '--prefer-online']);
+  });
+
+  it('can exercise a packed build without changing the public default', () => {
+    expect(buildMailMcpNpxArgs(['--read-only'], 'test-home', '/tmp/mail-mcp.tgz'))
+      .toContain('--package=/tmp/mail-mcp.tgz');
+    expect(buildMailMcpNpxArgs(['--read-only'], 'test-home'))
+      .toContain('--package=@1amsheldon/mail-mcp@latest');
   });
 
   it('creates the isolated npm prefix before the client uses it', async () => {

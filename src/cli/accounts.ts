@@ -1,4 +1,4 @@
-import { createInterface } from 'node:readline/promises';
+import { createAccountPrompt, type QuestionPrompt } from './prompt.js';
 import {
   getConfiguredAccounts,
   saveConfiguredAccounts,
@@ -6,12 +6,11 @@ import {
   type ConfiguredAccount,
   type EmailAccount,
 } from '../config.js';
-import { saveCredentials, removeCredentials } from '../security/keychain.js';
+import { saveCredentials, removeCredentials, removeZimbraCredentials } from '../security/keychain.js';
 import { validateOAuth2TokenEndpoint } from '../security/oauth2.js';
-
-interface QuestionPrompt {
-  question(query: string): Promise<string>;
-}
+import { handleZimbraLogin, disableZimbraAutomaticLogin } from './zimbra-login.js';
+import { validateZimbraEndpoint } from '../providers/zimbra/session.js';
+import { withZimbraLoginLock } from '../providers/zimbra/login-state.js';
 
 export function inferSmtpHost(imapHost: string): string {
   return /^imap\./i.test(imapHost) ? imapHost.replace(/^imap\./i, 'smtp.') : '';
@@ -46,6 +45,12 @@ export async function handleAccountsCommand(args: string[]): Promise<boolean> {
   const subcommand = args[1];
 
   switch (subcommand) {
+    case 'login':
+      await handleZimbraLogin(args[2], args.slice(3));
+      return true;
+    case 'disable-auto-login':
+      await disableZimbraAutomaticLogin(args[2]);
+      return true;
     case 'list':
       await listAccounts();
       return true;
@@ -59,7 +64,7 @@ export async function handleAccountsCommand(args: string[]): Promise<boolean> {
       return true;
 
     default:
-      console.log('Usage: mail-mcp accounts <add|list|remove>');
+      console.log('Usage: mail-mcp accounts <add|list|remove|login|disable-auto-login>');
       process.exit(1);
   }
 }
@@ -95,7 +100,7 @@ async function listAccounts(): Promise<void> {
   }
 }
 
-type ConfiguredBackend = 'imap-smtp' | 'apple-mail' | 'microsoft-graph' | 'ews' | 'mailtrap';
+type ConfiguredBackend = 'imap-smtp' | 'apple-mail' | 'microsoft-graph' | 'ews' | 'mailtrap' | 'zimbra';
 type ProviderAccountBase = {
   [Backend in Exclude<ConfiguredBackend, 'imap-smtp'>]: {
     id: string;
@@ -104,9 +109,9 @@ type ProviderAccountBase = {
   };
 }[Exclude<ConfiguredBackend, 'imap-smtp'>];
 
-async function askRequired(prompt: QuestionPrompt, label: string): Promise<string> {
+async function askRequired(prompt: QuestionPrompt, label: string, secret = false): Promise<string> {
   while (true) {
-    const value = (await prompt.question(`${label}: `)).trim();
+    const value = (await (secret ? prompt.secret(`${label}: `) : prompt.question(`${label}: `))).trim();
     if (value) return value;
     console.log(`  ${label} is required.`);
   }
@@ -130,14 +135,15 @@ async function askBackend(prompt: QuestionPrompt): Promise<ConfiguredBackend> {
     '3': 'microsoft-graph',
     '4': 'ews',
     '5': 'mailtrap',
+    '6': 'zimbra',
   };
   while (true) {
     const raw = (await prompt.question(
-      'Backend: 1) IMAP/SMTP  2) Apple Mail  3) Microsoft Graph  4) EWS  5) Mailtrap [1]: '
+      'Backend: 1) IMAP/SMTP  2) Apple Mail  3) Microsoft Graph  4) EWS  5) Mailtrap  6) Zimbra SOAP [1]: '
     )).trim();
     const backend = choices[raw || '1'];
     if (backend) return backend;
-    console.log('  Choose a backend from 1 to 5.');
+    console.log('  Choose a backend from 1 to 6.');
   }
 }
 
@@ -165,6 +171,13 @@ async function addProviderAccount(
   existingAccounts: ConfiguredAccount[],
   base: ProviderAccountBase,
 ): Promise<void> {
+  if (base.backend === 'zimbra') {
+    const user = await askRequired(prompt, 'Zimbra mailbox email');
+    const endpoint = validateZimbraEndpoint(await askRequired(prompt, 'Zimbra HTTPS endpoint (https://mail.example.com/service/soap)'));
+    await saveProviderAccount(existingAccounts, { ...base, user, endpoint });
+    console.log(`Run accounts login ${base.id} locally to authenticate, including 2FA when required.`);
+    return;
+  }
   if (base.backend === 'apple-mail') {
     const nativeAccountName = await askRequired(
       prompt,
@@ -176,7 +189,7 @@ async function addProviderAccount(
 
   if (base.backend === 'mailtrap') {
     const accountId = (await prompt.question('Mailtrap account ID (optional): ')).trim();
-    const token = await askRequired(prompt, 'Mailtrap API token');
+    const token = await askRequired(prompt, 'Mailtrap API token', true);
     await saveProviderAccount(
       existingAccounts,
       { ...base, ...(accountId ? { accountId } : {}) },
@@ -191,8 +204,8 @@ async function addProviderAccount(
     : (await prompt.question('Microsoft Graph HTTPS endpoint override (optional): ')).trim();
   const tokenEndpoint = await askOAuth2TokenEndpoint(prompt);
   const clientId = await askRequired(prompt, 'OAuth2 client ID');
-  const clientSecret = await askRequired(prompt, 'OAuth2 client secret');
-  const refreshToken = await askRequired(prompt, 'OAuth2 refresh token');
+  const clientSecret = await askRequired(prompt, 'OAuth2 client secret', true);
+  const refreshToken = await askRequired(prompt, 'OAuth2 refresh token', true);
   const account: ConfiguredAccount = base.backend === 'ews'
     ? { ...base, user, endpoint }
     : { ...base, user, ...(endpoint ? { endpoint } : {}) };
@@ -229,23 +242,24 @@ async function removeAccount(id: string | undefined): Promise<void> {
     process.exit(1);
   }
 
-  accounts.splice(index, 1);
-  saveConfiguredAccounts(accounts);
-
-  try {
-    await removeCredentials(id);
-  } catch {
-    console.error(`Warning: could not remove keychain entry for '${id}' (may not exist).`);
-  }
+  const isZimbra = accounts[index].backend === 'zimbra';
+  const remove = async () => {
+    accounts.splice(index, 1);
+    saveConfiguredAccounts(accounts);
+    try { await removeCredentials(id); }
+    catch { console.error(`Warning: could not remove keychain entry for '${id}' (may not exist).`); }
+  };
+  if (isZimbra) await withZimbraLoginLock(id, async () => {
+    await removeZimbraCredentials(id);
+    saveConfiguredAccounts(accounts.filter(account => account.id !== id));
+  });
+  else await remove();
 
   console.log(`Account '${id}' removed.`);
 }
 
 async function addAccount(): Promise<void> {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-  });
+  const rl = createAccountPrompt();
 
   try {
     const existingAccounts = await getConfiguredAccounts();
@@ -318,7 +332,7 @@ async function addAccount(): Promise<void> {
     }
 
     // useTLS
-    const tlsRaw = await rl.question('Use TLS? (y/n) [y]: ');
+    const tlsRaw = await rl.question('Use implicit TLS? (y/n; n requires STARTTLS) [y]: ');
     const useTLS = tlsRaw.trim().toLowerCase() !== 'n';
 
     // smtpHost
@@ -338,7 +352,7 @@ async function addAccount(): Promise<void> {
     let password: string | undefined;
     if (authType === 'login') {
       while (!password) {
-        password = await rl.question(
+        password = await rl.secret(
           'Password or app password (stored in the system credential store, not accounts.json): '
         );
         if (!password) console.log('  Password is required for login authentication.');

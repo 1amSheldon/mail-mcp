@@ -1,6 +1,12 @@
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
+import { ZIMBRA_READ_SCHEMAS, ZIMBRA_WRITE_SCHEMAS } from '../providers/zimbra/operations.js';
+
+function zimbraNames<T extends Record<string, unknown>>(schemas: T): Array<`zimbra.${Extract<keyof T, string>}`> {
+  return Object.keys(schemas).map(name => `zimbra.${name}` as `zimbra.${Extract<keyof T, string>}`);
+}
 
 export const MAIL_QUERY_OPERATIONS = [
+  ...zimbraNames(ZIMBRA_READ_SCHEMAS),
   'listMessages', 'searchMessages', 'verifySentMessage', 'readMessage', 'listFolders',
   'getRawMessage', 'getThread', 'getAttachment', 'extractAttachmentText', 'mailboxStats',
   'extractContacts', 'listTemplates', 'renderTemplate', 'listFilters', 'getFilter',
@@ -16,7 +22,8 @@ export const MAIL_QUERY_OPERATIONS = [
 ] as const;
 
 export const MAIL_MUTATION_OPERATIONS = [
-  'sendMessage', 'createDraft', 'updateDraft', 'sendDraft', 'createMailbox', 'renameMailbox', 'deleteMailbox',
+  ...zimbraNames(ZIMBRA_WRITE_SCHEMAS),
+  'sendMessage', 'createDraft', 'createReplyDraft', 'createReplyAllDraft', 'updateDraft', 'sendDraft', 'createMailbox', 'renameMailbox', 'deleteMailbox',
   'copyMessage', 'moveMessage', 'modifyLabels', 'registerOAuth2', 'batchMessages',
   'reply', 'replyAll', 'forward', 'moveToTrash', 'permanentlyDelete', 'markRead',
   'markUnread', 'star', 'unstar', 'setFilter', 'deleteFilter',
@@ -55,6 +62,8 @@ const STANDARD_QUERY_ROUTES = {
 const STANDARD_MUTATION_ROUTES = {
   sendMessage: 'send_email',
   createDraft: 'create_draft',
+  createReplyDraft: 'create_reply_draft',
+  createReplyAllDraft: 'create_reply_all_draft',
   updateDraft: 'update_draft',
   sendDraft: 'send_draft',
   createMailbox: 'create_mailbox',
@@ -79,6 +88,7 @@ const STANDARD_MUTATION_ROUTES = {
 } as const satisfies Record<string, string>;
 
 const PROVIDER_WRITE_ROUTERS = new Set([
+  'zimbra_mail_mutate',
   'apple_mail_mutate', 'microsoft_mail_send', 'mailtrap_mutate',
 ]);
 
@@ -131,6 +141,9 @@ function providerRoute(
   if (separator < 1) return undefined;
   const provider = operation.slice(0, separator);
   const providerOperation = operation.slice(separator + 1);
+  if (provider === 'zimbra') {
+    return { name: write ? 'zimbra_mail_mutate' : 'zimbra_mail_query', args: { accountId, operation: providerOperation, input } };
+  }
   if (provider === 'apple') {
     return {
       name: write ? 'apple_mail_mutate' : 'apple_mail_query',
@@ -218,6 +231,7 @@ function mutationOperationAllowed(
   if (standardRoute && allowed.has(standardRoute)) return true;
   if (operation.startsWith('apple.') && allowed.has('apple_mail_mutate')) return true;
   if (operation.startsWith('microsoft.') && allowed.has('microsoft_mail_send')) return true;
+  if (operation.startsWith('zimbra.') && allowed.has('zimbra_mail_mutate')) return true;
   return operation.startsWith('mailtrap.') && allowed.has('mailtrap_mutate');
 }
 
@@ -243,7 +257,7 @@ const LIST_ACCOUNTS_TOOL: Tool = {
 
 const MAIL_QUERY_TOOL: Tool = {
   name: 'mail_query',
-  description: 'Read mail through IMAP, Apple Mail, Microsoft, or Mailtrap. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, or mailtrap.*. Read mail://agent-guide for input shapes.',
+  description: 'Read mail through IMAP, Apple Mail, Microsoft, Mailtrap, or Zimbra. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, mailtrap.*, or zimbra.*. Read mail://agent-guide, then the needed mail://reference/<topic> for input shapes.',
   annotations: { readOnlyHint: true, destructiveHint: false },
   inputSchema: {
     type: 'object',
@@ -259,7 +273,7 @@ const MAIL_QUERY_TOOL: Tool = {
 
 const MAIL_MUTATE_TOOL: Tool = {
   name: 'mail_mutate',
-  description: 'Draft, send, organize, or configure mail through any supported backend. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, or mailtrap.*. Read mail://agent-guide before writes.',
+  description: 'Draft, send, organize, or configure mail through any supported backend. Choose an operation and pass its fields in input. Provider operations use apple.*, microsoft.*, mailtrap.*, or zimbra.*. Read mail://agent-guide and the needed mail://reference/<topic> before unfamiliar writes.',
   annotations: { readOnlyHint: false, destructiveHint: true },
   inputSchema: {
     type: 'object',

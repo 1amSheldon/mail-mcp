@@ -1,54 +1,24 @@
+import addressparser from 'nodemailer/lib/addressparser/index.js';
 import { ValidationError } from '../errors.js';
 
 // ReDoS-safe email regex — no nested quantifiers
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-// Matches angle-bracket format: "Name <user@example.com>"
-const ANGLE_BRACKET_RE = /<([^>]+)>/;
-
-/**
- * Extracts individual email addresses from a comma-separated field string.
- * Handles angle-bracket format ("Name <user@example.com>").
- */
+// Use the same mailbox-list parser as Nodemailer when constructing its envelope.
+// Splitting on commas corrupts quoted display names and RFC address groups.
 function extractAddresses(field: string): string[] {
-  return field
-    .split(',')
-    .map((e) => e.trim())
-    .filter((e) => e !== '')
-    .map((entry) => {
-      const angleMatch = ANGLE_BRACKET_RE.exec(entry);
-      return angleMatch ? angleMatch[1].trim() : entry;
-    });
+  if (/[\r\n\0]/.test(field)) throw new ValidationError('Invalid email address(es): control character');
+  const parsed = addressparser(field, { flatten: true });
+  const invalid = parsed.filter(entry => !EMAIL_RE.test(entry.address ?? ''));
+  if (invalid.length) {
+    throw new ValidationError('Invalid email address(es): ' + invalid.map(entry => entry.address || entry.name).join(', '));
+  }
+  return parsed.map(entry => entry.address!);
 }
 
-/**
- * Validates one or more email address fields (to, cc, bcc).
- * Each field may contain multiple comma-separated addresses or be undefined.
- * Throws ValidationError listing all invalid addresses if any are found.
- */
 export function validateEmailAddresses(...addrFields: Array<string | undefined>): void {
-  const invalid: string[] = [];
-
   for (const field of addrFields) {
-    if (field === undefined || field === '') continue;
-
-    const entries = field.split(',').map((e) => e.trim());
-
-    for (const entry of entries) {
-      if (entry === '') continue;
-
-      // Extract address from angle-bracket format or use raw entry
-      const angleMatch = ANGLE_BRACKET_RE.exec(entry);
-      const address = angleMatch ? angleMatch[1].trim() : entry;
-
-      if (!EMAIL_RE.test(address)) {
-        invalid.push(entry);
-      }
-    }
-  }
-
-  if (invalid.length > 0) {
-    throw new ValidationError('Invalid email address(es): ' + invalid.join(', '));
+    if (field) extractAddresses(field);
   }
 }
 

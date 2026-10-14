@@ -40,8 +40,17 @@ try {
     throw new Error('Server draft operations are missing from the published catalog');
   }
   const guide = await client.readResource({ uri: 'mail://agent-guide' });
-  if (!guide.contents.some(content => content.text?.includes('sendDraft'))) {
-    throw new Error('Server draft instructions are missing');
+  const guideText = guide.contents.map(content => content.text ?? '').join('\n');
+  if (!guideText.includes('mail://reference/imap-smtp') || Buffer.byteLength(guideText) >= 8_192) {
+    throw new Error('Core guide must remain compact and link to on-demand IMAP/SMTP instructions');
+  }
+  const references = await client.listResources();
+  if (!references.resources.some(resource => resource.uri === 'mail://reference/imap-smtp')) {
+    throw new Error('IMAP/SMTP reference is missing from the published resource catalog');
+  }
+  const imapGuide = await client.readResource({ uri: 'mail://reference/imap-smtp' });
+  if (!imapGuide.contents.some(content => content.text?.includes('sendDraft'))) {
+    throw new Error('Server draft instructions are missing from the IMAP/SMTP reference');
   }
   const healthDuringSession = await fetch(host.url.replace('/mcp', '/health'))
     .then(response => response.json());
@@ -56,6 +65,7 @@ try {
     serverVersion: healthDuringSession.version,
     toolCount: names.length,
     toolCatalogBytes: Buffer.byteLength(JSON.stringify(result.tools)),
+    coreGuideBytes: Buffer.byteLength(guideText),
     activeSessionsDuringRequest: healthDuringSession.activeSessions,
     activeSessionsAfterClose: healthAfterSession.activeSessions,
   }));

@@ -5,9 +5,11 @@ import { simpleParser, type ParsedMail, type AddressObject } from 'mailparser';
 import { z } from 'zod';
 import { ACCOUNTS_PATH, type EmailAccount } from '../config.js';
 import { writeTextFileAtomic } from '../utils/atomic-write.js';
+import { syncDirectory } from '../utils/directory-sync.js';
 import { decodeMessageLocator } from '../domain/message-locator.js';
 import type { OutgoingAttachment, OutgoingMessage } from '../domain/outgoing-message.js';
 import type { SmtpComposedMessage } from '../protocol/smtp.js';
+import { AppendNotSavedError } from '../protocol/imap.js';
 import type { DraftCreationResult, SendDeliveryResult } from './mail.js';
 import { validateEmailAddresses, validateRecipients } from '../utils/validation.js';
 
@@ -55,8 +57,20 @@ interface DraftRecord {
   pending?: DraftPending;
   attempt?: DraftAttempt;
 }
-interface DraftState { records: DraftRecord[] }
+interface DraftState { records: DraftRecord[]; accountIdentity?: string }
 const digest = (value: Buffer | string) => createHash('sha256').update(value).digest('hex');
+
+function mailboxIdentity(account: EmailAccount): string {
+  return digest(JSON.stringify({
+    backend: 'imap', host: account.host.toLowerCase(), port: account.port, user: account.user,
+  }));
+}
+
+export interface DraftMigrationResult {
+  status: 'missing' | 'already_bound' | 'would_migrate' | 'migrated';
+  records: number;
+  backup?: string;
+}
 
 const draftPendingSchema = z.object({
   locator: z.string().min(1).optional(),
@@ -83,6 +97,7 @@ const draftSendResultSchema = z.object({
     'smtp_partially_accepted_sent_not_confirmed',
     'smtp_rejected',
     'smtp_connection_failed',
+    'smtp_preflight_failed',
     'smtp_outcome_unknown',
     'sent_provider_managed',
     'partially_sent_provider_managed',
@@ -114,7 +129,10 @@ const draftRecordSchema = z.object({
   pending: draftPendingSchema.optional(),
   attempt: draftAttemptSchema.optional(),
 }).strict();
-const draftStateSchema = z.object({ records: z.array(draftRecordSchema) }).strict();
+const draftStateSchema = z.object({
+  records: z.array(draftRecordSchema),
+  accountIdentity: z.string().regex(/^[0-9a-f]{64}$/).optional(),
+}).strict();
 
 function parseDraftState(value: unknown): DraftState {
   const parsed = draftStateSchema.safeParse(value);
@@ -193,8 +211,56 @@ function parseDraftChanges(value: unknown): DraftChanges {
 /** Account-wide disk lock also serializes adoption of locators across processes. */
 export class DraftStore {
   private file: string;
-  constructor(accountId: string, root = join(dirname(ACCOUNTS_PATH), 'draft-state')) {
+  constructor(private accountId: string, root = join(dirname(ACCOUNTS_PATH), 'draft-state')) {
     this.file = join(root, digest(accountId) + '.json');
+  }
+
+  /** The caller must supply a retained pre-upgrade account definition, never infer it from current config. */
+  async migrateLegacy(account: EmailAccount, previousAccount: EmailAccount, dryRun = false): Promise<DraftMigrationResult> {
+    if (account.id !== this.accountId || account.id !== previousAccount.id || mailboxIdentity(account) !== mailboxIdentity(previousAccount)) {
+      throw new Error('Previous and current mailbox identities differ; retain the legacy state and use a distinct account id for a replacement mailbox.');
+    }
+    return this.run(async (state, save) => {
+      let original: Buffer;
+      try { original = await readFile(this.file); }
+      catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return { status: 'missing', records: 0 };
+        throw error;
+      }
+      const identity = mailboxIdentity(account);
+      if (state.accountIdentity) {
+        if (state.accountIdentity !== identity) throw new Error('Draft state belongs to a different mailbox identity; refusing migration.');
+        return { status: 'already_bound', records: state.records.length };
+      }
+      // Include pending replacements and historical aliases: none may silently change account ownership.
+      for (const record of state.records) {
+        const locators = [record.locator, ...record.aliases, record.pending?.original, record.pending?.locator, record.attempt?.result?.locator];
+        for (const locator of locators) {
+          if (locator === undefined) continue;
+          let owner: string;
+          try { owner = decodeMessageLocator(locator).accountId; }
+          catch { throw new Error('Legacy draft state contains an invalid locator; inspect the retained state before migration.'); }
+          if (owner !== account.id) throw new Error('Legacy draft state contains a different account id; inspect the retained state before migration.');
+        }
+      }
+      const backup = this.file + '.legacy-' + digest(original) + '.bak';
+      if (dryRun) return { status: 'would_migrate', records: state.records.length, backup };
+      // Create once and flush before replacing the state. A prior interrupted migration can reuse the exact backup.
+      let fd: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        fd = await open(backup, 'wx', 0o600);
+        await fd.writeFile(original);
+        await fd.sync();
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        if (!(await readFile(backup)).equals(original)) throw new Error('Legacy draft backup differs from the current state; refusing migration.');
+      } finally { await fd?.close(); }
+      await syncDirectory(dirname(this.file));
+      state.accountIdentity = identity;
+      await save();
+      await syncDirectory(dirname(this.file));
+      return { status: 'migrated', records: state.records.length, backup };
+    });
   }
   async run<T>(work: (state: DraftState, save: () => Promise<void>) => Promise<T>): Promise<T> {
     await mkdir(dirname(this.file), { recursive: true });
@@ -378,12 +444,23 @@ export async function matchesSentDraft(candidate: Buffer, messageId: string, sin
 export class DraftWorkflow {
   constructor(private account: EmailAccount, private port: DraftPort, private store = new DraftStore(account.id)) {}
 
+  private withState<T>(work: (state: DraftState, save: () => Promise<void>) => Promise<T>): Promise<T> {
+    return this.store.run(async (state, save) => {
+      const accountIdentity = mailboxIdentity(this.account);
+      if (state.accountIdentity !== accountIdentity && (state.accountIdentity || state.records.length > 0)) {
+        throw new Error('Draft state belongs to a different or unverified mailbox identity; inspect prior delivery records. For legacy state, run mail-mcp draft-state migrate --account ID --previous-accounts PATH --dry-run with a retained pre-upgrade accounts.json snapshot, then repeat without --dry-run. Use a distinct account id for a replacement mailbox; do not delete delivery records.');
+      }
+      state.accountIdentity = accountIdentity;
+      return work(state, save);
+    });
+  }
+
   private addAlias(record: DraftRecord, locator: string): void {
     if (!record.aliases.includes(locator)) record.aliases.push(locator);
   }
 
   async adopt(locator: string, messageId?: string): Promise<string> {
-    return this.store.run(async (state, save) => {
+    return this.withState(async (state, save) => {
       let r = state.records.find(r => r.locator === locator || r.aliases.includes(locator));
       if (!r) {
         r = { draftId: randomUUID(), locator, aliases: [locator], messageIds: messageId ? [messageId] : [] };
@@ -401,14 +478,22 @@ export class DraftWorkflow {
     try { current = await this.port.read(r.locator); } catch { /* Search retained identifiers, never a subject. */ }
     if (current) {
       const id = (await parse(current)).messageId;
-      if (id && new Set(await this.port.search(id)).size > 1) throw new Error('Draft identity ambiguous; select the current draft again');
-      return current;
+      if (r.messageIds.length === 0 || (id && r.messageIds.includes(id))) {
+        if (id && new Set(await this.port.search(id)).size > 1) throw new Error('Draft identity ambiguous; select the current draft again');
+        return current;
+      }
     }
     const matches = new Set<string>();
     for (const id of r.messageIds) for (const locator of await this.port.search(id)) matches.add(locator);
     if (matches.size !== 1) throw new Error('Draft missing or ambiguous; select the current draft again');
-    r.locator = [...matches][0]; this.addAlias(r, r.locator);
-    return this.port.read(r.locator);
+    const replacement = [...matches][0];
+    const replacementIdentity = decodeMessageLocator(replacement);
+    if (replacementIdentity.accountId !== this.account.id || replacementIdentity.mailbox !== expected) throw new Error('Target is not an account draft');
+    const raw = await this.port.read(replacement);
+    const messageId = (await parse(raw)).messageId;
+    if (!messageId || !r.messageIds.includes(messageId)) throw new Error('Draft identity changed during lookup; select the current draft again');
+    r.locator = replacement; this.addAlias(r, replacement);
+    return raw;
   }
 
   private async operate(
@@ -416,7 +501,7 @@ export class DraftWorkflow {
     operation: 'update' | 'send',
     action: (r: DraftRecord, raw: Buffer, save: () => Promise<void>) => Promise<Record<string, unknown>>,
   ) {
-    return this.store.run(async (state, save) => {
+    return this.withState(async (state, save) => {
       if (typeof target !== 'string' || target.length === 0 || target.trim() !== target) {
         throw new Error('Draft target must be a non-empty string');
       }
@@ -507,7 +592,17 @@ export class DraftWorkflow {
       if (!r.messageIds.includes(replacementMessageId)) r.messageIds.push(replacementMessageId);
       r.pending = { original: r.locator, hash: digest(raw) };
       await save();
-      const next = await this.port.append(replacement);
+      let next;
+      try {
+        next = await this.port.append(replacement);
+      } catch (error) {
+        // Only positive evidence that APPEND did not save permits another replacement.
+        if (error instanceof AppendNotSavedError) {
+          delete r.pending;
+          await save();
+        }
+        throw error;
+      }
       if (!next.locator) throw new Error('Replacement saved but locator unavailable; inspect Drafts');
       r.pending.locator = next.locator;
       await save();
@@ -565,7 +660,7 @@ export class DraftWorkflow {
         }
       }
       // Only connection failure is known to precede a delivery attempt.
-      if (result.status === 'smtp_connection_failed') delete r.attempt;
+      if (result.status === 'smtp_connection_failed' || result.status === 'smtp_preflight_failed') delete r.attempt;
       await save(); return output;
     });
   }

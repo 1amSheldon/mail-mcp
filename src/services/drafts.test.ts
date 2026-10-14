@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, writeFile, readFile, readdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { simpleParser } from 'mailparser';
@@ -38,6 +38,192 @@ async function fixture() {
   return { workflow, port, messages, raw, store, root };
 }
 describe('server draft workflow', () => {
+  // All complete-result statuses accepted by the 3.0 schema at 587f09f.
+  it.each([
+    'sent_and_saved', 'partially_sent_and_saved', 'smtp_accepted_sent_not_confirmed',
+    'smtp_partially_accepted_sent_not_confirmed', 'smtp_rejected', 'smtp_connection_failed',
+    'smtp_outcome_unknown', 'sent_provider_managed', 'partially_sent_provider_managed',
+    'sent_without_saved_copy', 'partially_sent_without_saved_copy',
+  ])('retains the legacy complete-result status %s during migration and replay', async status => {
+    const f = await fixture();
+    const result = await f.workflow.send(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.accountIdentity;
+    legacy.records[0].attempt.result.status = status;
+    await writeFile(file, JSON.stringify(legacy));
+    vi.mocked(f.port.send).mockClear();
+    await f.store.migrateLegacy(account, account);
+    expect(JSON.parse(await readFile(file, 'utf8')).records).toEqual(legacy.records);
+    expect(await f.workflow.send(result.draftId)).toEqual(legacy.records[0].attempt.result);
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+
+  it.each(['complete', 'unknown', 'interrupted', 'sending'] as const)('migrates legacy %s delivery without losing deduplication', async status => {
+    const f = await fixture();
+    const result = await f.workflow.send(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.accountIdentity;
+    if (status === 'interrupted') legacy.records[0].attempt = { status: 'sending' };
+    if (status === 'sending') legacy.records[0].attempt = { status: 'sending', result: {
+      draftId: result.draftId, locator: result.locator, messageId: '<interrupted@example.com>',
+      status: 'smtp_outcome_unknown', smtpAccepted: null, retrySafe: false, draftCleanup: 'retained', nextAction: 'Inspect delivery',
+    } };
+    if (status === 'unknown') Object.assign(legacy.records[0].attempt.result, {
+      status: 'smtp_outcome_unknown', smtpAccepted: null, accepted: [], sentFolderSaved: false, draftCleanup: 'retained',
+    });
+    const original = JSON.stringify(legacy, null, 4) + '\n';
+    await writeFile(file, original);
+    vi.mocked(f.port.send).mockClear();
+    vi.mocked(f.port.read).mockClear();
+    const preview = await f.store.migrateLegacy(account, account, true);
+    expect(preview).toMatchObject({ status: 'would_migrate', records: 1 });
+    expect(await readFile(file, 'utf8')).toBe(original);
+    expect(await readdir(f.root)).toEqual([file.split(/[\\/]/).at(-1)]);
+    const migration = await f.store.migrateLegacy(account, { ...account, host: account.host.toUpperCase() });
+    expect(migration.status).toBe('migrated');
+    expect(await readFile(migration.backup!, 'utf8')).toBe(original);
+    const migrated = JSON.parse(await readFile(file, 'utf8'));
+    expect(migrated.records).toEqual(legacy.records);
+    expect(migrated.accountIdentity).toMatch(/^[0-9a-f]{64}$/);
+    const restarted = new DraftWorkflow(account, f.port, new DraftStore(account.id, f.root));
+    const replay = await restarted.send(result.draftId);
+    expect(replay).toMatchObject(status === 'interrupted' ? { status: 'smtp_outcome_unknown', retrySafe: false } : legacy.records[0].attempt.result);
+    expect(await restarted.send(locator(1))).toEqual(replay);
+    await expect(restarted.update(result.draftId, { subject: 'repeat' })).rejects.toThrow('delivery');
+    expect(f.port.send).not.toHaveBeenCalled();
+    expect(f.port.read).not.toHaveBeenCalled();
+    const bound = await readFile(file, 'utf8');
+    expect(await f.store.migrateLegacy(account, account)).toEqual({ status: 'already_bound', records: 1 });
+    expect(await readFile(file, 'utf8')).toBe(bound);
+  });
+
+  it('retains pending legacy replacements and refuses changed or mixed mailbox evidence without rewriting', async () => {
+    const f = await fixture();
+    await f.workflow.adopt(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.accountIdentity;
+    legacy.records[0].pending = { original: locator(1), locator: locator(2), hash: 'a'.repeat(64) };
+    const original = JSON.stringify(legacy);
+    await writeFile(file, original);
+    await expect(f.store.migrateLegacy(account, { ...account, user: 'other@example.com' })).rejects.toThrow('identities differ');
+    await expect(f.store.migrateLegacy(account, { ...account, port: 143 })).rejects.toThrow('identities differ');
+    expect(await readFile(file, 'utf8')).toBe(original);
+    legacy.records[0].pending.locator = encodeMessageLocator({ accountId: 'other', mailbox: 'Drafts', uidValidity: '1', uid: 2 });
+    const mixed = JSON.stringify(legacy);
+    await writeFile(file, mixed);
+    await expect(f.store.migrateLegacy(account, account)).rejects.toThrow('different account id');
+    expect(await readFile(file, 'utf8')).toBe(mixed);
+    legacy.records[0].pending.locator = locator(2);
+    await writeFile(file, original);
+    await f.store.migrateLegacy(account, account);
+    expect(JSON.parse(await readFile(file, 'utf8')).records).toEqual(legacy.records);
+    await expect(f.workflow.send(locator(1))).rejects.toThrow('pending cleanup');
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+
+  it('binds empty legacy state during the first routine draft operation', async () => {
+    const f = await fixture();
+    await f.store.run(async (state, save) => { state.records = []; await save(); });
+    const id = await f.workflow.adopt(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    expect(JSON.parse(await readFile(file, 'utf8')).accountIdentity).toMatch(/^[0-9a-f]{64}$/);
+    await new DraftWorkflow(account, f.port, new DraftStore(account.id, f.root)).send(id);
+    expect(f.port.send).toHaveBeenCalledOnce();
+  });
+
+  it('refuses an inconsistent backup and resumes safely with an exact original backup', async () => {
+    const f = await fixture();
+    await f.workflow.adopt(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.accountIdentity;
+    const original = JSON.stringify(legacy);
+    await writeFile(file, original);
+    const preview = await f.store.migrateLegacy(account, account, true);
+    await writeFile(preview.backup!, 'incomplete backup');
+    await expect(f.store.migrateLegacy(account, account)).rejects.toThrow('backup differs');
+    expect(await readFile(file, 'utf8')).toBe(original);
+    await writeFile(preview.backup!, original);
+    expect(await f.store.migrateLegacy(account, account)).toMatchObject({ status: 'migrated', backup: preview.backup });
+    const bound = await readFile(file, 'utf8');
+    const replacement = { ...account, host: 'replacement.example.test' };
+    await expect(f.store.migrateLegacy(replacement, replacement)).rejects.toThrow('different mailbox identity');
+    expect(await readFile(file, 'utf8')).toBe(bound);
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+
+  it('backs up original bytes even when legacy JSON contains invalid UTF-8 in a string', async () => {
+    const f = await fixture();
+    await f.workflow.adopt(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.accountIdentity;
+    legacy.records[0].messageIds = ['<BYTE_MARKER@example.com>'];
+    const original = Buffer.from(JSON.stringify(legacy));
+    original[original.indexOf('BYTE_MARKER')] = 0xff;
+    await writeFile(file, original);
+    const migration = await f.store.migrateLegacy(account, account);
+    expect((await readFile(migration.backup!)).equals(original)).toBe(true);
+    expect(JSON.parse(await readFile(file, 'utf8')).records).toEqual(JSON.parse(original.toString('utf8')).records);
+  });
+
+  it('refuses old state after account replacement even when mailbox UIDs collide', async () => {
+    const f = await fixture();
+    const id = await f.workflow.adopt(locator(1), (await simpleParser(f.raw)).messageId);
+    const replacement = new DraftWorkflow({ ...account, host: 'new.example.test', user: 'other@example.test' }, f.port, new DraftStore(account.id, f.root));
+    f.messages.set(locator(1), replaceHeaders(f.raw, { To: 'unrelated@example.test', 'Message-ID': '<unrelated>' }));
+    await expect(replacement.send(id)).rejects.toThrow('mailbox identity');
+    await expect(replacement.update(locator(1), { subject: 'Change' })).rejects.toThrow('mailbox identity');
+    expect(f.port.read).not.toHaveBeenCalled();
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+
+  it('refuses unrelated content at a still-readable historical locator', async () => {
+    const f = await fixture();
+    const id = await f.workflow.adopt(locator(1), (await simpleParser(f.raw)).messageId);
+    f.messages.set(locator(1), replaceHeaders(f.raw, { To: 'unrelated@example.test', 'Message-ID': '<unrelated>' }));
+    await expect(f.workflow.send(id)).rejects.toThrow('missing or ambiguous');
+    expect(f.port.send).not.toHaveBeenCalled();
+    f.messages.set(locator(9), f.raw);
+    await f.workflow.send(id);
+    expect(vi.mocked(f.port.send).mock.calls[0][1].envelope.to).not.toContain('unrelated@example.test');
+  });
+
+  it('preserves unbound legacy records for explicit migration instead of guessing an identity', async () => {
+    const f = await fixture();
+    const id = await f.workflow.adopt(locator(1));
+    const file = (f.store as unknown as { file: string }).file;
+    const legacy = JSON.parse(await readFile(file, 'utf8'));
+    delete legacy.accountIdentity;
+    const original = JSON.stringify(legacy);
+    await writeFile(file, original, 'utf8');
+    await expect(f.workflow.send(id)).rejects.toThrow('unverified mailbox identity');
+    expect(await readFile(file, 'utf8')).toBe(original);
+    expect(f.port.send).not.toHaveBeenCalled();
+  });
+
+  it('allows another replacement after a definite APPEND rejection but retains unknown-outcome protection', async () => {
+    const { AppendNotSavedError } = await import('../protocol/imap.js');
+    const f = await fixture();
+    vi.mocked(f.port.append).mockRejectedValueOnce(new AppendNotSavedError('Quota exceeded'));
+    await expect(f.workflow.update(locator(1), { subject: 'Changed' })).rejects.toThrow('Quota exceeded');
+    await expect(f.workflow.update(locator(1), { subject: 'Changed' })).resolves.toMatchObject({ status: 'draft_updated' });
+    const uncertain = await fixture();
+    vi.mocked(uncertain.port.append).mockRejectedValueOnce(new Error('Connection lost after upload'));
+    await expect(uncertain.workflow.update(locator(1), { subject: 'Changed' })).rejects.toThrow('Connection lost');
+    await expect(uncertain.workflow.update(locator(1), { subject: 'Changed' })).rejects.toThrow('pending cleanup');
+    expect(uncertain.port.append).toHaveBeenCalledOnce();
+  });
+  it('updates and sends a MIME draft with a comma in its quoted recipient name', async () => {
+    const f = await fixture();
+    f.messages.set(locator(1), replaceHeaders(f.raw, { To: '"Doe, Jane" <jane@example.com>' }));
+    const updated = await f.workflow.update(locator(1), { subject: 'Changed' });
+    await f.workflow.send(updated.draftId);
+    expect(vi.mocked(f.port.send).mock.calls[0][1].envelope.to).toContain('jane@example.com');
+  });
   it('matches Tencent rewritten IDs only with matching content and a bounded date', async () => {
     const f = await fixture(); const now = new Date(); const id = '<test@example.com>';
     const raw = replaceHeaders(f.raw, { 'Message-ID': id, Date: now.toUTCString() });

@@ -17,7 +17,7 @@
  */
 
 import * as tls from 'node:tls';
-import { EventEmitter } from 'node:events';
+import { isIP } from 'node:net';
 
 export interface SieveScript {
   name: string;
@@ -25,18 +25,21 @@ export interface SieveScript {
 }
 
 const CONNECTION_TIMEOUT_MS = 10_000;
+interface SieveResponse { raw: Buffer; terminal: string; text: string }
 
 export class SieveClient {
-  private socket: (tls.TLSSocket & EventEmitter) | null = null;
-  private buffer = '';
+  private socket: tls.TLSSocket | null = null;
+  private buffer: Buffer = Buffer.alloc(0);
+  private failure?: Error;
   /** Resolvers waiting for the next complete response */
-  private waiters: Array<(buf: string) => void> = [];
+  private waiters: Array<{ resolve: (response: SieveResponse) => void; reject: (error: Error) => void }> = [];
 
   constructor(
     private readonly host: string,
     private readonly port: number,
     private readonly user: string,
     private readonly password: string,
+    private readonly options: { ca?: tls.ConnectionOptions['ca']; timeoutMs?: number } = {},
   ) {}
 
   // ---------------------------------------------------------------------------
@@ -44,11 +47,18 @@ export class SieveClient {
   // ---------------------------------------------------------------------------
 
   async connect(): Promise<void> {
-    await this._tlsConnect();
-    // Read server greeting
-    await this._readResponse();
-    // Authenticate
-    await this._authenticate();
+    this.failure = undefined;
+    this.buffer = Buffer.alloc(0);
+    try {
+      await this._tlsConnect();
+      // Read server greeting
+      await this._readResponse();
+      // Authenticate
+      await this._authenticate();
+    } catch (error) {
+      this._fail(error instanceof Error ? error : new Error(String(error)));
+      throw error;
+    }
   }
 
   async disconnect(): Promise<void> {
@@ -59,10 +69,10 @@ export class SieveClient {
     } catch {
       // Ignore errors during logout
     } finally {
-      this.socket.destroy();
+      this.socket?.destroy();
       this.socket = null;
-      this.buffer = '';
-      this.waiters = [];
+      this.buffer = Buffer.alloc(0);
+      this._fail(new Error('ManageSieve disconnected'));
     }
   }
 
@@ -102,18 +112,22 @@ export class SieveClient {
   private _tlsConnect(): Promise<void> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new Error(
+        const error = new Error(
           'ManageSieve not supported by this server (connection timeout). ' +
           'SIEVE filters require ManageSieve (RFC 5804), typically available on ' +
           'self-hosted servers but not on Gmail or Outlook.'
-        ));
-      }, CONNECTION_TIMEOUT_MS);
+        );
+        reject(error);
+        this._fail(error);
+      }, this.options.timeoutMs ?? CONNECTION_TIMEOUT_MS);
 
       const sock = tls.connect(
         {
           host: this.host,
           port: this.port,
-          rejectUnauthorized: false, // self-signed certs common on self-hosted servers
+          rejectUnauthorized: true,
+          servername: isIP(this.host) ? undefined : this.host,
+          ...(this.options.ca ? { ca: this.options.ca } : {}),
         },
         () => {
           clearTimeout(timer);
@@ -123,7 +137,11 @@ export class SieveClient {
 
       // Accumulate incoming data into our buffer
       sock.on('data', (chunk: string | Buffer) => {
-        this.buffer += typeof chunk === 'string' ? chunk : chunk.toString('utf-8');
+        this.buffer = Buffer.concat([this.buffer, Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)]);
+        if (this.buffer.length > 16 * 1024 * 1024) {
+          this._fail(new Error('ManageSieve response exceeds 16 MiB'));
+          return;
+        }
         this._drainWaiters();
       });
 
@@ -139,9 +157,16 @@ export class SieveClient {
         } else {
           reject(err);
         }
+        this._fail(err);
       });
 
-      this.socket = sock as unknown as (tls.TLSSocket & EventEmitter);
+      sock.on('close', () => {
+        clearTimeout(timer);
+        const error = new Error('ManageSieve connection closed');
+        reject(error);
+        this._fail(error);
+      });
+      this.socket = sock;
     });
   }
 
@@ -158,7 +183,8 @@ export class SieveClient {
   // ---------------------------------------------------------------------------
 
   private _assertConnected(): void {
-    if (!this.socket) {
+    if (this.failure) throw this.failure;
+    if (!this.socket || this.socket.destroyed) {
       throw new Error('SieveClient: not connected. Call connect() first.');
     }
   }
@@ -171,24 +197,16 @@ export class SieveClient {
    * Resolves when a complete response is available in the buffer.
    * Throws on NO or BYE responses.
    */
-  private _readResponse(): Promise<string> {
+  private _readResponse(): Promise<Buffer> {
+    if (this.failure) return Promise.reject(this.failure);
     return new Promise((resolve, reject) => {
-      const waiter = (full: string) => {
-        const termMatch = full.match(/^(OK|NO|BYE)[^\r\n]*/im);
-        if (!termMatch) {
-          resolve(full);
-          return;
-        }
-        const terminal = termMatch[1].toUpperCase();
-        if (terminal === 'NO' || terminal === 'BYE') {
-          // Extract message from last line
-          const lines = full.trimEnd().split('\r\n');
-          const lastLine = lines[lines.length - 1];
-          const msgMatch = lastLine.match(/^(?:NO|BYE)\s+"?([^"]*)"?/i);
-          const msg = msgMatch?.[1] ?? lastLine;
-          reject(new Error(msg || `ManageSieve error: ${terminal}`));
+      const timer = setTimeout(() => this._fail(new Error('ManageSieve response timeout')), this.options.timeoutMs ?? CONNECTION_TIMEOUT_MS);
+      const waiter = (response: SieveResponse) => {
+        clearTimeout(timer);
+        if (response.terminal === 'NO' || response.terminal === 'BYE') {
+          reject(new Error(response.text || `ManageSieve error: ${response.terminal}`));
         } else {
-          resolve(full);
+          resolve(response.raw);
         }
       };
 
@@ -197,7 +215,7 @@ export class SieveClient {
       if (result !== null) {
         waiter(result);
       } else {
-        this.waiters.push(waiter);
+        this.waiters.push({ resolve: waiter, reject: error => { clearTimeout(timer); reject(error); } });
       }
     });
   }
@@ -211,7 +229,7 @@ export class SieveClient {
       const result = this._tryConsumeResponse();
       if (result === null) break;
       const waiter = this.waiters.shift()!;
-      waiter(result);
+      waiter.resolve(result);
     }
   }
 
@@ -221,45 +239,43 @@ export class SieveClient {
    * May contain literal strings: {N}\r\n followed by N bytes.
    * Returns null if the response is not yet complete.
    */
-  private _tryConsumeResponse(): string | null {
+  private _tryConsumeResponse(): SieveResponse | null {
     let pos = 0;
+    let logicalText = '';
+    let terminal = '';
+    let continuing = false;
     const buf = this.buffer;
-
     while (pos < buf.length) {
       const lineEnd = buf.indexOf('\r\n', pos);
-      if (lineEnd === -1) {
-        // Incomplete line
-        return null;
-      }
-
-      const line = buf.slice(pos, lineEnd);
-      const nextPos = lineEnd + 2;
-
-      // Check for literal string: {N} or {N+}
-      const literalMatch = line.match(/^\{(\d+)\+?\}$/);
-      if (literalMatch) {
-        const byteCount = parseInt(literalMatch[1], 10);
-        if (nextPos + byteCount > buf.length) {
-          // Literal not fully received yet
+      if (lineEnd === -1) return null;
+      const segment = buf.subarray(pos, lineEnd).toString('utf8');
+      if (!continuing) terminal = segment.match(/^(OK|NO|BYE)(?:\s|$)/i)?.[1].toUpperCase() ?? '';
+      const next = lineEnd + 2;
+      // Literals can follow a status token or another string, not only occupy
+      // a whole line. Their embedded CRLF and status words are opaque payload.
+      const literal = segment.match(/(?:^| )\{(\d+)\+?\}$/);
+      if (literal) {
+        const length = Number(literal[1]);
+        if (!Number.isSafeInteger(length) || length > 16 * 1024 * 1024) {
+          this._fail(new Error('ManageSieve literal exceeds 16 MiB'));
           return null;
         }
-        // Skip past the literal data
-        pos = nextPos + byteCount;
+        if (next + length > buf.length) return null;
+        logicalText += segment.slice(0, literal.index) + buf.subarray(next, next + length).toString('utf8');
+        pos = next + length;
+        continuing = true;
         continue;
       }
-
-      // Check for terminal lines
-      const termMatch = line.match(/^(OK|NO|BYE)(?:\s|$)/i);
-      if (termMatch) {
-        const consumed = nextPos;
-        const full = buf.slice(0, consumed);
-        this.buffer = buf.slice(consumed);
-        return full;
+      logicalText += segment;
+      if (terminal) {
+        const raw = buf.subarray(0, next);
+        this.buffer = buf.subarray(next);
+        return { raw, terminal, text: logicalText };
       }
-
-      pos = nextPos;
+      pos = next;
+      logicalText = '';
+      continuing = false;
     }
-
     return null;
   }
 
@@ -267,34 +283,65 @@ export class SieveClient {
   // Private — response parsers
   // ---------------------------------------------------------------------------
 
-  private _parseScriptList(response: string): SieveScript[] {
+  private _parseScriptList(response: Buffer): SieveScript[] {
     const scripts: SieveScript[] = [];
-    const lines = response.split('\r\n');
-    for (const line of lines) {
-      // Lines: "scriptname" ACTIVE  or  "scriptname"
-      const match = line.match(/^"([^"]+)"(\s+ACTIVE)?/i);
-      if (match) {
-        scripts.push({
-          name: match[1],
-          active: Boolean(match[2]),
-        });
-      }
+    let position = 0;
+    while (position < response.length) {
+      if (/^OK(?:[ (\r]|$)/i.test(response.toString('utf8', position, position + 4))) break;
+      const token = this._parseString(response, position);
+      const end = response.indexOf('\r\n', token.end);
+      if (end < 0) throw new Error('Unexpected LISTSCRIPTS response format');
+      const suffix = response.toString('utf8', token.end, end).trim();
+      if (suffix && suffix.toUpperCase() !== 'ACTIVE') throw new Error('Unexpected LISTSCRIPTS marker');
+      scripts.push({ name: token.value, active: Boolean(suffix) });
+      position = end + 2;
     }
     return scripts;
   }
 
-  private _parseLiteralContent(response: string): string {
-    // Response: {N}\r\n<N bytes>\r\nOK\r\n
-    const literalMatch = response.match(/^\{(\d+)\}\r\n/);
-    if (!literalMatch) {
-      throw new Error('Unexpected GETSCRIPT response format');
+  private _parseLiteralContent(response: Buffer): string {
+    const token = this._parseString(response, 0);
+    if (response.toString('ascii', token.end, token.end + 2) !== '\r\n') throw new Error('Unexpected GETSCRIPT response format');
+    return token.value;
+  }
+
+  private _parseString(response: Buffer, start: number): { value: string; end: number } {
+    if (response[start] === 0x22) {
+      const bytes: number[] = [];
+      for (let position = start + 1; position < response.length; position++) {
+        let byte = response[position];
+        if (byte === 0x22) return { value: Buffer.from(bytes).toString('utf8'), end: position + 1 };
+        if (byte === 0x5c) {
+          byte = response[++position];
+          if (byte !== 0x22 && byte !== 0x5c) throw new Error('Invalid ManageSieve quoted escape');
+        }
+        if (byte === 0 || byte === 10 || byte === 13) throw new Error('Invalid ManageSieve quoted string');
+        bytes.push(byte);
+      }
+    } else if (response[start] === 0x7b) {
+      const lineEnd = response.indexOf('\r\n', start);
+      if (lineEnd >= 0) {
+        const match = /^\{(\d+)\+?\}$/.exec(response.toString('ascii', start, lineEnd));
+        if (match) {
+          const length = Number(match[1]);
+          const end = lineEnd + 2 + length;
+          if (Number.isSafeInteger(length) && length <= 16 * 1024 * 1024 && end <= response.length) {
+            return { value: response.toString('utf8', lineEnd + 2, end), end };
+          }
+        }
+      }
     }
-    const byteCount = parseInt(literalMatch[1], 10);
-    const contentStart = literalMatch[0].length;
-    return response.slice(contentStart, contentStart + byteCount);
+    throw new Error('Unexpected ManageSieve string response format');
   }
 
   private _quoteString(s: string): string {
+    if (/[\r\n\0]/.test(s)) throw new Error('Invalid ManageSieve script name');
     return `"${s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+  }
+
+  private _fail(error: Error): void {
+    this.failure ??= error;
+    for (const waiter of this.waiters.splice(0)) waiter.reject(this.failure);
+    if (this.socket && !this.socket.destroyed) this.socket.destroy();
   }
 }

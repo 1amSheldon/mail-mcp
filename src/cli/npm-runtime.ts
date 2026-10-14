@@ -17,13 +17,14 @@ export async function prepareMailMcpNpxRuntime(home: string = homedir()): Promis
 
 export function buildMailMcpNpxArgs(
   runtimeArgs: readonly string[],
-  home: string = homedir()
+  home: string = homedir(),
+  packageSpec: string = MAIL_MCP_LATEST_SPEC
 ): string[] {
   return [
     ...NPX_RESOLUTION_ARGS,
     '--prefix',
     getMailMcpNpxPrefix(home),
-    `--package=${MAIL_MCP_LATEST_SPEC}`,
+    `--package=${packageSpec}`,
     'mail-mcp',
     ...runtimeArgs,
   ];

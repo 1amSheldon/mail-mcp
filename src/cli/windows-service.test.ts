@@ -50,6 +50,7 @@ describe('managed Windows HTTP service', () => {
     });
 
     expect(supervisor).toContain('@1amsheldon/mail-mcp@latest');
+    expect(supervisor).toContain('@1amsheldon');
     expect(supervisor).toContain('npm-cli.js');
     expect(supervisor).toContain('--ignore-scripts');
     expect(supervisor).not.toContain('npx-cli.js');

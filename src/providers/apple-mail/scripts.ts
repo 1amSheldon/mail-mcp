@@ -338,14 +338,18 @@ function attachmentStatements(variableName: string, attachments: readonly { path
 
 function outgoingBody(input: AppleComposeInput | AppleDraftInput, mode: 'send' | 'draft'): string {
   const account = input.account ? accountSetup(input.account) : '';
-  const sender = input.from
-    ? `set sender of outgoingMessage to ${appleScriptText(input.from)}`
-    : input.account
-      ? 'try\nset sender of outgoingMessage to item 1 of email addresses of selectedAccount\nend try'
-      : '';
+  const senderPreflight = input.account ? `set accountSenders to email addresses of selectedAccount
+  if (count of accountSenders) is 0 then return "{\\\"senderScopeMismatch\\\":true}"
+  set selectedSender to ${input.from ? appleScriptText(input.from) : 'item 1 of accountSenders'}
+  ignoring case
+    if accountSenders does not contain selectedSender then return "{\\\"senderScopeMismatch\\\":true}"
+  end ignoring` : '';
+  const sender = input.account ? 'set sender of outgoingMessage to selectedSender'
+    : input.from ? `set sender of outgoingMessage to ${appleScriptText(input.from)}` : '';
   const visible = mode === 'draft' && 'open' in input && input.open === true;
   return program(`${account}
 tell application "Mail"
+  ${senderPreflight}
   set outgoingMessage to make new outgoing message with properties {subject:${appleScriptText(input.subject)}, content:${appleScriptText(input.body)}, visible:${bool(visible)}}
   ${sender}
   ${recipientStatements('outgoingMessage', 'to', input.to)}
@@ -567,6 +571,7 @@ function ruleDestinationStatements(input: AppleRuleCreateInput['rule'], accountE
 export function createRuleScript(input: AppleRuleCreateInput): string {
   return program(`${accountSetup(input.account)}
 tell application "Mail"
+  if (count of (every rule whose name is ${appleScriptText(input.rule.name)})) is not 0 then error "Rule name already exists" number -1700
   set selectedRule to make new rule with properties ${ruleProperties(input.rule)}
   ${ruleConditionStatements(input.rule.conditions)}
   ${ruleDestinationStatements(input.rule, appleScriptText(input.account))}
@@ -602,6 +607,7 @@ export function updateRuleScript(input: AppleRuleUpdateInput): string {
 tell application "Mail"
   set matches to every rule whose name is ${appleScriptText(input.name)}
   if (count of matches) is 0 then error "Rule not found: " & ${appleScriptText(input.name)} number -1728
+  if (count of matches) is not 1 then error "Rule name is ambiguous" number -1700
   set selectedRule to item 1 of matches
   ${assignments.join('\n')}
 end tell
@@ -613,6 +619,7 @@ export function deleteRuleScript(input: AppleRuleDeleteInput): string {
 tell application "Mail"
   set matches to every rule whose name is ${appleScriptText(input.name)}
   if (count of matches) is 0 then error "Rule not found" number -1728
+  if (count of matches) is not 1 then error "Rule name is ambiguous" number -1700
   delete item 1 of matches
 end tell
 return "{\"ok\":true,\"operation\":\"deleteRule\"}"`);

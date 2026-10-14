@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'smol-toml';
@@ -14,6 +14,34 @@ import {
 import { buildMailMcpNpxArgs } from './npm-runtime.js';
 
 describe('installCodex', () => {
+  it('does not inspect an unreadable skill path when skill installation is skipped', async () => {
+    const home = join(tempDir, 'skip-home');
+    const malformed = join(home, 'skills', 'mail-mcp', 'SKILL.md');
+    await mkdir(malformed, { recursive: true });
+    const bundle = await installCodexBundle(join(home, 'config.toml'), home, {
+      transport: 'stdio', npxArgs: ['mail-mcp'], skipSkill: true,
+    });
+    expect(bundle.skill).toMatchObject({ changed: false, skipped: expect.any(String) });
+    await bundle.rollback();
+  });
+  it('preserves a shared skill junction, including bundle rollback', async () => {
+    const home = join(tempDir, 'linked-home');
+    const target = join(tempDir, 'shared-skill');
+    const link = join(home, 'skills', 'mail-mcp');
+    await mkdir(target, { recursive: true });
+    await mkdir(join(home, 'skills'), { recursive: true });
+    await writeFile(join(target, 'SKILL.md'), 'shared instructions');
+    await symlink(target, link, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      expect(await installCodexSkill(home)).toMatchObject({ changed: false, skipped: expect.stringContaining('linked') });
+      const bundle = await installCodexBundle(join(home, 'config.toml'), home, { transport: 'stdio', npxArgs: ['mail-mcp'] });
+      await writeFile(join(target, 'SKILL.md'), 'concurrent shared update');
+      await bundle.rollback();
+      expect(await readFile(join(target, 'SKILL.md'), 'utf8')).toBe('concurrent shared update');
+    } finally {
+      await unlink(link);
+    }
+  });
   let tempDir: string;
   let configPath: string;
   const runtimeArgs = ['--confirm', '--audit-log', '--redact'];
@@ -135,6 +163,26 @@ describe('installCodex', () => {
     expect(updated).toContain('[mcp_servers.mail]\r\ncommand = "npx"');
   });
 
+  it.each(['"""', "'''"])('preserves apparent table headers inside multiline %s strings', delimiter => {
+    const source = ['instructions = ' + delimiter, '[mcp_servers.mail]', 'command = "example, not config"',
+      '[features]', delimiter, '', '[mcp_servers.mail]', 'command = "old"',
+      'notes = ' + delimiter, '[features.fake]', delimiter, '', '[features]', 'enabled = true', '',
+    ].join('\n');
+    const updated = upsertCodexServer(source, ['mail-mcp']);
+    const before = parse(source), after = parse(updated);
+    expect(after.instructions).toBe(before.instructions);
+    expect(after.features).toEqual(before.features);
+    expect((after.mcp_servers as any).mail.command).toBe('npx');
+  });
+
+  it('preserves BOM, CRLF and quoted keys with Unicode escapes', () => {
+    const source = '\uFEFFinstructions = "literal \\\" text" # """\r\n["mcp_servers" . "m\\u0061il"]\r\ncommand = "old"\r\n[features]\r\nenabled = true\r\n';
+    const updated = upsertCodexServer(source, ['mail-mcp']);
+    expect(updated.startsWith('\uFEFF')).toBe(true);
+    expect(updated).not.toContain('command = "old"');
+    expect(updated).toContain('[features]\r\nenabled = true');
+  });
+
   it('does not rewrite an unchanged config', async () => {
     const npxArgs = buildMailMcpNpxArgs(['--confirm'], tempDir);
     await installCodex(configPath, npxArgs);
@@ -159,7 +207,7 @@ describe('installCodex', () => {
     const first = await installCodexSkill(codexHome);
     const installed = await readFile(first.skillPath, 'utf8');
 
-    expect(first).toEqual({
+    expect(first).toMatchObject({
       skillPath: join(codexHome, 'skills', 'mail-mcp', 'SKILL.md'),
       changed: true,
     });
@@ -172,7 +220,8 @@ describe('installCodex', () => {
     });
 
     await writeFile(first.skillPath, 'local customization\n', 'utf8');
-    const updated = await installCodexSkill(codexHome);
+    expect((await installCodexSkill(codexHome)).changed).toBe(false);
+    const updated = await installCodexSkill(codexHome, { replaceExisting: true });
     expect(await readFile(updated.backupPath!, 'utf8')).toBe('local customization\n');
     expect(await readFile(updated.skillPath, 'utf8')).toBe(installed);
   });
@@ -188,6 +237,7 @@ describe('installCodex', () => {
 
     await expect(installCodexBundle(configPath, codexHome, {
       transport: 'stdio',
+      replaceSkill: true,
       npxArgs: buildMailMcpNpxArgs(runtimeArgs, tempDir),
     })).rejects.toThrow(/Invalid existing Codex config/);
 
@@ -208,6 +258,7 @@ describe('installCodex', () => {
 
     const bundle = await installCodexBundle(configPath, codexHome, {
       transport: 'http',
+      replaceSkill: true,
       options: {
         url: 'http://127.0.0.1:8765/mcp',
         bearerTokenEnvVar: 'MAIL_MCP_BEARER_TOKEN',

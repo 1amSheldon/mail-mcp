@@ -49,25 +49,18 @@ export function isVersionNewer(candidate: string, current: string): boolean {
 }
 
 export async function fetchLatestPackageVersion(): Promise<string> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), UPDATE_REQUEST_TIMEOUT_MS);
-  timeout.unref();
-  try {
-    const response = await fetch(NPM_LATEST_URL, {
-      headers: { accept: 'application/json' },
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      throw new Error(`npm registry returned HTTP ${response.status}`);
-    }
-    const body = await response.json() as { version?: unknown };
-    if (typeof body.version !== 'string' || !parseVersion(body.version)) {
-      throw new Error('npm registry returned an invalid package version');
-    }
-    return body.version;
-  } finally {
-    clearTimeout(timeout);
+  const response = await fetch(NPM_LATEST_URL, {
+    headers: { accept: 'application/json' },
+    signal: AbortSignal.timeout(UPDATE_REQUEST_TIMEOUT_MS),
+  });
+  if (!response.ok) {
+    throw new Error(`npm registry returned HTTP ${response.status}`);
   }
+  const body = await response.json() as { version?: unknown };
+  if (typeof body.version !== 'string' || !parseVersion(body.version)) {
+    throw new Error('npm registry returned an invalid package version');
+  }
+  return body.version;
 }
 
 export function startAutoUpdateMonitor(
@@ -91,6 +84,7 @@ export function startAutoUpdateMonitor(
     if (stopped) return;
     try {
       const latestVersion = await fetchLatestVersion();
+      if (stopped) return;
       if (isVersionNewer(latestVersion, options.currentVersion)) {
         stopped = true;
         await options.onUpdateAvailable(latestVersion);
